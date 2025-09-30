@@ -24,6 +24,7 @@ from database.data_collector import (
     stop_all_data_collection,
     data_collection_managers
 )
+from database.sqlite_meta import SQLiteMeta
 
 router = APIRouter()
 
@@ -279,4 +280,41 @@ async def get_data_collection_stats():
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"통계 조회 오류: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"통계 조회 오류: {str(e)}")
+
+@router.get("/user-survey/{user_id}")
+async def get_user_survey(user_id: int):
+    """사용자 설문지 응답을 조회합니다."""
+    try:
+        db = SQLiteMeta()
+        survey_data = db.get_user_survey_response(user_id)
+        
+        if survey_data:
+            return {
+                "success": True,
+                "survey_data": survey_data,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        else:
+            return {
+                "success": False,
+                "message": "설문지 응답을 찾을 수 없습니다.",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"설문지 조회 오류: {str(e)}")
+
+@router.get("/user-survey/{user_id}/completed")
+async def check_survey_completed(user_id: int):
+    """사용자가 설문지를 완료했는지 확인합니다."""
+    try:
+        db = SQLiteMeta()
+        completed = db.has_user_completed_survey(user_id)
+        
+        return {
+            "success": True,
+            "completed": completed,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"설문지 완료 여부 확인 오류: {str(e)}") 

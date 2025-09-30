@@ -20,11 +20,11 @@ class FolderSelector:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("JAVIS - 폴더 선택")
-        self.root.geometry('850x750')
         self.root.configure(bg='#f8fafc')
         self.root.resizable(True, True)
         self.root.minsize(750, 650)
         
+        # 창을 화면 중앙에 배치 (geometry 설정 전에)
         self.center_window()
         self.setup_korean_fonts()
         
@@ -46,16 +46,23 @@ class FolderSelector:
     
     def center_window(self):
         """창을 화면 중앙에 배치"""
-        self.root.update_idletasks()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
+        # 창 크기 설정
+        window_width = 850
+        window_height = 750
+        
+        # 화면 중앙 계산
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        x = int((screen_width - width) / 2)
-        y = int((screen_height - height) / 2)
+        
+        x = int((screen_width - window_width) / 2)
+        y = int((screen_height - window_height) / 2)
+        
+        # 화면 경계 내에 위치하도록 조정
         x = max(0, x)
         y = max(0, y)
-        self.root.geometry(f'{width}x{height}+{x}+{y}')
+        
+        # 창 크기와 위치를 한 번에 설정
+        self.root.geometry(f'{window_width}x{window_height}+{x}+{y}')
         self.root.lift()
         self.root.attributes('-topmost', True)
         self.root.after_idle(lambda: self.root.attributes('-topmost', False))

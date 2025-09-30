@@ -315,6 +315,31 @@ def wait_for_backend_server():
     print("❌ 백엔드 서버 시작 시간 초과")
     return False
 
+def perform_user_survey():
+    """사용자 설문지를 실행합니다."""
+    print("\n📋 사용자 설문지를 시작합니다...")
+    
+    try:
+        from frontend.survey_dialog import show_survey_dialog
+        
+        # 설문지 다이얼로그 실행
+        user_id = 1  # 기본 사용자 ID
+        success = show_survey_dialog(user_id)
+        
+        if success:
+            print("✅ 설문지가 완료되었습니다.")
+            return True
+        else:
+            print("❌ 설문지가 취소되었습니다.")
+            return False
+        
+    except ImportError as e:
+        print(f"❌ 설문지 UI 모듈 import 오류: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ 설문지 실행 중 오류: {e}")
+        return False
+
 def perform_folder_selection():
     """폴더 선택 UI를 실행합니다."""
     print("\n📁 폴더 선택을 시작합니다...")
@@ -567,13 +592,20 @@ def main():
             logger.error("백엔드 서버 시작에 실패했습니다.")
             break
         
-        # 백엔드 서버가 시작된 후 폴더 선택 수행
+        # 백엔드 서버가 시작된 후 설문지 수행
         print("⏳ 백엔드 서버 시작을 기다리는 중...")
         if not wait_for_backend_server():
             print("❌ 백엔드 서버 시작에 실패했습니다.")
             backend_process.terminate()
             break
         
+        # 사용자 설문지 실행
+        if not perform_user_survey():
+            print("❌ 설문지가 취소되었습니다. 시스템을 종료합니다.")
+            backend_process.terminate()
+            break
+        
+        # 폴더 선택 수행
         if not perform_folder_selection():
             print("❌ 폴더 선택이 취소되었습니다. 시스템을 종료합니다.")
             backend_process.terminate()

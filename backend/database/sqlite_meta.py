@@ -218,6 +218,21 @@ class SQLiteMeta:
                 )
             """)
             
+            # 사용자 설문지 응답 테이블 추가
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_survey_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    job_field TEXT,  -- 직업/활동 분야
+                    job_field_other TEXT,  -- 기타 직업 직접 입력
+                    interests TEXT,  -- 관심 주제들 (JSON as TEXT)
+                    help_preferences TEXT,  -- 도움 받고 싶은 영역들 (JSON as TEXT)
+                    custom_keywords TEXT,  -- 사용자 정의 키워드
+                    submitted_at INTEGER,
+                    created_at INTEGER
+                )
+            """)
+            
             # 인덱스 생성
             conn.execute("CREATE INDEX IF NOT EXISTS idx_web_history_visited_at ON web_history(visited_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_apps_started_at ON apps(started_at)")
@@ -719,4 +734,70 @@ class SQLiteMeta:
                 return True
         except Exception as e:
             logger.error(f"파일 해시 업데이트 오류: {e}")
+            return False
+    
+    # === 설문지 응답 관련 메서드들 ===
+    
+    def insert_survey_response(self, user_id: int, survey_data: Dict[str, Any]) -> bool:
+        """설문지 응답 저장"""
+        try:
+            import json
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO user_survey_responses 
+                    (user_id, job_field, job_field_other, interests, help_preferences, 
+                     custom_keywords, submitted_at, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    user_id,
+                    survey_data.get('job_field', ''),
+                    survey_data.get('job_field_other', ''),
+                    json.dumps(survey_data.get('interests', [])),
+                    json.dumps(survey_data.get('help_preferences', [])),
+                    survey_data.get('custom_keywords', ''),
+                    int(datetime.now().timestamp()),
+                    int(datetime.now().timestamp())
+                ))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"설문지 응답 저장 오류: {e}")
+            return False
+    
+    def get_user_survey_response(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """사용자 설문지 응답 조회"""
+        try:
+            import json
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT * FROM user_survey_responses 
+                    WHERE user_id = ? 
+                    ORDER BY submitted_at DESC 
+                    LIMIT 1
+                """, (user_id,))
+                row = cursor.fetchone()
+                if row:
+                    result = dict(row)
+                    # JSON 문자열을 파이썬 객체로 변환
+                    result['interests'] = json.loads(result['interests']) if result['interests'] else []
+                    result['help_preferences'] = json.loads(result['help_preferences']) if result['help_preferences'] else []
+                    return result
+                return None
+        except Exception as e:
+            logger.error(f"설문지 응답 조회 오류: {e}")
+            return None
+    
+    def has_user_completed_survey(self, user_id: int) -> bool:
+        """사용자가 설문지를 완료했는지 확인"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT 1 FROM user_survey_responses 
+                    WHERE user_id = ? 
+                    LIMIT 1
+                """, (user_id,))
+                return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"설문지 완료 여부 확인 오류: {e}")
             return False

@@ -23,8 +23,11 @@ class RecommendationAgent(BaseAgent):
             return {**state, "answer": "질문이 제공되지 않았습니다.", "evidence": []}
         
         try:
-            # 간단한 추천 관련 응답
-            response_content = f"추천 에이전트가 '{question}' 요청을 처리했습니다. 현재는 기본 응답만 제공합니다."
+            # 사용자 설문지 데이터 가져오기
+            survey_data = self._get_user_survey_data(user_id)
+            
+            # 설문지 데이터를 기반으로 개인화된 추천 생성
+            response_content = self._generate_personalized_recommendation(question, survey_data)
             
             return {
                 **state,
@@ -34,7 +37,8 @@ class RecommendationAgent(BaseAgent):
                 "metadata": {
                     "query": question,
                     "user_id": user_id,
-                    "agent_type": "recommendation"
+                    "agent_type": "recommendation",
+                    "survey_data_used": survey_data is not None
                 }
             }
         except Exception as e:
@@ -44,6 +48,115 @@ class RecommendationAgent(BaseAgent):
                 "evidence": [],
                 "agent_type": "recommendation"
             }
+    
+    def _get_user_survey_data(self, user_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        """사용자의 설문지 데이터를 가져옵니다."""
+        if not user_id:
+            return None
+        
+        try:
+            return self.sqlite_meta.get_user_survey_response(user_id)
+        except Exception as e:
+            print(f"설문지 데이터 조회 오류: {e}")
+            return None
+    
+    def _generate_personalized_recommendation(self, question: str, survey_data: Optional[Dict[str, Any]]) -> str:
+        """설문지 데이터를 기반으로 개인화된 추천을 생성합니다."""
+        if not survey_data:
+            return f"추천 에이전트가 '{question}' 요청을 처리했습니다. 개인화된 추천을 위해 초기 설문지를 완료해주세요."
+        
+        # 설문지 데이터에서 정보 추출
+        job_field = survey_data.get('job_field', '')
+        job_field_other = survey_data.get('job_field_other', '')
+        interests = survey_data.get('interests', [])
+        help_preferences = survey_data.get('help_preferences', [])
+        custom_keywords = survey_data.get('custom_keywords', '')
+        
+        # 직업 분야에 따른 맞춤형 추천
+        job_recommendations = self._get_job_based_recommendations(job_field, job_field_other)
+        
+        # 관심사에 따른 추천
+        interest_recommendations = self._get_interest_based_recommendations(interests)
+        
+        # 도움 받고 싶은 영역에 따른 추천
+        help_recommendations = self._get_help_based_recommendations(help_preferences)
+        
+        # 사용자 정의 키워드 활용
+        keyword_recommendations = self._get_keyword_based_recommendations(custom_keywords)
+        
+        # 모든 추천을 종합하여 응답 생성
+        response_parts = []
+        
+        if job_recommendations:
+            response_parts.append(f"📋 {job_field} 분야 관련: {job_recommendations}")
+        
+        if interest_recommendations:
+            response_parts.append(f"🎯 관심사 기반: {interest_recommendations}")
+        
+        if help_recommendations:
+            response_parts.append(f"💡 도움 영역: {help_recommendations}")
+        
+        if keyword_recommendations:
+            response_parts.append(f"🔍 맞춤 키워드: {keyword_recommendations}")
+        
+        if not response_parts:
+            return f"'{question}'에 대한 개인화된 추천을 준비했습니다. 설문지 정보를 바탕으로 맞춤형 제안을 드릴 수 있습니다."
+        
+        return f"'{question}'에 대한 개인화된 추천입니다:\n\n" + "\n\n".join(response_parts)
+    
+    def _get_job_based_recommendations(self, job_field: str, job_field_other: str) -> str:
+        """직업 분야에 따른 추천을 생성합니다."""
+        job_recommendations = {
+            "student": "학습 자료, 연구 논문, 학술 자료를 추천드릴 수 있습니다.",
+            "developer": "최신 기술 트렌드, 개발 도구, 프로그래밍 자료를 추천드릴 수 있습니다.",
+            "designer": "디자인 트렌드, 창작 영감, 디자인 도구를 추천드릴 수 있습니다.",
+            "planner": "비즈니스 전략, 마케팅 자료, 기획 도구를 추천드릴 수 있습니다.",
+            "researcher": "연구 자료, 학술 논문, 실험 데이터를 추천드릴 수 있습니다.",
+            "other": f"'{job_field_other}' 분야에 특화된 자료를 추천드릴 수 있습니다."
+        }
+        
+        return job_recommendations.get(job_field, "전문 분야에 맞는 자료를 추천드릴 수 있습니다.")
+    
+    def _get_interest_based_recommendations(self, interests: List[str]) -> str:
+        """관심사에 따른 추천을 생성합니다."""
+        if not interests:
+            return ""
+        
+        interest_mapping = {
+            "tech": "최신 IT 기술, 프로그래밍, 소프트웨어 개발",
+            "finance": "경제 동향, 투자 정보, 금융 뉴스",
+            "ai": "인공지능 연구, 머신러닝, 데이터 사이언스",
+            "design": "디자인 트렌드, 창작 영감, 예술 작품",
+            "marketing": "마케팅 전략, 브랜딩, 광고 캠페인",
+            "productivity": "생산성 도구, 시간 관리, 자기계발",
+            "health": "건강 정보, 운동 루틴, 웰빙 팁",
+            "travel": "여행 정보, 문화 체험, 관광지"
+        }
+        
+        recommendations = [interest_mapping.get(interest, interest) for interest in interests]
+        return f"관심 주제 '{', '.join(recommendations)}'에 관련된 자료를 추천드릴 수 있습니다."
+    
+    def _get_help_based_recommendations(self, help_preferences: List[str]) -> str:
+        """도움 받고 싶은 영역에 따른 추천을 생성합니다."""
+        if not help_preferences:
+            return ""
+        
+        help_mapping = {
+            "work_search": "업무 관련 정보 검색 및 요약 도구",
+            "inspiration": "창의적 아이디어와 영감을 주는 자료",
+            "writing": "글쓰기 보조 도구와 템플릿",
+            "learning": "개인 학습을 위한 교육 자료와 강의"
+        }
+        
+        recommendations = [help_mapping.get(pref, pref) for pref in help_preferences]
+        return f"'{', '.join(recommendations)}' 영역에서 도움을 드릴 수 있습니다."
+    
+    def _get_keyword_based_recommendations(self, custom_keywords: str) -> str:
+        """사용자 정의 키워드에 따른 추천을 생성합니다."""
+        if not custom_keywords:
+            return ""
+        
+        return f"'{custom_keywords}'와 관련된 맞춤형 자료를 추천드릴 수 있습니다."
     
     async def process_async(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
         """사용자 입력을 처리합니다. (기존 호환성을 위한 메서드)"""
