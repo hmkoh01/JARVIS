@@ -16,7 +16,7 @@ import os
 class FloatingChatApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("JAVIS Floating Chat")
+        self.root.title("JARVIS Floating Chat")
         
         # 한글 폰트 설정
         self.setup_korean_fonts()
@@ -255,7 +255,7 @@ class FloatingChatApp:
         """시스템 종료"""
         # 종료 확인
         import tkinter.messagebox as messagebox
-        result = messagebox.askyesno("시스템 종료", "정말로 JAVIS를 종료하시겠습니까?")
+        result = messagebox.askyesno("시스템 종료", "정말로 JARVIS를 종료하시겠습니까?")
         if result:
             # 프로그램 완전 종료
             self.root.quit()
@@ -267,7 +267,7 @@ class FloatingChatApp:
         """채팅창 생성"""
         # 채팅창 윈도우
         self.chat_window = tk.Toplevel(self.root)
-        self.chat_window.title("JAVIS AI Assistant")
+        self.chat_window.title("JARVIS AI Assistant")
         self.chat_window.geometry('500x600')
         self.chat_window.configure(bg='white')
         
@@ -290,7 +290,7 @@ class FloatingChatApp:
         # 제목
         title_label = tk.Label(
             header_frame,
-            text="JAVIS AI Assistant",
+            text="JARVIS AI Assistant",
             font=self.title_font,
             bg='#4f46e5',
             fg='white'
@@ -367,7 +367,7 @@ class FloatingChatApp:
         send_button.pack(side='right')
         
         # 초기 메시지
-        self.add_bot_message("안녕하세요! JAVIS AI Assistant입니다. 무엇을 도와드릴까요?")
+        self.add_bot_message("안녕하세요! JARVIS AI Assistant입니다. 무엇을 도와드릴까요?")
         
         # 채팅창 초기에는 숨김
         self.chat_window.withdraw()
@@ -775,7 +775,7 @@ class FloatingChatApp:
 
 def main():
     """메인 함수"""
-    print("JAVIS Floating Chat Desktop App")
+    print("JARVIS Floating Chat Desktop App")
     print("=" * 50)
     print("화면 우측 하단에 플로팅 버튼이 나타납니다.")
     print("버튼을 클릭하면 채팅창이 열립니다.")

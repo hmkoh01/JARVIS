@@ -71,7 +71,7 @@ def setup_logging():
     # 시작 로그
     logger = logging.getLogger(__name__)
     logger.info("=" * 80)
-    logger.info("🚀 JAVIS Multi-Agent System 로깅 시스템 초기화 완료")
+    logger.info("🚀 JARVIS Multi-Agent System 로깅 시스템 초기화 완료")
     logger.info(f"�� 로그 파일: {settings.LOG_FILE_PATH}")
     logger.info(f"�� 로그 레벨: {settings.LOG_LEVEL}")
     logger.info(f"⏰ 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

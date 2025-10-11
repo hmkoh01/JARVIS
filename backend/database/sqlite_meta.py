@@ -5,7 +5,7 @@ import re  # <--- 1. 정규 표현식 모듈 추가
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import logging
-
+import threading
 logger = logging.getLogger(__name__)
 
 class SQLiteMeta:
@@ -26,32 +26,30 @@ class SQLiteMeta:
         return sanitized_filename
 
     def __init__(self, db_path: str = "./sqlite/meta.db"):
-        # <--- 3. 전달받은 db_path를 즉시 정제하여 사용
         self.db_path = self._sanitize_path(db_path)
         self._ensure_db_dir()
+        self._thread_local = threading.local()
         self._init_db()
-        # 트랜잭션을 위한 연결 객체
-        self.conn = None
-        self._init_connection()
     
-    def _init_connection(self):
-        """트랜잭션을 위한 연결 초기화"""
-        try:
-            self.conn = sqlite3.connect(self.db_path)
-            # 성능 최적화 설정
-            self.conn.execute("PRAGMA journal_mode=WAL")  # WAL 모드로 성능 향상
-            self.conn.execute("PRAGMA synchronous=NORMAL")  # 동기화 최적화
-            self.conn.execute("PRAGMA cache_size=10000")  # 캐시 크기 증가
-            self.conn.execute("PRAGMA temp_store=MEMORY")  # 임시 테이블을 메모리에 저장
-        except Exception as e:
-            logger.error(f"SQLite 연결 초기화 오류: {e}")
-            self.conn = None
-    
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """현재 스레드에 맞는 DB 연결을 가져오거나 새로 생성합니다."""
+        if not hasattr(self._thread_local, 'conn') or self._thread_local.conn is None:
+            try:
+                connection = sqlite3.connect(self.db_path)
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=NORMAL")
+                connection.row_factory = sqlite3.Row
+                self._thread_local.conn = connection
+            except Exception as e:
+                logger.error(f"SQLite 연결 생성 오류: {e}")
+                return None
+        return self._thread_local.conn
+
     def close_connection(self):
-        """연결 종료"""
-        if self.conn:
-            self.conn.close()
-            self.conn = None
+        if hasattr(self._thread_local, 'conn') and self._thread_local.conn:
+            self._thread_local.conn.close()
+            self._thread_local.conn = None
     
     def __del__(self):
         """소멸자에서 연결 정리"""
@@ -283,6 +281,12 @@ class SQLiteMeta:
                 logger.info("collected_files 테이블에 processing_error 컬럼 추가 중...")
                 conn.execute("ALTER TABLE collected_files ADD COLUMN processing_error TEXT")
                 logger.info("processing_error 컬럼 추가 완료")
+            
+            # collected_files 테이블에 indexed_in_qdrant 컬럼이 없으면 추가
+            if 'indexed_in_qdrant' not in columns:
+                logger.info("collected_files 테이블에 indexed_in_qdrant 컬럼 추가 중...")
+                conn.execute("ALTER TABLE collected_files ADD COLUMN indexed_in_qdrant BOOLEAN DEFAULT FALSE")
+                logger.info("indexed_in_qdrant 컬럼 추가 완료")
                 
         except Exception as e:
             logger.error(f"데이터베이스 마이그레이션 오류: {e}")
@@ -461,37 +465,37 @@ class SQLiteMeta:
     def insert_collected_file(self, file_info: Dict[str, Any]) -> bool:
         """수집된 파일 정보 저장"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO collected_files 
-                    (user_id, file_path, file_name, file_size, file_type, file_category, 
-                     file_hash, content_preview, created_date, modified_date, accessed_date, discovered_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    file_info['user_id'],
-                    file_info['file_path'],
-                    file_info['file_name'],
-                    file_info['file_size'],
-                    file_info['file_type'],
-                    file_info['file_category'],
-                    file_info.get('file_hash', ''),
-                    file_info.get('content_preview', ''),
-                    int(file_info['created_date'].timestamp()) if file_info.get('created_date') else None,
-                    int(file_info['modified_date'].timestamp()) if file_info.get('modified_date') else None,
-                    int(file_info['accessed_date'].timestamp()) if file_info.get('accessed_date') else None,
-                    int(datetime.now().timestamp())
-                ))
-                conn.commit()
-                return True
+            self.conn.execute("""
+                INSERT INTO collected_files 
+                (user_id, file_path, file_name, file_size, file_type, file_category, 
+                    file_hash, content_preview, created_date, modified_date, accessed_date, discovered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                file_info['user_id'],
+                file_info['file_path'],
+                file_info['file_name'],
+                file_info['file_size'],
+                file_info['file_type'],
+                file_info['file_category'],
+                file_info.get('file_hash', ''),
+                file_info.get('content_preview', ''),
+                int(file_info['created_date'].timestamp()) if file_info.get('created_date') else None,
+                int(file_info['modified_date'].timestamp()) if file_info.get('modified_date') else None,
+                int(file_info['accessed_date'].timestamp()) if file_info.get('accessed_date') else None,
+                int(datetime.now().timestamp())
+            ))
+            self.conn.commit()
+            return True
         except Exception as e:
             logger.error(f"수집된 파일 저장 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False
 
     def insert_collected_browser_history(self, history_info: Dict[str, Any]) -> bool:
         """수집된 브라우저 히스토리 저장"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
+            self.conn.execute("""
                     INSERT INTO collected_browser_history 
                     (user_id, browser_name, browser_version, url, title, visit_count,
                      visit_time, last_visit_time, page_transition, visit_duration, recorded_at)
@@ -509,17 +513,18 @@ class SQLiteMeta:
                     history_info.get('visit_duration', 0),
                     int(datetime.now().timestamp())
                 ))
-                conn.commit()
-                return True
+            self.conn.commit()
+            return True
         except Exception as e:
             logger.error(f"수집된 브라우저 히스토리 저장 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False
 
     def insert_collected_app(self, app_info: Dict[str, Any]) -> bool:
         """수집된 앱 정보 저장"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
+            self.conn.execute("""
                     INSERT INTO collected_apps 
                     (user_id, app_name, app_path, app_version, app_category, start_time,
                      end_time, duration, window_title, window_state, cpu_usage, memory_usage, recorded_at)
@@ -539,18 +544,19 @@ class SQLiteMeta:
                     app_info.get('memory_usage', 0.0),
                     int(datetime.now().timestamp())
                 ))
-                conn.commit()
-                return True
+            self.conn.commit()
+            return True
         except Exception as e:
             logger.error(f"수집된 앱 정보 저장 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False
 
     def insert_collected_screenshot(self, screenshot_info: Dict[str, Any]) -> bool:
         """수집된 스크린샷 정보 저장"""
         try:
             import json
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
+            self.conn.execute("""
                     INSERT INTO collected_screenshots 
                     (user_id, screenshot_path, screenshot_data, activity_description, activity_category,
                      activity_confidence, detected_apps, detected_text, detected_objects, screen_resolution,
@@ -571,97 +577,107 @@ class SQLiteMeta:
                     int(datetime.now().timestamp()),
                     int(datetime.now().timestamp())
                 ))
-                conn.commit()
-                return True
+            self.conn.commit()
+            return True
         except Exception as e:
             logger.error(f"수집된 스크린샷 저장 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False
 
     def get_collected_files(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
         """사용자 수집 파일 목록 조회"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
                     SELECT * FROM collected_files 
                     WHERE user_id = ? 
                     ORDER BY discovered_at DESC 
                     LIMIT ?
                 """, (user_id, limit))
-                return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"수집된 파일 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return []
 
     def get_collected_browser_history(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
         """사용자 수집 브라우저 히스토리 조회"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
                     SELECT * FROM collected_browser_history 
                     WHERE user_id = ? 
                     ORDER BY recorded_at DESC 
                     LIMIT ?
                 """, (user_id, limit))
-                return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"수집된 브라우저 히스토리 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return []
 
     def get_collected_apps(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
         """사용자 수집 앱 정보 조회"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
                     SELECT * FROM collected_apps 
                     WHERE user_id = ? 
                     ORDER BY recorded_at DESC 
                     LIMIT ?
                 """, (user_id, limit))
-                return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"수집된 앱 정보 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return []
 
     def get_collected_screenshots(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
         """사용자 수집 스크린샷 조회"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
                     SELECT * FROM collected_screenshots 
                     WHERE user_id = ? 
                     ORDER BY captured_at DESC 
                     LIMIT ?
                 """, (user_id, limit))
-                return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"수집된 스크린샷 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return []
 
     def get_collection_stats(self) -> Dict[str, int]:
         """데이터 수집 통계 조회"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                stats = {}
-                tables = ['collected_files', 'collected_browser_history', 'collected_apps', 'collected_screenshots']
-                for table in tables:
-                    cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
-                    stats[table] = cursor.fetchone()[0]
-                return stats
+            stats = {}
+            cursor = self.conn.execute("SELECT COUNT(*) FROM collected_files")
+            stats['collected_files'] = cursor.fetchone()[0]
+            cursor = self.conn.execute("SELECT COUNT(*) FROM collected_browser_history")
+            stats['collected_browser_history'] = cursor.fetchone()[0]
+            cursor = self.conn.execute("SELECT COUNT(*) FROM collected_apps")
+            stats['collected_apps'] = cursor.fetchone()[0]
+            cursor = self.conn.execute("SELECT COUNT(*) FROM collected_screenshots")
+            stats['collected_screenshots'] = cursor.fetchone()[0]
+            return stats
         except Exception as e:
             logger.error(f"수집 통계 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return {}
     
     def find_file_by_path(self, path: str) -> Optional[str]:
         """경로로 파일 doc_id 찾기"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("SELECT doc_id FROM files WHERE path = ?", (path,))
-                row = cursor.fetchone()
-                return row[0] if row else None
+            cursor = self.conn.execute("SELECT doc_id FROM files WHERE path = ?", (path,))
+            row = cursor.fetchone()
+            return row[0] if row else None
         except Exception as e:
             logger.error(f"파일 경로 조회 오류: {e}")
             return None
@@ -669,81 +685,104 @@ class SQLiteMeta:
     # === 중복 방지 및 증분 수집을 위한 메서드들 ===
     
     def is_file_hash_exists(self, file_hash: str) -> bool:
-        """파일 해시가 이미 존재하는지 확인"""
+        """파일 해시가 이미 존재하고 Qdrant에 인덱싱된 경우에만 True 반환"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("SELECT 1 FROM collected_files WHERE file_hash = ? LIMIT 1", (file_hash,))
-                return cursor.fetchone() is not None
+            cursor = self.conn.execute(
+                "SELECT 1 FROM collected_files WHERE file_hash = ? AND indexed_in_qdrant = 1 LIMIT 1", 
+                (file_hash,)
+            )
+            return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"파일 해시 중복 체크 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
+            return False
+    
+    def mark_files_indexed(self, file_hashes: List[str]) -> bool:
+        """파일 해시 목록에 대해 Qdrant 인덱싱 완료 표시"""
+        try:
+            placeholders = ','.join(['?' for _ in file_hashes])
+            self.conn.execute(
+                f"UPDATE collected_files SET indexed_in_qdrant = 1 WHERE file_hash IN ({placeholders})",
+                file_hashes
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"파일 인덱싱 표시 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
             return False
     
     def get_file_last_modified(self, file_path: str) -> Optional[datetime]:
         """파일의 마지막 수정 시간 조회"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("SELECT modified_date FROM collected_files WHERE file_path = ? ORDER BY discovered_at DESC LIMIT 1", (file_path,))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    return datetime.fromtimestamp(row[0])
-                return None
+            cursor = self.conn.execute("SELECT modified_date FROM collected_files WHERE file_path = ? ORDER BY discovered_at DESC LIMIT 1", (file_path,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                return datetime.fromtimestamp(row[0])
+            return None
         except Exception as e:
             logger.error(f"파일 수정 시간 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return None
     
     def is_browser_history_duplicate(self, user_id: int, url: str, visit_time: datetime) -> bool:
         """브라우저 히스토리 중복 확인"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("""
+            cursor = self.conn.execute("""
                     SELECT 1 FROM collected_browser_history 
                     WHERE user_id = ? AND url = ? AND visit_time = ? 
                     LIMIT 1
                 """, (user_id, url, int(visit_time.timestamp())))
-                return cursor.fetchone() is not None
+            return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"브라우저 히스토리 중복 체크 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False
     
     def get_last_browser_collection_time(self, user_id: int, browser_name: str) -> Optional[datetime]:
         """마지막 브라우저 히스토리 수집 시간 조회"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("""
+            cursor = self.conn.execute("""
                     SELECT MAX(recorded_at) FROM collected_browser_history 
                     WHERE user_id = ? AND browser_name = ?
                 """, (user_id, browser_name))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    return datetime.fromtimestamp(row[0])
-                return None
+            row = cursor.fetchone()
+            if row and row[0]:
+                return datetime.fromtimestamp(row[0])
+            return None
         except Exception as e:
             logger.error(f"마지막 브라우저 수집 시간 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return None
     
     def update_file_hash(self, file_path: str, file_hash: str) -> bool:
         """파일 해시 업데이트"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
+            self.conn.execute("""
                     UPDATE collected_files 
                     SET file_hash = ? 
                     WHERE file_path = ?
                 """, (file_hash, file_path))
-                conn.commit()
-                return True
+            self.conn.commit()
+            return True
         except Exception as e:
             logger.error(f"파일 해시 업데이트 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False
     
     # === 설문지 응답 관련 메서드들 ===
     
     def insert_survey_response(self, user_id: int, survey_data: Dict[str, Any]) -> bool:
         """설문지 응답 저장"""
-        try:
+        try:    
             import json
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
+            self.conn.execute("""
                     INSERT INTO user_survey_responses 
                     (user_id, job_field, job_field_other, interests, help_preferences, 
                      custom_keywords, submitted_at, created_at)
@@ -758,46 +797,50 @@ class SQLiteMeta:
                     int(datetime.now().timestamp()),
                     int(datetime.now().timestamp())
                 ))
-                conn.commit()
-                return True
+            self.conn.commit()
+            return True
         except Exception as e:
             logger.error(f"설문지 응답 저장 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False
     
     def get_user_survey_response(self, user_id: int) -> Optional[Dict[str, Any]]:
         """사용자 설문지 응답 조회"""
         try:
             import json
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
                     SELECT * FROM user_survey_responses 
                     WHERE user_id = ? 
                     ORDER BY submitted_at DESC 
                     LIMIT 1
                 """, (user_id,))
-                row = cursor.fetchone()
-                if row:
-                    result = dict(row)
-                    # JSON 문자열을 파이썬 객체로 변환
-                    result['interests'] = json.loads(result['interests']) if result['interests'] else []
-                    result['help_preferences'] = json.loads(result['help_preferences']) if result['help_preferences'] else []
-                    return result
-                return None
+            row = cursor.fetchone()
+            if row:
+                result = dict(row)
+                # JSON 문자열을 파이썬 객체로 변환
+                result['interests'] = json.loads(result['interests']) if result['interests'] else []
+                result['help_preferences'] = json.loads(result['help_preferences']) if result['help_preferences'] else []
+                return result
+            return None
         except Exception as e:
             logger.error(f"설문지 응답 조회 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return None
     
     def has_user_completed_survey(self, user_id: int) -> bool:
         """사용자가 설문지를 완료했는지 확인"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("""
+            cursor = self.conn.execute("""
                     SELECT 1 FROM user_survey_responses 
                     WHERE user_id = ? 
                     LIMIT 1
                 """, (user_id,))
-                return cursor.fetchone() is not None
+            return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"설문지 완료 여부 확인 오류: {e}")
+            if self.conn:
+                self.conn.rollback()            
             return False

@@ -236,7 +236,7 @@ datasets/
 docker-compose.override.yml
 
 # JAVIS specific directories
-javis/
+jarvis/
 logs/
 uploads/
 sqlite/

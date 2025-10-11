@@ -11,11 +11,11 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     
     # 데이터베이스 설정
-    DATABASE_URL: str = "sqlite:///./javis.db"
+    DATABASE_URL: str = "sqlite:///./jarvis.db"
 
     # Gemini API 설정
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
-    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
     
     # Multimodal RAG 설정
     IMAGE_UPLOAD_PATH: str = "./uploads/images"
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # 로깅 설정
     LOG_LEVEL: str = "DEBUG"  # DEBUG로 변경하여 더 자세한 로그 확인
-    LOG_FILE_PATH: str = "./backend/logs/javis.log"  # 로그 파일 경로 추가
+    LOG_FILE_PATH: str = "./backend/logs/jarvis.log"  # 로그 파일 경로 추가
     LOG_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
     LOG_BACKUP_COUNT: int = 5  # 백업 파일 개수
     

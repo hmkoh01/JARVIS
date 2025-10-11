@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class FolderSelector:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("JAVIS - 폴더 선택")
+        self.root.title("JARVIS - 폴더 선택")
         self.root.configure(bg='#f8fafc')
         self.root.resizable(True, True)
         self.root.minsize(750, 650)
@@ -109,13 +109,13 @@ class FolderSelector:
         icon_label.pack(side='left', padx=(0, 15))
         text_frame = tk.Frame(title_frame, bg='white')
         text_frame.pack(side='left', fill='x', expand=True)
-        title_label = tk.Label(text_frame, text="JAVIS 파일 수집", font=('Malgun Gothic', 24, 'bold'), bg='white', fg='#1f2937')
+        title_label = tk.Label(text_frame, text="JARVIS 파일 수집", font=('Malgun Gothic', 24, 'bold'), bg='white', fg='#1f2937')
         title_label.pack(anchor='w')
         subtitle_label = tk.Label(text_frame, text="폴더 선택", font=('Malgun Gothic', 16), bg='white', fg='#6b7280')
         subtitle_label.pack(anchor='w')
         desc_frame = tk.Frame(main_frame, bg='white')
         desc_frame.pack(fill='x', padx=30, pady=(0, 25))
-        desc_label = tk.Label(desc_frame, text="파일 수집할 폴더를 선택하세요.\nC:\\Users\\koh\\Desktop 폴더 내의 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=('Malgun Gothic', 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
+        desc_label = tk.Label(desc_frame, text="파일 수집할 폴더를 선택하세요.\n사용자 폴더 내의 주요 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=('Malgun Gothic', 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
         desc_label.pack(anchor='w')
         list_container = tk.Frame(main_frame, bg='white')
         list_container.pack(fill='both', expand=True, padx=30, pady=(0, 25))
@@ -218,18 +218,11 @@ class FolderSelector:
         for folder in sorted(folders, key=lambda x: x.get('name', '').lower()):
             name = folder.get('name', '')
             path = folder.get('path', '')
-            size = folder.get('size', 0)
             
-            if size > 1024 * 1024 * 1024:
-                size_str = f"{size / (1024 * 1024 * 1024):.1f} GB"
-            elif size > 1024 * 1024:
-                size_str = f"{size / (1024 * 1024):.1f} MB"
-            elif size > 1024:
-                size_str = f"{size / 1024:.1f} KB"
-            else:
-                size_str = f"{size} bytes"
+            # 백엔드에서 제공하는 size_formatted 필드 사용
+            size_formatted = folder.get('size_formatted', '(0 bytes)')
             
-            display_text = f"📁 {name}    ({size_str})"
+            display_text = f"📁 {name}    {size_formatted}"
             self.folder_listbox.insert(tk.END, display_text)
             self.folder_data.append(path)
     
@@ -277,7 +270,7 @@ class FolderSelector:
         result = messagebox.askyesno("전체 스캔", "전체 C드라이브를 스캔하시겠습니까?\n시간이 오래 걸릴 수 있습니다.")
         if result:
             self.selected_folders = None
-            self.root.quit()
+            self.root.destroy()
     
     def confirm_selection(self):
         selected_indices = self.folder_listbox.curselection()
@@ -285,16 +278,16 @@ class FolderSelector:
             result = messagebox.askyesno("전체 스캔", "폴더를 선택하지 않았습니다.\n전체 C드라이브를 스캔하시겠습니까?")
             if result:
                 self.selected_folders = None
-                self.root.quit()
+                self.root.destroy()
         else:
             self.selected_folders = [self.folder_data[i] for i in selected_indices]
-            self.root.quit()
+            self.root.destroy()
     
     def on_closing(self):
         result = messagebox.askyesno("종료", "폴더 선택을 취소하고 시스템을 종료하시겠습니까?")
         if result:
             self.selected_folders = "cancelled"
-            self.root.quit()
+            self.root.destroy()
     
     def run(self):
         """UI의 메인 루프를 시작하고, 종료 시 선택된 폴더를 반환합니다."""
@@ -310,9 +303,15 @@ class FolderSelector:
 
 def select_folders():
     """폴더 선택 UI를 실행하고 선택된 폴더를 반환합니다."""
+    import gc
     try:
         app = FolderSelector()
-        return app.run()
+        result = app.run()
+        # tkinter 객체 정리
+        del app
+        # 가비지 컬렉션 강제 수행
+        gc.collect()
+        return result
     except Exception as e:
         logger.error(f"폴더 선택 UI 오류: {e}")
         return "cancelled"

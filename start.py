@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JAVIS Multi-Agent System Startup Script
+JARVIS Multi-Agent System Startup Script
 멀티모달 RAG 시스템을 쉽게 시작할 수 있는 스크립트
 """
 
@@ -9,10 +9,8 @@ import sys
 import subprocess
 import time
 import threading
-import queue
 from pathlib import Path
 from tqdm import tqdm
-from backend.database.data_collector import start_user_data_collection, data_collection_managers
 import logging
 
 logger = logging.getLogger(__name__)
@@ -214,7 +212,7 @@ def check_env_file():
 GEMINI_API_KEY=your_gemini_api_key_here
 
 # 데이터베이스 설정
-DATABASE_URL=sqlite:///./javis.db
+DATABASE_URL=sqlite:///./jarvis.db
 
 # API 설정
 API_HOST=0.0.0.0
@@ -377,24 +375,19 @@ def perform_folder_selection():
         return False
 
 def perform_initial_data_collection_with_progress():
-    """선택된 폴더로 데이터 수집을 시작합니다."""
+    """선택된 폴더로 데이터 수집을 시작하고 진행률을 표시합니다."""
     print("\n📊 데이터 수집을 시작합니다...")
     
     try:
-        from backend.database.data_collector import start_user_data_collection, data_collection_managers
+        from backend.database.data_collector import get_manager
         
-        # 선택된 폴더로 데이터 수집 시작
         user_id = 1
+        manager = get_manager(user_id)
+        
         collection_thread = threading.Thread(
-            target=start_user_data_collection, args=(user_id, selected_folders_global), daemon=True
+            target=manager.perform_initial_collection, args=(selected_folders_global,), daemon=True
         )
         collection_thread.start()
-        
-        # 데이터 수집 매니저가 생성될 때까지 잠시 대기
-        while user_id not in data_collection_managers:
-            time.sleep(0.1)
-
-        manager = data_collection_managers[user_id]
         
         # 프로그레스 바 표시
         with tqdm(total=100, desc="초기 데이터 수집", unit="%", 
@@ -402,22 +395,25 @@ def perform_initial_data_collection_with_progress():
             
             # 초기 데이터 수집이 완료될 때까지 대기
             while not manager.initial_collection_done:
-                # manager 객체에서 실제 진행률과 메시지를 가져옴
                 current_progress = manager.progress
-                
-                # pbar를 현재 진행률까지 업데이트
                 pbar.update(current_progress - pbar.n)
-                
-                # 진행 메시지를 pbar의 설명(description)으로 설정
                 pbar.set_description_str(manager.progress_message)
-                
-                time.sleep(0.5) # 0.5초마다 체크
+                time.sleep(0.5)
 
             # 완료 시 100%로 채우고 최종 메시지 표시
             pbar.update(100 - pbar.n)
             pbar.set_description_str(manager.progress_message)
-            
+        
+        if "오류" in manager.progress_message:
+             print(f"❌ 초기 데이터 수집 중 오류가 발생했습니다: {manager.progress_message}")
+             return False
+
         print("✅ 초기 데이터 수집이 성공적으로 완료되었습니다.")
+
+        # ✨ 추가: 초기 수집 완료 후, 백그라운드 증분 수집을 시작합니다.
+        print("\n🔄 백그라운드에서 증분 데이터 수집을 시작합니다...")
+        manager.start_collection(selected_folders_global)
+
         return True
         
     except ImportError as e:
@@ -439,23 +435,16 @@ def start_backend():
             logger.error("backend 디렉토리를 찾을 수 없습니다.")
             return None
         
-        # 현재 작업 디렉토리 저장
-        original_cwd = os.getcwd()
-        logger.info(f"현재 작업 디렉토리: {original_cwd}")
+        logger.info(f"백엔드 프로세스를 '{backend_dir}' 디렉토리에서 시작합니다.")
         
-        # backend 디렉토리로 이동
-        os.chdir(backend_dir)
-        logger.info(f"backend 디렉토리로 이동: {os.getcwd()}")
-        
-        # 백엔드 서버 시작
-        logger.info("백엔드 서버 프로세스 시작")
-        process = subprocess.Popen([
-            sys.executable, 'main.py'
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        # 원래 디렉토리로 복원
-        os.chdir(original_cwd)
-        logger.info(f"원래 디렉토리로 복원: {os.getcwd()}")
+        # 백엔드 서버 시작 (cwd 인자 사용)
+        process = subprocess.Popen(
+            [sys.executable, 'main.py'],
+            # stdout=subprocess.PIPE,
+            # stderr=subprocess.PIPE,
+            text=True,
+            cwd=backend_dir  
+        )
         
         # 서버 시작 대기
         logger.info("서버 시작 대기 중...")
@@ -528,7 +517,7 @@ def start_frontend():
 
 def main():
     """메인 함수"""
-    print("🤖 JAVIS Multi-Agent System")
+    print("🤖 JARVIS Multi-Agent System")
     print("=" * 60)
     
     # 현재 디렉토리를 프로젝트 루트로 설정
@@ -622,7 +611,7 @@ def main():
             backend_process.terminate()
             break
             
-        print("\n🎉 JAVIS Multi-Agent System이 성공적으로 시작되었습니다!")
+        print("\n🎉 JARVIS Multi-Agent System이 성공적으로 시작되었습니다!")
         print("=" * 60)
         print("🔗 API 문서: http://localhost:8000/docs")
         print("📊 시스템 정보: http://localhost:8000/info")

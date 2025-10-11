@@ -60,7 +60,7 @@ def images_to_base64(images: List[Image.Image]) -> List[str]:
 # Gemini LLM 호출 함수
 # ==============================================================================
 
-def call_llm_for_answer(question: str, context: str) -> Optional[str]:
+def call_llm_for_answer(question: str, context: str, user_profile: Optional[str] = None) -> Optional[str]:
     """Gemini 모델을 사용하여 답변을 생성합니다."""
     try:
         # Gemini API 호출
@@ -77,20 +77,32 @@ def call_llm_for_answer(question: str, context: str) -> Optional[str]:
             genai.configure(api_key=settings.GEMINI_API_KEY)
             model = genai.GenerativeModel(settings.GEMINI_MODEL)
             
+            # 시스템 컨텍스트 (사용자 프로필 포함)
+            system_context = ""
+            if user_profile:
+                system_context = f"""
+[사용자 프로필]
+{user_profile}
+
+위 프로필을 참고하여 사용자의 배경과 관심사를 고려한 맞춤형 답변을 제공하세요.
+"""
+            
             # 프롬프트 구성
-            prompt = f"""당신은 사용자의 질문에 대해 주어진 정보를 바탕으로 정확하고 유용한 답변을 제공하는 AI 어시스턴트입니다.
+            prompt = f"""{system_context}당신은 사용자의 질문에 대해 주어진 정보를 바탕으로 정확하고 유용한 답변을 제공하는 AI 어시스턴트입니다.
 
 질문: {question}
 
 참고 정보:
 {context}
 
-위 정보를 바탕으로 질문에 답변해주세요. 다음 사항을 지켜주세요:
-1. 주어진 정보만을 사용하여 답변하세요
-2. 정보가 부족한 부분은 솔직히 말하세요
-3. 한국어로 자연스럽게 답변하세요
-4. 구체적이고 실용적인 정보를 제공하세요
-5. 출처 정보는 간단히 언급하세요
+위 정보와 사용자 프로필을 바탕으로 질문에 답변해주세요. 다음 사항을 지켜주세요:
+1. 사용자의 배경과 관심사를 고려한 맞춤형 답변을 제공하세요
+2. 주어진 정보만을 사용하여 답변하세요
+3. 정보가 부족한 부분은 솔직히 말하세요
+4. 한국어로 자연스럽고 친근하게 답변하세요
+5. 구체적이고 실용적인 정보를 제공하세요
+6. 출처 정보는 간단히 언급하세요
+7. 답변은 사용자의 질문에 따라 필요하다면 핵심적인 내용만 제공하세요
 
 답변:"""
 
@@ -98,7 +110,7 @@ def call_llm_for_answer(question: str, context: str) -> Optional[str]:
             response = model.generate_content(prompt)
             
             if response and response.text:
-                logger.info("Gemini 답변 생성 성공")
+                logger.info("Gemini 답변 생성 성공" + (" (프로필 포함)" if user_profile else ""))
                 return response.text
             else:
                 logger.warning("Gemini 응답이 비어있습니다.")
@@ -119,7 +131,7 @@ def call_llm_for_answer(question: str, context: str) -> Optional[str]:
 # 핵심 답변 생성 함수
 # ==============================================================================
 
-def compose_answer(question: str, evidences: List[Dict[str, Any]]) -> str:
+def compose_answer(question: str, evidences: List[Dict[str, Any]], user_id: Optional[int] = None) -> str:
     """검색된 근거(evidences)를 바탕으로 최종 텍스트 답변을 구성합니다."""
     try:
         if not evidences:
@@ -148,9 +160,21 @@ def compose_answer(question: str, evidences: List[Dict[str, Any]]) -> str:
         
         context = "\n\n".join(context_parts)
         
-        # Gemini를 사용한 답변 생성 시도
+        # 사용자 프로필 가져오기
+        user_profile = None
+        if user_id:
+            try:
+                from database.user_profile_indexer import UserProfileIndexer
+                indexer = UserProfileIndexer()
+                user_profile = indexer.get_profile_as_context(user_id)
+                if user_profile:
+                    logger.info(f"사용자 {user_id} 프로필을 LLM 컨텍스트에 포함")
+            except Exception as e:
+                logger.warning(f"프로필 로드 실패: {e}")
+        
+        # Gemini를 사용한 답변 생성 시도 (프로필 포함)
         try:
-            gemini_answer = call_llm_for_answer(question, context)
+            gemini_answer = call_llm_for_answer(question, context, user_profile)
             if gemini_answer:
                 logger.info("Gemini 답변 생성 성공")
                 return gemini_answer

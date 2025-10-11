@@ -1,22 +1,29 @@
 import os
 import yaml
+import uuid
 from typing import List, Dict, Any, Union, Optional
 import numpy as np
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-)
+from qdrant_client import QdrantClient, models
 import logging
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 logger = logging.getLogger(__name__)
 
 class QdrantManager:
-    """Qdrant 벡터 데이터베이스 관리 클래스"""
+    """Qdrant 벡터 DB 하이브리드 검색 관리 클래스"""
     
     def __init__(self, config_path: str = "configs.yaml"):
-        self.config = self._load_config(config_path)
-        self.client = QdrantClient(url=self.config['qdrant']['url'])
-        self.ensure_collections()
+        """초기화: 설정 로드, 클라이언트 연결, 하이브리드 컬렉션 확인/생성"""
+        absolute_config_path = PROJECT_ROOT / config_path
+        self.config = self._load_config(absolute_config_path)
+        qdrant_config = self.config['qdrant']
+        self.client = QdrantClient(url=qdrant_config['url'])
+        self.collection_name = qdrant_config['collection_name']
+        self.embedding_dim = self.config['embedding'].get('dense_dim', 1024)
+        self.retrieval_weights = self.config['retrieval']['weights']
+        
+        self._ensure_hybrid_collection()
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """설정 파일 로드"""
@@ -26,18 +33,27 @@ class QdrantManager:
                     return yaml.safe_load(f)
             else:
                 # 기본 설정
+                logger.warning(f"설정 파일 '{config_path}'를 찾을 수 없어 기본 설정을 사용합니다.")
                 return {
                     'qdrant': {
                         'url': 'http://localhost:6333',
-                        'collections': {
-                            'text': 'text_chunks',
-                            'image': 'image_patches',
-                            'screen': 'screens_patches'
-                        }
+                        'collection_name': 'user_context'
                     },
                     'embedding': {
-                        'dim': 128,
-                        'batch_size': 32
+                        'model_name': 'BAAI/bge-m3',
+                        'dense_dim': 1024,
+                        'batch_size': 12
+                    },
+                    'sqlite': {
+                        'path': './sqlite/meta.db'
+                    },
+                    'retrieval': {
+                        'k_candidates': 40,
+                        'k_final': 10,
+                        'weights': {
+                            'dense': 0.6,
+                            'sparse': 0.4
+                        }
                     }
                 }
         except Exception as e:
@@ -45,188 +61,223 @@ class QdrantManager:
             return {
                 'qdrant': {
                     'url': 'http://localhost:6333',
-                    'collections': {
-                        'text': 'text_chunks',
-                        'image': 'image_patches',
-                        'screen': 'screens_patches'
-                    }
+                    'collection_name': 'user_context'
                 },
                 'embedding': {
-                    'dim': 128,
-                    'batch_size': 32
+                    'model_name': 'BAAI/bge-m3',
+                    'dense_dim': 1024,
+                    'batch_size': 12
+                },
+                'sqlite': {
+                    'path': './sqlite/meta.db'
+                },
+                'retrieval': {
+                    'k_candidates': 40,
+                    'k_final': 10,
+                    'weights': {
+                        'dense': 0.6,
+                        'sparse': 0.4
+                    }
                 }
             }
-    
-    def ensure_collections(self):
-        """컬렉션 생성/확인"""
-        collections = self.config['qdrant']['collections']
-        dim = self.config['embedding']['dim']
-        
-        for collection_name in collections.values():
-            try:
-                # 컬렉션 존재 확인
-                collection_info = self.client.get_collection(collection_name)
-                logger.info(f"컬렉션 {collection_name} 이미 존재")
-            except Exception:
-                # 컬렉션 생성
-                self.client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=VectorParams(
-                        size=dim,
-                        distance=Distance.COSINE,
-                        hnsw_config={
-                            'm': 32,
-                            'ef_construct': 128
-                        }
-                    )
-                )
-                logger.info(f"컬렉션 {collection_name} 생성됨")
-    
-    def upsert_vectors(self, collection: str, ids: List[Union[str, int]], 
-                      vectors: Union[List[List[float]], np.ndarray], 
-                      payloads: List[Dict[str, Any]]) -> bool:
-        """벡터 업서트"""
+
+    def _ensure_hybrid_collection(self):
+        """Dense와 Sparse 벡터를 모두 지원하는 단일 컬렉션 확인/생성"""
         try:
-            # numpy 배열을 리스트로 변환
-            if isinstance(vectors, np.ndarray):
-                vectors = vectors.tolist()
-            
-            # PointStruct 리스트 생성
+            self.client.get_collection(collection_name=self.collection_name)
+            logger.info(f"하이브리드 컬렉션 '{self.collection_name}'이 이미 존재합니다.")
+        except Exception:
+            logger.warning(f"컬렉션 '{self.collection_name}'을 찾을 수 없어 새로 생성합니다.")
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config={
+                    "dense": models.VectorParams(size=self.embedding_dim, distance=models.Distance.COSINE),
+                },
+                sparse_vectors_config={
+                    "sparse": models.SparseVectorParams(index=models.SparseIndexParams(on_disk=False))
+                }
+            )
+            logger.info(f"하이브리드 컬렉션 '{self.collection_name}' 생성 완료.")
+    
+    def upsert_vectors(self, 
+                     payloads: List[Dict[str, Any]],
+                     dense_vectors: List[List[float]],
+                     sparse_vectors: List[Dict[str, List]]) -> bool:
+        """Dense, Sparse 벡터와 페이로드를 함께 업서트"""
+        try:
             points = []
-            for i, (id_val, vector, payload) in enumerate(zip(ids, vectors, payloads)):
-                # Point ID를 정수로 변환
-                if isinstance(id_val, str):
-                    # 문자열을 해시하여 정수로 변환
-                    point_id = abs(hash(id_val)) % (2**63 - 1)  # 64비트 정수 범위 내
-                else:
-                    point_id = int(id_val)
+            for payload, dense_vec, sparse_vec_data in zip(payloads, dense_vectors, sparse_vectors):
+                # Qdrant의 SparseVector 형식으로 변환
+                sparse_vec = models.SparseVector(
+                    indices=sparse_vec_data['indices'],
+                    values=sparse_vec_data['values']
+                )
                 
-                # 벡터 데이터 평면화 (중첩된 리스트인 경우)
-                if isinstance(vector, list) and len(vector) > 0:
-                    if isinstance(vector[0], list):
-                        # 2차원 리스트인 경우 첫 번째 요소 사용
-                        vector = vector[0]
-                
-                # 벡터가 올바른 형태인지 확인
-                if not isinstance(vector, list) or not all(isinstance(x, (int, float)) for x in vector):
-                    logger.error(f"잘못된 벡터 형태: {type(vector)}, 길이: {len(vector) if hasattr(vector, '__len__') else 'N/A'}")
-                    continue
-                
-                point = PointStruct(
-                    id=point_id,
-                    vector=vector,
+                point = models.PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector={"dense": dense_vec, "sparse": sparse_vec},
                     payload=payload
                 )
                 points.append(point)
-            
-            # 배치 크기로 나누어 업서트
-            batch_size = self.config['embedding']['batch_size']
-            for i in range(0, len(points), batch_size):
-                batch = points[i:i + batch_size]
-                self.client.upsert(
-                    collection_name=collection,
-                    points=batch
-                )
-            
-            logger.info(f"컬렉션 {collection}에 {len(points)}개 벡터 업서트 완료")
-            return True
-            
-        except Exception as e:
-            logger.error(f"벡터 업서트 오류: {e}")
-            return False
-    
-    def ann_search(self, collection: str, query_vec: Union[List[float], np.ndarray], 
-                  limit: int, flt: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """ANN 검색"""
-        try:
-            # numpy 배열을 리스트로 변환
-            if isinstance(query_vec, np.ndarray):
-                query_vec = query_vec.tolist()
-            
-            # 벡터 데이터 평면화 (중첩된 리스트인 경우)
-            if isinstance(query_vec, list) and len(query_vec) > 0:
-                if isinstance(query_vec[0], list):
-                    # 2차원 리스트인 경우 첫 번째 요소 사용
-                    query_vec = query_vec[0]
-            
-            # 벡터가 올바른 형태인지 확인
-            if not isinstance(query_vec, list) or not all(isinstance(x, (int, float)) for x in query_vec):
-                logger.error(f"잘못된 벡터 형태: {type(query_vec)}, 길이: {len(query_vec) if hasattr(query_vec, '__len__') else 'N/A'}")
-                return []
-            
-            # 필터 변환
-            search_filter = None
-            if flt:
-                search_filter = self._convert_filter(flt)
-            
-            # 검색 실행
-            search_result = self.client.search(
-                collection_name=collection,
-                query_vector=query_vec,
-                limit=limit,
-                query_filter=search_filter,
-                with_payload=True,
-                with_vectors=False,
-                score_threshold=0.0
+
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=points,
+                wait=True
             )
-            
-            # 결과 변환
-            results = []
-            for hit in search_result:
-                results.append({
-                    'id': hit.id,
-                    'score': hit.score,
-                    'payload': hit.payload
-                })
-            
-            return results
-            
+            logger.info(f"컬렉션 '{self.collection_name}'에 {len(points)}개 하이브리드 포인트 업서트 완료")
+            return True
         except Exception as e:
-            logger.error(f"ANN 검색 오류: {e}")
+            logger.error(f"하이브리드 벡터 업서트 오류: {e}")
+            return False
+
+    def hybrid_search(self, 
+                      query_dense: List[float], 
+                      query_sparse: Dict[str, List],
+                      limit: int) -> List[Dict[str, Any]]:
+        """하이브리드 검색 (Dense + Sparse) 후 RRF로 결과 융합"""
+        
+        # 1. SparseVector 생성
+        sparse_vector = models.SparseVector(
+            indices=query_sparse['indices'],
+            values=query_sparse['values']
+        )
+        
+        # 2. 두 검색을 한 번에 실행 (네트워크 효율성)
+        try:
+            dense_results, sparse_results = self.client.search_batch(
+                collection_name=self.collection_name,
+                requests=[
+                    models.SearchRequest(
+                        vector=models.NamedVector(
+                            name="dense",
+                            vector=query_dense
+                        ),
+                        limit=limit,
+                        with_payload=True,
+                        params=models.SearchParams(hnsw_ef=128)
+                    ),
+                    models.SearchRequest(
+                        vector=models.NamedSparseVector(
+                            name="sparse",
+                            vector=sparse_vector
+                        ),
+                        limit=limit,
+                        with_payload=True
+                    ),
+                ]
+            )
+        except Exception as e:
+            logger.error(f"하이브리드 검색 오류: {e}")
             return []
-    
-    def _convert_filter(self, flt: Dict[str, Any]) -> Filter:
-        """필터 딕셔너리를 Qdrant Filter로 변환"""
-        conditions = []
+
+        # 4. 결과 융합 (Reciprocal Rank Fusion)
+        fused_results = self._reciprocal_rank_fusion(
+            [dense_results, sparse_results],
+            [self.retrieval_weights['dense'], self.retrieval_weights['sparse']]
+        )
         
-        if 'must' in flt:
-            for condition in flt['must']:
-                if 'key' in condition and 'match' in condition:
-                    field_condition = FieldCondition(
-                        key=condition['key'],
-                        match=MatchValue(value=condition['match']['value'])
-                    )
-                    conditions.append(field_condition)
+        # 5. 최종 결과 반환 (상위 limit 개)
+        return fused_results[:limit]
+
+    def _reciprocal_rank_fusion(self, results_lists: List[List[models.ScoredPoint]], weights: List[float], k: int = 60) -> List[Dict[str, Any]]:
+        """여러 검색 결과 리스트를 RRF 알고리즘으로 융합합니다."""
+        rrf_scores = {}
         
-        return Filter(must=conditions) if conditions else None
-    
-    def delete_vectors(self, collection: str, ids: List[Union[str, int]]) -> bool:
-        """벡터 삭제"""
+        # 각 결과 리스트에 대해 RRF 점수 계산
+        for results, weight in zip(results_lists, weights):
+            for rank, point in enumerate(results):
+                point_id = point.id
+                if point_id not in rrf_scores:
+                    rrf_scores[point_id] = {'score': 0, 'payload': point.payload}
+                
+                # RRF 점수 추가 (가중치 적용)
+                rrf_scores[point_id]['score'] += weight * (1 / (k + rank + 1))
+
+        # 총점이 높은 순으로 정렬
+        sorted_results = sorted(rrf_scores.items(), key=lambda item: item[1]['score'], reverse=True)
+        
+        # Qdrant 검색 결과와 유사한 형식으로 변환
+        final_results = [
+            {'id': pid, 'score': data['score'], 'payload': data['payload']}
+            for pid, data in sorted_results
+        ]
+        return final_results
+
+    def delete_vectors(self, ids: List[Union[str, int]]) -> bool:
+        """ID 리스트를 받아 벡터 삭제"""
         try:
             self.client.delete(
-                collection_name=collection,
-                points_selector=ids
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsList(points=ids)
             )
-            logger.info(f"컬렉션 {collection}에서 {len(ids)}개 벡터 삭제 완료")
+            logger.info(f"컬렉션 '{self.collection_name}'에서 {len(ids)}개 포인트 삭제 완료")
             return True
         except Exception as e:
             logger.error(f"벡터 삭제 오류: {e}")
             return False
-    
-    def get_collection_info(self, collection: str) -> Optional[Dict[str, Any]]:
-        """컬렉션 정보 조회"""
+            
+    def get_collection_info(self) -> Optional[Dict[str, Any]]:
+        """현재 컬렉션의 정보 조회"""
         try:
-            info = self.client.get_collection(collection)
-            return {
-                'name': info.name,
-                'vectors_count': info.vectors_count,
-                'points_count': info.points_count,
-                'segments_count': info.segments_count,
-                'config': {
-                    'vector_size': info.config.params.vectors.size,
-                    'distance': info.config.params.vectors.distance.value
-                }
-            }
+            info = self.client.get_collection(self.collection_name)
+            # models.CollectionInfo 객체를 딕셔너리로 변환하여 반환
+            return info.model_dump()
         except Exception as e:
             logger.error(f"컬렉션 정보 조회 오류: {e}")
             return None
+    
+    def check_user_profile_exists(self, user_id: int, source: str = 'user_profile') -> bool:
+        """특정 user_id의 프로필이 이미 Qdrant에 존재하는지 확인"""
+        try:
+            # user_id와 source로 필터링하여 검색
+            result = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="user_id",
+                            match=models.MatchValue(value=user_id)
+                        ),
+                        models.FieldCondition(
+                            key="source",
+                            match=models.MatchValue(value=source)
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=True
+            )
+            # 결과가 있으면 True, 없으면 False
+            points, _ = result
+            return len(points) > 0
+        except Exception as e:
+            logger.error(f"프로필 존재 여부 확인 오류: {e}")
+            return False
+    
+    def delete_user_profile(self, user_id: int, source: str = 'user_profile') -> bool:
+        """특정 user_id의 프로필을 Qdrant에서 삭제"""
+        try:
+            # user_id와 source로 필터링하여 삭제
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="user_id",
+                                match=models.MatchValue(value=user_id)
+                            ),
+                            models.FieldCondition(
+                                key="source",
+                                match=models.MatchValue(value=source)
+                            )
+                        ]
+                    )
+                )
+            )
+            logger.info(f"사용자 {user_id}의 프로필이 Qdrant에서 삭제되었습니다.")
+            return True
+        except Exception as e:
+            logger.error(f"프로필 삭제 오류: {e}")
+            return False

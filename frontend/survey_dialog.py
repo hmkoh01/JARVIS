@@ -17,7 +17,7 @@ if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
 try:
-    from database.sqlite_meta import SQLiteMeta
+    from backend.database.sqlite_meta import SQLiteMeta
 except ImportError:
     print("Warning: Could not import SQLiteMeta. Survey responses will not be saved.")
     SQLiteMeta = None
@@ -26,7 +26,7 @@ class SurveyDialog:
     def __init__(self, user_id=1):
         self.user_id = user_id
         self.root = tk.Tk()
-        self.root.title("JAVIS 초기 설정")
+        self.root.title("JARVIS 초기 설정")
         self.root.configure(bg='#f8fafc')
         self.root.resizable(False, False)
         
@@ -135,7 +135,7 @@ class SurveyDialog:
         text_frame = tk.Frame(title_frame, bg='white')
         text_frame.pack(side='left', fill='x', expand=True)
         
-        title_label = tk.Label(text_frame, text="JAVIS 초기 설정", font=self.title_font, bg='white', fg='#1f2937')
+        title_label = tk.Label(text_frame, text="JARVIS 초기 설정", font=self.title_font, bg='white', fg='#1f2937')
         title_label.pack(anchor='w')
         
         subtitle_label = tk.Label(text_frame, text="안녕하세요! JARVIS가 당신에게 꼭 맞는 비서가 될 수 있도록 몇 가지만 알려주시겠어요?", 
@@ -147,19 +147,23 @@ class SurveyDialog:
         
         # 버튼 영역
         button_frame = tk.Frame(self.scrollable_frame, bg='#f8fafc')
-        button_frame.pack(fill='x', pady=(30, 0))
+        button_frame.pack(fill='x', pady=(30, 20), padx=20)
+        
+        # 버튼들을 중앙 정렬하기 위한 컨테이너
+        button_container = tk.Frame(button_frame, bg='#f8fafc')
+        button_container.pack(expand=True)
         
         # 건너뛰기 버튼
-        skip_button = tk.Button(button_frame, text="건너뛰기", font=self.button_font, 
+        skip_button = tk.Button(button_container, text="건너뛰기", font=self.button_font, 
                                bg='#6b7280', fg='white', relief='flat', bd=0, cursor='hand2',
                                command=self.skip_survey, width=12, pady=10)
-        skip_button.pack(side='left')
+        skip_button.pack(side='left', padx=(0, 10))
         
         # 제출 버튼
-        submit_button = tk.Button(button_frame, text="제출하기", font=self.button_font,
+        submit_button = tk.Button(button_container, text="제출하기", font=self.button_font,
                                  bg='#4f46e5', fg='white', relief='flat', bd=0, cursor='hand2',
                                  command=self.submit_survey, width=12, pady=10)
-        submit_button.pack(side='right')
+        submit_button.pack(side='left', padx=(10, 0))
     
     def create_survey_content(self, parent):
             """설문지 내용을 생성합니다."""
@@ -341,22 +345,36 @@ class SurveyDialog:
         }
     
     def save_survey_data(self, survey_data):
-        """설문지 데이터를 데이터베이스에 저장합니다."""
+        """설문지 데이터를 데이터베이스에 저장하고 Qdrant에 인덱싱합니다."""
         if SQLiteMeta is None:
             print("Warning: SQLiteMeta not available. Survey data not saved.")
             return False
         
         try:
+            # 1. SQLite에 저장
             db = SQLiteMeta()
             success = db.insert_survey_response(self.user_id, survey_data)
             if success:
-                print("설문지 응답이 성공적으로 저장되었습니다.")
+                print("✅ 설문지 응답이 SQLite에 저장되었습니다.")
+                
+                # 2. Qdrant에 프로필 인덱싱
+                try:
+                    from backend.database.user_profile_indexer import UserProfileIndexer
+                    indexer = UserProfileIndexer()
+                    if indexer.index_user_profile(self.user_id):
+                        print("✅ 사용자 프로필이 검색 시스템(Qdrant)에 인덱싱되었습니다.")
+                    else:
+                        print("⚠️ 프로필 인덱싱 실패 (검색은 가능하나 개인화 기능이 제한될 수 있습니다)")
+                except Exception as e:
+                    print(f"⚠️ 프로필 인덱싱 오류: {e}")
+                    print("   (검색은 가능하나 개인화 기능이 제한될 수 있습니다)")
+                
                 return True
             else:
-                print("설문지 응답 저장에 실패했습니다.")
+                print("❌ 설문지 응답 저장에 실패했습니다.")
                 return False
         except Exception as e:
-            print(f"설문지 응답 저장 중 오류: {e}")
+            print(f"❌ 설문지 응답 저장 중 오류: {e}")
             return False
     
     def submit_survey(self):
@@ -365,12 +383,57 @@ class SurveyDialog:
         if survey_data is None:
             return
         
-        # 데이터 저장
-        if self.save_survey_data(survey_data):
+        # 데이터 저장 (SQLite만 먼저 저장)
+        if self.save_survey_data_to_sqlite(survey_data):
             messagebox.showinfo("설문 완료", "설문이 성공적으로 제출되었습니다!\n이제 파일 수집을 시작합니다.")
+            
+            # Qdrant 인덱싱은 백그라운드에서 실행 (tkinter 참조를 피하기 위해 user_id만 전달)
+            user_id_for_indexing = self.user_id
             self.root.destroy()  # 창을 완전히 닫음
+            
+            # 백그라운드 인덱싱 시작
+            self._start_background_indexing(user_id_for_indexing)
         else:
             messagebox.showerror("저장 오류", "설문 데이터 저장에 실패했습니다. 다시 시도해주세요.")
+    
+    def save_survey_data_to_sqlite(self, survey_data):
+        """설문지 데이터를 SQLite에만 저장합니다 (빠른 저장)."""
+        if SQLiteMeta is None:
+            print("Warning: SQLiteMeta not available. Survey data not saved.")
+            return False
+        
+        try:
+            db = SQLiteMeta()
+            success = db.insert_survey_response(self.user_id, survey_data)
+            if success:
+                print("✅ 설문지 응답이 SQLite에 저장되었습니다.")
+                return True
+            else:
+                print("❌ 설문지 응답 저장에 실패했습니다.")
+                return False
+        except Exception as e:
+            print(f"❌ 설문지 응답 저장 중 오류: {e}")
+            return False
+    
+    @staticmethod
+    def _start_background_indexing(user_id):
+        """사용자 프로필을 백그라운드에서 Qdrant에 인덱싱합니다."""
+        import threading
+        
+        def background_indexing(uid):
+            try:
+                from backend.database.user_profile_indexer import UserProfileIndexer
+                indexer = UserProfileIndexer()
+                if indexer.index_user_profile(uid):
+                    print("✅ 사용자 프로필이 검색 시스템(Qdrant)에 인덱싱되었습니다.")
+                else:
+                    print("⚠️ 프로필 인덱싱 실패 (검색은 가능하나 개인화 기능이 제한될 수 있습니다)")
+            except Exception as e:
+                print(f"⚠️ 프로필 인덱싱 오류: {e}")
+                print("   (검색은 가능하나 개인화 기능이 제한될 수 있습니다)")
+        
+        # 백그라운드 스레드에서 실행 (self 참조 없이 user_id만 전달)
+        threading.Thread(target=background_indexing, args=(user_id,), daemon=True).start()
     
     def skip_survey(self):
         """설문 건너뛰기"""
@@ -387,14 +450,27 @@ class SurveyDialog:
     def run(self):
         """설문지 창을 실행합니다."""
         self.root.mainloop()
+        
+        # Tcl_AsyncDelete 오류 방지를 위해, mainloop 종료 후 창을 확실하게 파괴합니다.
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
+        except tk.TclError:
+            pass  # 이미 파괴된 경우 무시
+        
         return True
 
 def show_survey_dialog(user_id=1):
     """설문지 다이얼로그를 표시합니다."""
+    import gc
     try:
         dialog = SurveyDialog(user_id)
-        dialog.run()
-        return True
+        result = dialog.run()
+        # tkinter 객체 정리
+        del dialog
+        # 가비지 컬렉션 강제 수행
+        gc.collect()
+        return result
     except Exception as e:
         print(f"설문지 다이얼로그 오류: {e}")
         return False
