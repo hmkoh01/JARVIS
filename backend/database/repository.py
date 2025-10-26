@@ -98,14 +98,16 @@ class Repository:
                      query_dense: List[float], 
                      query_sparse: Dict[str, List],
                      limit: int = 10,
-                     source_filter: Optional[str] = None) -> List[Hit]:
+                     source_filter: Optional[str] = None,
+                     query_filter: Optional[Dict[str, Any]] = None) -> List[Hit]:
         """하이브리드 검색 (Dense + Sparse)"""
         try:
             # Qdrant 하이브리드 검색
             results = self.qdrant.hybrid_search(
                 query_dense=query_dense,
                 query_sparse=query_sparse,
-                limit=limit
+                limit=limit,
+                query_filter=query_filter
             )
             
             # 결과를 Hit 객체로 변환

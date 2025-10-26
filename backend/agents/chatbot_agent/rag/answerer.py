@@ -60,7 +60,7 @@ def images_to_base64(images: List[Image.Image]) -> List[str]:
 # Gemini LLM 호출 함수
 # ==============================================================================
 
-def call_llm_for_answer(question: str, context: str, user_profile: Optional[str] = None) -> Optional[str]:
+def call_llm_for_answer(question: str, context: Optional[str], user_profile: Optional[str] = None) -> Optional[str]:
     """Gemini 모델을 사용하여 답변을 생성합니다."""
     try:
         # Gemini API 호출
@@ -88,21 +88,41 @@ def call_llm_for_answer(question: str, context: str, user_profile: Optional[str]
 """
             
             # 프롬프트 구성
-            prompt = f"""{system_context}당신은 사용자의 질문에 대해 주어진 정보를 바탕으로 정확하고 유용한 답변을 제공하는 AI 어시스턴트입니다.
+            if context:
+                # STANDARD_RAG 또는 SUMMARY_QUERY 경로
+                prompt = f"""
+[역할] 당신은 사용자의 질문에 대해 주어진 정보를 바탕으로 답변하는 AI 어시스턴트입니다.
+
+[사용자 프로필]
+{user_profile or "정보 없음"}
+
+[검색된 정보]
+{context}
+
+[지시 사항]
+1.  [사용자 프로필]과 [검색된 정보]를 모두 참고하여 [질문]에 답변하세요.
+2.  답변은 반드시 3~4문장 이내로 간결하고 명확하게 요약해야 합니다.
+3.  [검색된 정보]에 없는 내용은 절대 언급하지 말고 "정보를 찾을 수 없습니다"라고 답하세요.
+4.  친근한 한국어 말투를 사용하세요.
+
+[질문]
+{question}
+
+[답변]
+"""
+            else:
+                # GENERAL_CHAT 경로
+                prompt = f"""{system_context}당신은 개인 맞춤형 AI 비서입니다.
+사용자 프로필을 참고하여, 일반적인 대화(잡담) 질문에 친근하게 답변하세요.
 
 질문: {question}
 
-참고 정보:
-{context}
-
-위 정보와 사용자 프로필을 바탕으로 질문에 답변해주세요. 다음 사항을 지켜주세요:
+다음 사항을 지켜주세요:
 1. 사용자의 배경과 관심사를 고려한 맞춤형 답변을 제공하세요
-2. 주어진 정보만을 사용하여 답변하세요
-3. 정보가 부족한 부분은 솔직히 말하세요
-4. 한국어로 자연스럽고 친근하게 답변하세요
-5. 구체적이고 실용적인 정보를 제공하세요
-6. 출처 정보는 간단히 언급하세요
-7. 답변은 사용자의 질문에 따라 필요하다면 핵심적인 내용만 제공하세요
+2. 한국어로 자연스럽고 친근하게 답변하세요
+3. 일반적인 상식과 지식을 바탕으로 답변하세요
+4. 대화가 자연스럽게 이어지도록 답변하세요
+5. 필요하다면 관련 질문을 제안하세요
 
 답변:"""
 
@@ -131,9 +151,35 @@ def call_llm_for_answer(question: str, context: str, user_profile: Optional[str]
 # 핵심 답변 생성 함수
 # ==============================================================================
 
-def compose_answer(question: str, evidences: List[Dict[str, Any]], user_id: Optional[int] = None) -> str:
+def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], user_id: Optional[int] = None) -> str:
     """검색된 근거(evidences)를 바탕으로 최종 텍스트 답변을 구성합니다."""
     try:
+        # 사용자 프로필 가져오기
+        user_profile = None
+        if user_id:
+            try:
+                from database.user_profile_indexer import UserProfileIndexer
+                indexer = UserProfileIndexer()
+                user_profile = indexer.get_profile_as_context(user_id)
+                if user_profile:
+                    logger.info(f"사용자 {user_id} 프로필을 LLM 컨텍스트에 포함")
+            except Exception as e:
+                logger.warning(f"프로필 로드 실패: {e}")
+        
+        # evidences가 None인 경우 (GENERAL_CHAT 경로)
+        if evidences is None:
+            try:
+                gemini_answer = call_llm_for_answer(question, None, user_profile)
+                if gemini_answer:
+                    logger.info("Gemini 일반 대화 답변 생성 성공")
+                    return gemini_answer
+            except Exception as e:
+                logger.warning(f"Gemini 일반 대화 답변 생성 실패: {e}")
+            
+            # Gemini가 실패한 경우 기본 답변
+            return f"안녕하세요! '{question}'에 대해 답변드리겠습니다. 더 구체적인 질문이 있으시면 언제든 말씀해주세요."
+        
+        # evidences가 빈 리스트인 경우
         if not evidences:
             return "죄송합니다. 관련 정보를 찾을 수 없습니다."
 
@@ -159,18 +205,6 @@ def compose_answer(question: str, evidences: List[Dict[str, Any]], user_id: Opti
             return "관련 정보를 찾을 수 없습니다."
         
         context = "\n\n".join(context_parts)
-        
-        # 사용자 프로필 가져오기
-        user_profile = None
-        if user_id:
-            try:
-                from database.user_profile_indexer import UserProfileIndexer
-                indexer = UserProfileIndexer()
-                user_profile = indexer.get_profile_as_context(user_id)
-                if user_profile:
-                    logger.info(f"사용자 {user_id} 프로필을 LLM 컨텍스트에 포함")
-            except Exception as e:
-                logger.warning(f"프로필 로드 실패: {e}")
         
         # Gemini를 사용한 답변 생성 시도 (프로필 포함)
         try:

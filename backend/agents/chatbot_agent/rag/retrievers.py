@@ -36,7 +36,8 @@ def retrieve_local(question: str, repo: Repository, embedder: BGEM3Embedder,
             query_dense=query_dense,
             query_sparse=query_sparse,
             limit=k_candidates,
-            source_filter=None  # 모든 소스 검색
+            source_filter=None,  # 모든 소스 검색
+            query_filter=filters  # 필터 전달
         )
         
         if not candidates:

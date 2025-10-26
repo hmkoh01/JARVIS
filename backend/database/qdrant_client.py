@@ -134,7 +134,8 @@ class QdrantManager:
     def hybrid_search(self, 
                       query_dense: List[float], 
                       query_sparse: Dict[str, List],
-                      limit: int) -> List[Dict[str, Any]]:
+                      limit: int,
+                      query_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """하이브리드 검색 (Dense + Sparse) 후 RRF로 결과 융합"""
         
         # 1. SparseVector 생성
@@ -143,7 +144,23 @@ class QdrantManager:
             values=query_sparse['values']
         )
         
-        # 2. 두 검색을 한 번에 실행 (네트워크 효율성)
+        # 2. Qdrant 필터 생성
+        qdrant_filter = None
+        if query_filter:
+            # Qdrant 필터 조건 생성
+            conditions = []
+            for key, value in query_filter.items():
+                if isinstance(value, str):
+                    conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+                elif isinstance(value, list):
+                    conditions.append(models.FieldCondition(key=key, match=models.MatchAny(any=value)))
+                else:
+                    conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+            
+            if conditions:
+                qdrant_filter = models.Filter(must=conditions)
+        
+        # 3. 두 검색을 한 번에 실행 (네트워크 효율성)
         try:
             dense_results, sparse_results = self.client.search_batch(
                 collection_name=self.collection_name,
@@ -155,6 +172,7 @@ class QdrantManager:
                         ),
                         limit=limit,
                         with_payload=True,
+                        query_filter=qdrant_filter,
                         params=models.SearchParams(hnsw_ef=128)
                     ),
                     models.SearchRequest(
@@ -163,7 +181,8 @@ class QdrantManager:
                             vector=sparse_vector
                         ),
                         limit=limit,
-                        with_payload=True
+                        with_payload=True,
+                        query_filter=qdrant_filter
                     ),
                 ]
             )
