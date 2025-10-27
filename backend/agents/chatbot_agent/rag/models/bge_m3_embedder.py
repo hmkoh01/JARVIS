@@ -6,10 +6,11 @@ import torch
 from FlagEmbedding import BGEM3FlagModel
 import logging
 from pathlib import Path
+from utils.path_utils import get_config_path, get_model_cache_dir
 
 logger = logging.getLogger(__name__)
 
-# 프로젝트 루트 경로
+# 프로젝트 루트 경로 (EXE 환경 호환)
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent.parent
 
 class BGEM3Embedder:
@@ -34,22 +35,32 @@ class BGEM3Embedder:
         self._load_model()
     
     def _load_config(self, config_path: str) -> dict:
-        """설정 파일 로드"""
+        """설정 파일 로드 (EXE 환경 호환)"""
         try:
-            absolute_config_path = PROJECT_ROOT / config_path
-            if os.path.exists(absolute_config_path):
-                with open(absolute_config_path, 'r', encoding='utf-8') as f:
-                    return yaml.safe_load(f)
-            logger.warning(f"설정 파일을 찾을 수 없습니다. (경로: {absolute_config_path})")
-            return {}
+            config_file_path = get_config_path(config_path)
+            
+            if config_file_path.exists():
+                with open(config_file_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    logger.info(f"BGE-M3 설정 파일 로드 성공: {config_file_path}")
+                    return config
+            else:
+                logger.warning(f"BGE-M3 설정 파일을 찾을 수 없습니다: {config_file_path}")
+                return {}
+                
         except Exception as e:
-            logger.error(f"설정 로드 오류: {e}")
+            logger.error(f"BGE-M3 설정 로드 오류: {e}")
             return {}
 
     def _load_model(self):
-        """BGE-M3 모델 로드"""
+        """BGE-M3 모델 로드 (최적화된 버전)"""
         try:
             logger.info(f"'{self.model_name}' 모델 로딩 중...")
+            
+            # 모델이 이미 로드되어 있는지 확인
+            if self.model is not None:
+                logger.info("BGE-M3 모델이 이미 로드되어 있습니다.")
+                return
             
             # BGE-M3 모델 로드
             # use_fp16=True for faster inference

@@ -4,15 +4,13 @@ import logging.handlers
 from pathlib import Path
 from datetime import datetime
 from config.settings import settings
+from utils.path_utils import get_log_dir
 
 def setup_logging():
-    """로깅 설정 초기화"""
+    """로깅 설정 초기화 (EXE 환경 호환)"""
     
-    # 로그 디렉토리 생성
-    log_dir = Path(settings.LOG_FILE_PATH).parent
-    # 폴더가 존재하지 않을 때만 생성
-    if not log_dir.exists():
-        log_dir.mkdir(parents=True, exist_ok=True)
+    # 로그 디렉토리 생성 (EXE 환경 호환)
+    log_dir = get_log_dir()
     
     # 로그 레벨 설정
     log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
@@ -31,9 +29,10 @@ def setup_logging():
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
-    # 파일 핸들러 설정 (로테이팅)
+    # 파일 핸들러 설정 (로테이팅) - EXE 환경 호환
+    log_file_path = log_dir / "jarvis.log"
     file_handler = logging.handlers.RotatingFileHandler(
-        settings.LOG_FILE_PATH,
+        str(log_file_path),
         maxBytes=settings.LOG_MAX_SIZE,
         backupCount=settings.LOG_BACKUP_COUNT,
         encoding='utf-8'
@@ -72,8 +71,8 @@ def setup_logging():
     logger = logging.getLogger(__name__)
     logger.info("=" * 80)
     logger.info("🚀 JARVIS Multi-Agent System 로깅 시스템 초기화 완료")
-    logger.info(f"�� 로그 파일: {settings.LOG_FILE_PATH}")
-    logger.info(f"�� 로그 레벨: {settings.LOG_LEVEL}")
+    logger.info(f"📁 로그 파일: {log_file_path}")
+    logger.info(f"📊 로그 레벨: {settings.LOG_LEVEL}")
     logger.info(f"⏰ 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 80)
 

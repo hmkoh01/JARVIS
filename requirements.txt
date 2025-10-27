@@ -29,6 +29,11 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 uvicorn>=0.24.0
 
+# Authentication and OAuth
+authlib>=1.2.0  # For Google OAuth 2.0
+python-jose[cryptography]>=3.3.0  # For JWT token handling
+httpx>=0.25.0  # For async HTTP requests
+
 # LangChain and AI
 langchain-community>=0.0.20
 langchain-core>=0.1.0
@@ -43,3 +48,4 @@ python-dotenv>=1.0.0
 requests>=2.31.0
 tqdm>=4.66.0
 pywin32>=305  # For Windows system information collection
+keyring>=24.0.0  # For secure token storage

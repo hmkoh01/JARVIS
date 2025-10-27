@@ -6,8 +6,9 @@ import numpy as np
 from qdrant_client import QdrantClient, models
 import logging
 from pathlib import Path
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+from utils.path_utils import get_config_path
 
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 logger = logging.getLogger(__name__)
 
 class QdrantManager:
@@ -15,8 +16,8 @@ class QdrantManager:
     
     def __init__(self, config_path: str = "configs.yaml"):
         """초기화: 설정 로드, 클라이언트 연결, 하이브리드 컬렉션 확인/생성"""
-        absolute_config_path = PROJECT_ROOT / config_path
-        self.config = self._load_config(absolute_config_path)
+        config_file_path = get_config_path(config_path)
+        self.config = self._load_config(config_file_path)
         qdrant_config = self.config['qdrant']
         self.client = QdrantClient(url=qdrant_config['url'])
         self.collection_name = qdrant_config['collection_name']
@@ -136,68 +137,137 @@ class QdrantManager:
                       query_sparse: Dict[str, List],
                       limit: int,
                       query_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """하이브리드 검색 (Dense + Sparse) 후 RRF로 결과 융합"""
+        """하이브리드 검색 (Dense + Sparse) 후 RRF로 결과 융합 (개선된 버전)"""
         
-        # 1. SparseVector 생성
-        sparse_vector = models.SparseVector(
-            indices=query_sparse['indices'],
-            values=query_sparse['values']
-        )
-        
-        # 2. Qdrant 필터 생성
-        qdrant_filter = None
-        if query_filter:
-            # Qdrant 필터 조건 생성
-            conditions = []
-            for key, value in query_filter.items():
-                if isinstance(value, str):
-                    conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
-                elif isinstance(value, list):
-                    conditions.append(models.FieldCondition(key=key, match=models.MatchAny(any=value)))
-                else:
-                    conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
-            
-            if conditions:
-                qdrant_filter = models.Filter(must=conditions)
-        
-        # 3. 두 검색을 한 번에 실행 (네트워크 효율성)
         try:
-            dense_results, sparse_results = self.client.search_batch(
-                collection_name=self.collection_name,
-                requests=[
-                    models.SearchRequest(
-                        vector=models.NamedVector(
-                            name="dense",
-                            vector=query_dense
-                        ),
-                        limit=limit,
-                        with_payload=True,
-                        query_filter=qdrant_filter,
-                        params=models.SearchParams(hnsw_ef=128)
+            # 1. 입력 검증
+            if not query_dense or len(query_dense) == 0:
+                logger.error("빈 dense 벡터로 검색할 수 없습니다.")
+                return []
+            
+            if not query_sparse or not query_sparse.get('indices') or not query_sparse.get('values'):
+                logger.warning("Sparse 벡터가 비어있어 dense 검색만 수행합니다.")
+                return self._dense_only_search(query_dense, limit, query_filter)
+            
+            # 2. SparseVector 생성 (안전하게)
+            try:
+                sparse_vector = models.SparseVector(
+                    indices=query_sparse['indices'],
+                    values=query_sparse['values']
+                )
+            except Exception as e:
+                logger.error(f"SparseVector 생성 실패: {e}")
+                return self._dense_only_search(query_dense, limit, query_filter)
+            
+            # 3. Qdrant 필터 생성 (안전하게)
+            qdrant_filter = None
+            if query_filter:
+                try:
+                    conditions = []
+                    for key, value in query_filter.items():
+                        if isinstance(value, str):
+                            conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+                        elif isinstance(value, list):
+                            conditions.append(models.FieldCondition(key=key, match=models.MatchAny(any=value)))
+                        else:
+                            conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+                    
+                    if conditions:
+                        qdrant_filter = models.Filter(must=conditions)
+                except Exception as e:
+                    logger.warning(f"필터 생성 실패, 필터 없이 검색: {e}")
+                    qdrant_filter = None
+            
+            # 4. 두 검색을 한 번에 실행 (네트워크 효율성)
+            try:
+                # SearchRequest 생성 시 올바른 파라미터 사용
+                dense_request = models.SearchRequest(
+                    vector=models.NamedVector(
+                        name="dense",
+                        vector=query_dense
                     ),
-                    models.SearchRequest(
-                        vector=models.NamedSparseVector(
-                            name="sparse",
-                            vector=sparse_vector
-                        ),
-                        limit=limit,
-                        with_payload=True,
-                        query_filter=qdrant_filter
+                    limit=limit,
+                    with_payload=True,
+                    params=models.SearchParams(hnsw_ef=128)
+                )
+                
+                sparse_request = models.SearchRequest(
+                    vector=models.NamedSparseVector(
+                        name="sparse",
+                        vector=sparse_vector
                     ),
-                ]
+                    limit=limit,
+                    with_payload=True
+                )
+                
+                # 필터가 있는 경우에만 추가
+                if qdrant_filter:
+                    dense_request.query_filter = qdrant_filter
+                    sparse_request.query_filter = qdrant_filter
+                
+                dense_results, sparse_results = self.client.search_batch(
+                    collection_name=self.collection_name,
+                    requests=[dense_request, sparse_request]
+                )
+            except Exception as e:
+                logger.error(f"하이브리드 검색 오류: {e}")
+                # 하이브리드 검색 실패 시 dense 검색만 시도
+                return self._dense_only_search(query_dense, limit, query_filter)
+
+            # 5. 결과 융합 (Reciprocal Rank Fusion)
+            fused_results = self._reciprocal_rank_fusion(
+                [dense_results, sparse_results],
+                [self.retrieval_weights['dense'], self.retrieval_weights['sparse']]
             )
+            
+            # 6. 최종 결과 반환 (상위 limit 개)
+            return fused_results[:limit]
+            
         except Exception as e:
-            logger.error(f"하이브리드 검색 오류: {e}")
+            logger.error(f"하이브리드 검색 전체 오류: {e}")
             return []
 
-        # 4. 결과 융합 (Reciprocal Rank Fusion)
-        fused_results = self._reciprocal_rank_fusion(
-            [dense_results, sparse_results],
-            [self.retrieval_weights['dense'], self.retrieval_weights['sparse']]
-        )
-        
-        # 5. 최종 결과 반환 (상위 limit 개)
-        return fused_results[:limit]
+    def _dense_only_search(self, query_dense: List[float], limit: int, query_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Dense 벡터만 사용한 검색 (fallback)"""
+        try:
+            # Qdrant 필터 생성
+            qdrant_filter = None
+            if query_filter:
+                try:
+                    conditions = []
+                    for key, value in query_filter.items():
+                        if isinstance(value, str):
+                            conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+                        elif isinstance(value, list):
+                            conditions.append(models.FieldCondition(key=key, match=models.MatchAny(any=value)))
+                        else:
+                            conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+                    
+                    if conditions:
+                        qdrant_filter = models.Filter(must=conditions)
+                except Exception as e:
+                    logger.warning(f"Dense 검색 필터 생성 실패: {e}")
+                    qdrant_filter = None
+            
+            # Dense 검색만 수행
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=models.NamedVector(name="dense", vector=query_dense),
+                limit=limit,
+                with_payload=True,
+                query_filter=qdrant_filter,
+                search_params=models.SearchParams(hnsw_ef=128)
+            )
+            
+            # 결과를 표준 형식으로 변환
+            return [
+                {'id': result.id, 'score': result.score, 'payload': result.payload}
+                for result in results
+            ]
+            
+        except Exception as e:
+            logger.error(f"Dense 검색 오류: {e}")
+            return []
 
     def _reciprocal_rank_fusion(self, results_lists: List[List[models.ScoredPoint]], weights: List[float], k: int = 60) -> List[Dict[str, Any]]:
         """여러 검색 결과 리스트를 RRF 알고리즘으로 융합합니다."""

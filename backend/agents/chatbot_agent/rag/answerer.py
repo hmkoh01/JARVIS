@@ -4,8 +4,76 @@ import logging
 from typing import List, Dict, Any, Optional
 from PIL import Image
 import io
+from datetime import datetime, timedelta
+import threading
 
 logger = logging.getLogger(__name__)
+
+# 사용자 프로필 캐시 (메모리 기반)
+_user_profile_cache = {}
+_cache_lock = threading.Lock()
+CACHE_EXPIRY_HOURS = 1  # 1시간 캐시 유지
+
+def _get_cached_user_profile(user_id: int) -> Optional[str]:
+    """캐시에서 사용자 프로필 조회"""
+    with _cache_lock:
+        if user_id in _user_profile_cache:
+            cache_entry = _user_profile_cache[user_id]
+            # 캐시 만료 확인
+            if datetime.now() < cache_entry['expires_at']:
+                logger.debug(f"사용자 {user_id} 프로필 캐시 히트")
+                return cache_entry['profile']
+            else:
+                # 만료된 캐시 제거
+                del _user_profile_cache[user_id]
+                logger.debug(f"사용자 {user_id} 프로필 캐시 만료로 제거")
+    return None
+
+def _cache_user_profile(user_id: int, profile: str):
+    """사용자 프로필을 캐시에 저장"""
+    with _cache_lock:
+        _user_profile_cache[user_id] = {
+            'profile': profile,
+            'expires_at': datetime.now() + timedelta(hours=CACHE_EXPIRY_HOURS)
+        }
+        logger.debug(f"사용자 {user_id} 프로필 캐시 저장")
+
+def _clear_expired_cache():
+    """만료된 캐시 항목들 정리"""
+    with _cache_lock:
+        current_time = datetime.now()
+        expired_keys = [
+            user_id for user_id, cache_entry in _user_profile_cache.items()
+            if current_time >= cache_entry['expires_at']
+        ]
+        for key in expired_keys:
+            del _user_profile_cache[key]
+        if expired_keys:
+            logger.debug(f"만료된 캐시 {len(expired_keys)}개 항목 정리")
+
+def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
+    """검색 결과를 깔끔하게 정리하여 컨텍스트 생성"""
+    if not evidences:
+        return ""
+    
+    context_parts = []
+    seen_content = set()  # 중복 내용 방지
+    
+    for i, evidence in enumerate(evidences[:3], 1):  # 상위 3개만 사용
+        snippet = evidence.get('snippet', '')
+        if not snippet or snippet in seen_content:
+            continue
+            
+        seen_content.add(snippet)
+        
+        # 불필요한 태그나 특수문자 제거
+        snippet = snippet.replace('<!-- image -->', '').replace('#', '').strip()
+        if len(snippet) > 200:  # 너무 긴 내용은 잘라내기
+            snippet = snippet[:200] + "..."
+        
+        context_parts.append(f"{i}. {snippet}")
+    
+    return "\n\n".join(context_parts)
 
 # ==============================================================================
 # 보안 관련 함수들
@@ -73,67 +141,99 @@ def call_llm_for_answer(question: str, context: Optional[str], user_profile: Opt
                 logger.warning("GEMINI_API_KEY가 설정되지 않았습니다.")
                 return None
             
-            # Gemini 모델 초기화
+            # Gemini 모델 초기화 (최적화된 설정 + 안전성 설정)
             genai.configure(api_key=settings.GEMINI_API_KEY)
-            model = genai.GenerativeModel(settings.GEMINI_MODEL)
+            model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                generation_config={
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "max_output_tokens": 200,  # 응답 길이 제한
+                    "response_mime_type": "text/plain"
+                },
+                safety_settings=[
+                    {
+                        "category": "HARM_CATEGORY_HARASSMENT",
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_HATE_SPEECH", 
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    }
+                ]
+            )
             
-            # 시스템 컨텍스트 (사용자 프로필 포함)
+            # 시스템 컨텍스트 (사용자 프로필 포함) - 간소화
             system_context = ""
             if user_profile:
                 system_context = f"""
-[사용자 프로필]
-{user_profile}
-
-위 프로필을 참고하여 사용자의 배경과 관심사를 고려한 맞춤형 답변을 제공하세요.
+사용자 프로필: {user_profile[:300]}  # 프로필 길이 제한
+위 프로필을 참고하여 맞춤형 답변을 제공하세요.
 """
             
-            # 프롬프트 구성
+            # 프롬프트 구성 (간소화 + 품질 개선)
             if context:
                 # STANDARD_RAG 또는 SUMMARY_QUERY 경로
-                prompt = f"""
-[역할] 당신은 사용자의 질문에 대해 주어진 정보를 바탕으로 답변하는 AI 어시스턴트입니다.
+                prompt = f"""{system_context}
+검색된 정보를 바탕으로 질문에 간결하게 답변하세요.
 
-[사용자 프로필]
-{user_profile or "정보 없음"}
+정보:
+{context[:600]}  # 컨텍스트 길이 제한
 
-[검색된 정보]
-{context}
-
-[지시 사항]
-1.  [사용자 프로필]과 [검색된 정보]를 모두 참고하여 [질문]에 답변하세요.
-2.  답변은 반드시 3~4문장 이내로 간결하고 명확하게 요약해야 합니다.
-3.  [검색된 정보]에 없는 내용은 절대 언급하지 말고 "정보를 찾을 수 없습니다"라고 답하세요.
-4.  친근한 한국어 말투를 사용하세요.
-
-[질문]
-{question}
-
-[답변]
-"""
-            else:
-                # GENERAL_CHAT 경로
-                prompt = f"""{system_context}당신은 개인 맞춤형 AI 비서입니다.
-사용자 프로필을 참고하여, 일반적인 대화(잡담) 질문에 친근하게 답변하세요.
+규칙:
+- 검색된 정보만 사용하여 답변
+- 2-3문장으로 간결하게
+- 중복 내용 제거
+- 핵심만 전달
 
 질문: {question}
 
-다음 사항을 지켜주세요:
-1. 사용자의 배경과 관심사를 고려한 맞춤형 답변을 제공하세요
-2. 한국어로 자연스럽고 친근하게 답변하세요
-3. 일반적인 상식과 지식을 바탕으로 답변하세요
-4. 대화가 자연스럽게 이어지도록 답변하세요
-5. 필요하다면 관련 질문을 제안하세요
+답변:"""
+            else:
+                # GENERAL_CHAT 경로
+                prompt = f"""{system_context}
+일반적인 질문에 간결하고 친근하게 답변하세요.
+
+질문: {question}
 
 답변:"""
 
-            # Gemini API 호출
-            response = model.generate_content(prompt)
-            
-            if response and response.text:
-                logger.info("Gemini 답변 생성 성공" + (" (프로필 포함)" if user_profile else ""))
-                return response.text
-            else:
-                logger.warning("Gemini 응답이 비어있습니다.")
+            # Gemini API 호출 (타임아웃 설정 + 오류 처리 개선)
+            try:
+                response = model.generate_content(
+                    prompt,
+                    request_options={"timeout": 5}  # 5초 타임아웃
+                )
+                
+                if response and response.text:
+                    logger.info("Gemini 답변 생성 성공")
+                    return response.text.strip()
+                else:
+                    # finish_reason 확인
+                    if hasattr(response, 'candidates') and response.candidates:
+                        candidate = response.candidates[0]
+                        if hasattr(candidate, 'finish_reason'):
+                            if candidate.finish_reason == 2:  # SAFETY
+                                logger.warning("Gemini API가 안전성 정책으로 인해 응답을 차단했습니다.")
+                                return "죄송합니다. 해당 질문에 대해 안전한 답변을 제공할 수 없습니다."
+                            elif candidate.finish_reason == 3:  # RECITATION
+                                logger.warning("Gemini API가 저작권 정책으로 인해 응답을 차단했습니다.")
+                                return "죄송합니다. 저작권 정책으로 인해 해당 내용을 제공할 수 없습니다."
+                    
+                    logger.warning("Gemini 응답이 비어있습니다.")
+                    return None
+                    
+            except Exception as api_error:
+                logger.error(f"Gemini API 호출 중 오류: {api_error}")
                 return None
                 
         except ImportError:
@@ -154,17 +254,30 @@ def call_llm_for_answer(question: str, context: Optional[str], user_profile: Opt
 def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], user_id: Optional[int] = None) -> str:
     """검색된 근거(evidences)를 바탕으로 최종 텍스트 답변을 구성합니다."""
     try:
-        # 사용자 프로필 가져오기
+        # 사용자 프로필 가져오기 (캐싱 적용 + 최적화)
         user_profile = None
         if user_id:
-            try:
-                from database.user_profile_indexer import UserProfileIndexer
-                indexer = UserProfileIndexer()
-                user_profile = indexer.get_profile_as_context(user_id)
-                if user_profile:
-                    logger.info(f"사용자 {user_id} 프로필을 LLM 컨텍스트에 포함")
-            except Exception as e:
-                logger.warning(f"프로필 로드 실패: {e}")
+            # 1. 캐시에서 먼저 확인
+            user_profile = _get_cached_user_profile(user_id)
+            
+            # 2. 캐시에 없으면 DB에서 조회하고 캐시에 저장 (간소화된 조회)
+            if user_profile is None:
+                try:
+                    from database.user_profile_indexer import UserProfileIndexer
+                    indexer = UserProfileIndexer()
+                    user_profile = indexer.get_profile_as_context(user_id)
+                    if user_profile:
+                        # 프로필이 너무 길면 잘라서 캐시
+                        if len(user_profile) > 500:
+                            user_profile = user_profile[:500] + "..."
+                        _cache_user_profile(user_id, user_profile)
+                        logger.debug(f"사용자 {user_id} 프로필을 DB에서 조회하여 캐시에 저장")
+                    else:
+                        logger.debug(f"사용자 {user_id} 프로필이 DB에 없음")
+                except Exception as e:
+                    logger.warning(f"프로필 로드 실패: {e}")
+            else:
+                logger.debug(f"사용자 {user_id} 프로필을 캐시에서 조회")
         
         # evidences가 None인 경우 (GENERAL_CHAT 경로)
         if evidences is None:
@@ -183,28 +296,11 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
         if not evidences:
             return "죄송합니다. 관련 정보를 찾을 수 없습니다."
 
-        # 검색된 정보를 컨텍스트로 정리
-        context_parts = []
-        for i, evidence in enumerate(evidences[:5], 1):  # 상위 5개만 사용
-            snippet = evidence.get('snippet', '')
-            path = evidence.get('path', '')
-            url = evidence.get('url', '')
-            source = evidence.get('source', 'unknown')
-            
-            if snippet:
-                # 민감 정보 마스킹
-                security_patterns = _get_security_patterns()
-                clean_snippet = _redact_sensitive_info(snippet, security_patterns)
-                context_parts.append(f"[정보 {i}] {clean_snippet}")
-            elif path:
-                context_parts.append(f"[정보 {i}] 파일: {os.path.basename(path)}")
-            elif url:
-                context_parts.append(f"[정보 {i}] 웹페이지: {url}")
+        # 검색된 정보를 깔끔하게 정리
+        context = _clean_search_results(evidences)
         
-        if not context_parts:
+        if not context:
             return "관련 정보를 찾을 수 없습니다."
-        
-        context = "\n\n".join(context_parts)
         
         # Gemini를 사용한 답변 생성 시도 (프로필 포함)
         try:

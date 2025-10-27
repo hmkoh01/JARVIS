@@ -11,6 +11,7 @@ if str(current_dir) not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routes import router
+from api.auth_routes import router as auth_router
 from core.agent_registry import agent_registry
 from database.sqlite_meta import SQLiteMeta
 from config.settings import settings
@@ -77,6 +78,7 @@ app.add_middleware(
 
 # API 라우터 등록
 app.include_router(router, prefix="/api/v2")
+app.include_router(auth_router)  # 인증 라우터 (prefix는 auth_routes.py에서 설정됨)
 
 
 # -----------------------------------------------------------------------------

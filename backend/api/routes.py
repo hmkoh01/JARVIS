@@ -11,7 +11,7 @@ backend_dir = Path(__file__).parent.parent.absolute()
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import asyncio
@@ -24,8 +24,11 @@ from core.agent_registry import agent_registry
 
 from database.data_collector import get_manager, data_collection_managers
 from database.sqlite_meta import SQLiteMeta
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
 
 router = APIRouter()
+security = HTTPBearer()
 
 @router.post("/chat")
 async def chat_with_agent(chat_request: ChatRequest) -> ChatResponse:
@@ -218,7 +221,6 @@ async def get_data_collection_stats():
         file_count = stats['collected_files']
         browser_count = stats['collected_browser_history']
         app_count = stats['collected_apps']
-        screen_count = stats['collected_screenshots']
         
         # 최근 24시간 내 데이터 수
         from datetime import datetime, timedelta
@@ -228,20 +230,17 @@ async def get_data_collection_stats():
         recent_files = file_count // 7
         recent_browser = browser_count // 7
         recent_apps = app_count // 7
-        recent_screens = screen_count // 7
         
         return {
             "total_records": {
                 "files": file_count,
                 "browser_history": browser_count,
-                "active_applications": app_count,
-                "screen_activities": screen_count
+                "active_applications": app_count
             },
             "last_24_hours": {
                 "files": recent_files,
                 "browser_history": recent_browser,
-                "active_applications": recent_apps,
-                "screen_activities": recent_screens
+                "active_applications": recent_apps
             },
             "active_collectors": len(data_collection_managers),
             "timestamp": datetime.utcnow().isoformat()
@@ -366,3 +365,179 @@ async def get_user_profile_context(user_id: int):
     except Exception as e:
         logger.error(f"프로필 조회 오류: {e}")
         raise HTTPException(status_code=500, detail=f"프로필 조회 오류: {str(e)}") 
+
+# ============================================================================
+# 사용자 설정 관련 엔드포인트
+# ============================================================================
+
+def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> int:
+    """JWT에서 user_id 추출"""
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        user_id = payload.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        return user_id
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+@router.post("/settings/initial-setup")
+async def initial_setup(
+    request: dict,
+    user_id: int = Depends(get_current_user_id)
+):
+    """초기 설정 완료 - 폴더 경로 저장 및 설정 완료 상태 업데이트"""
+    try:
+        db = SQLiteMeta()
+        folder_path = request.get("folder_path", "")
+        
+        # 폴더 경로 업데이트
+        success1 = db.update_user_folder(user_id, folder_path)
+        
+        # 설정 완료 상태 업데이트
+        success2 = db.update_user_setup_status(user_id, 1)
+        
+        if success1 and success2:
+            return {
+                "success": True,
+                "message": "초기 설정이 완료되었습니다."
+            }
+        else:
+            raise HTTPException(status_code=500, detail="설정 저장에 실패했습니다.")
+    
+    except Exception as e:
+        logger.error(f"초기 설정 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/settings/update-folder")
+async def update_folder(
+    request: dict,
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    데이터 폴더 변경 - 기존 데이터 완전 삭제 후 재수집
+    
+    1. 데이터 수집 중지
+    2. SQLite에서 user_id 관련 데이터 삭제
+    3. Qdrant에서 user_id 관련 벡터 삭제
+    4. 새 폴더 경로로 업데이트
+    5. 데이터 수집 재시작
+    """
+    try:
+        import os
+        import sys
+        from pathlib import Path
+        
+        db = SQLiteMeta()
+        new_folder_path = request.get("new_folder_path", "")
+        
+        logger.info(f"사용자 {user_id}의 데이터 폴더 변경 시작...")
+        logger.info(f"새 폴더 경로: {new_folder_path}")
+        
+        # 1. 데이터 수집 중지
+        logger.info("데이터 수집 중지 중...")
+        from database.data_collector import get_manager
+        manager = get_manager(user_id)
+        if manager:
+            manager.stop_collection()
+        
+        # 2. SQLite에서 user_id 관련 데이터 삭제
+        logger.info(f"SQLite에서 사용자 {user_id}의 데이터 삭제 중...")
+        try:
+            # files 테이블 삭제
+            db.conn.execute("DELETE FROM files WHERE user_id = ?", (user_id,))
+            # web_history 테이블 삭제
+            db.conn.execute("DELETE FROM web_history WHERE user_id = ?", (user_id,))
+            # apps 테이블 삭제
+            db.conn.execute("DELETE FROM apps WHERE user_id = ?", (user_id,))
+            db.conn.commit()
+            logger.info("SQLite 데이터 삭제 완료")
+        except Exception as e:
+            logger.error(f"SQLite 데이터 삭제 오류: {e}")
+            db.conn.rollback()
+        
+        # 3. Qdrant에서 user_id 관련 벡터 삭제
+        logger.info(f"Qdrant에서 사용자 {user_id}의 벡터 삭제 중...")
+        try:
+            from database.qdrant_client import QdrantManager
+            from qdrant_client import models
+            
+            qdrant = QdrantManager()
+            
+            # user_id 필터로 모든 벡터 검색
+            from qdrant_client.http import models as qdrant_models
+            
+            # 포인트를 스크롤하여 user_id로 필터링
+            scroll_result = qdrant.client.scroll(
+                collection_name=qdrant.collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="user_id",
+                            match=models.MatchValue(value=user_id)
+                        )
+                    ]
+                ),
+                limit=10000,
+                with_payload=True
+            )
+            
+            # 삭제할 포인트 ID 수집
+            point_ids_to_delete = []
+            for point in scroll_result[0]:
+                if point.payload.get("user_id") == user_id:
+                    point_ids_to_delete.append(point.id)
+            
+            # 벡터 삭제
+            if point_ids_to_delete:
+                qdrant.client.delete(
+                    collection_name=qdrant.collection_name,
+                    points_selector=models.PointIdsList(points=point_ids_to_delete)
+                )
+                logger.info(f"Qdrant에서 {len(point_ids_to_delete)}개 벡터 삭제 완료")
+            else:
+                logger.info("삭제할 Qdrant 벡터가 없습니다.")
+                
+        except Exception as e:
+            logger.error(f"Qdrant 벡터 삭제 오류: {e}")
+            # Qdrant 삭제 실패해도 계속 진행
+        
+        # 4. 새 폴더 경로로 업데이트
+        logger.info("새 폴더 경로로 업데이트 중...")
+        success = db.update_user_folder(user_id, new_folder_path)
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="폴더 경로 업데이트에 실패했습니다.")
+        
+        # 5. 데이터 수집 재시작
+        logger.info("데이터 수집 재시작 중...")
+        try:
+            # 폴더 리스트 준비
+            selected_folders = [new_folder_path] if new_folder_path else None
+            
+            # 새 스레드에서 초기 수집 시작
+            import threading
+            collection_thread = threading.Thread(
+                target=manager.perform_initial_collection,
+                args=(selected_folders,),
+                daemon=True
+            )
+            collection_thread.start()
+            
+            logger.info("데이터 수집 백그라운드 스레드 시작됨")
+            
+        except Exception as e:
+            logger.error(f"데이터 수집 재시작 오류: {e}")
+            # 데이터 수집 실패해도 성공 메시지 반환 (폴더는 업데이트됨)
+        
+        return {
+            "success": True,
+            "message": "데이터 폴더가 성공적으로 변경되었습니다. 새 데이터가 수집되고 있습니다."
+        }
+    
+    except Exception as e:
+        logger.error(f"폴더 경로 업데이트 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) 

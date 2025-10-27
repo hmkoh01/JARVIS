@@ -85,17 +85,3 @@ class ActiveAppInfo(BaseModel):
     window_state: Optional[str] = None
     cpu_usage: float
     memory_usage: float
-
-class ScreenActivityInfo(BaseModel):
-    """화면 활동 정보 모델"""
-    screenshot_path: str
-    activity_description: str
-    activity_category: str
-    activity_confidence: float
-    detected_apps: List[str]
-    detected_text: List[str]
-    detected_objects: List[str]
-    screen_resolution: str
-    color_mode: str
-    captured_at: datetime
-    analyzed_at: Optional[datetime] = None 

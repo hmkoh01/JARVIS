@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT: int = 120  # 요청 타임아웃 (초)
     KEEP_ALIVE_TIMEOUT: int = 5  # Keep-alive 타임아웃 (초)
     
+    # Google OAuth 2.0 설정
+    GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID")
+    GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET")
+    GOOGLE_REDIRECT_URI: str = "http://127.0.0.1:9090/auth/callback"
+    
+    # JWT 설정
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-this-in-production")
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRATION_HOURS: int = 24
+    
     class Config:
         env_file = ".env"
 

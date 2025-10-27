@@ -67,9 +67,24 @@ class SQLiteMeta:
     def _init_db(self):
         """데이터베이스 초기화 및 테이블 생성"""
         with sqlite3.connect(self.db_path) as conn:
+            # Users 테이블 생성 (먼저 생성하여 FK 참조 가능하도록)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    google_user_id TEXT UNIQUE NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    refresh_token TEXT,
+                    has_completed_setup INTEGER NOT NULL DEFAULT 0,
+                    selected_root_folder TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
+            """)
+            
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS files (
                     doc_id TEXT PRIMARY KEY,
+                    user_id INTEGER,
                     path TEXT NOT NULL,
                     mime TEXT,
                     size INTEGER,
@@ -77,13 +92,15 @@ class SQLiteMeta:
                     updated_at INTEGER,
                     accessed_at INTEGER,
                     category TEXT,
-                    preview TEXT
+                    preview TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
             """)
             
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS web_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
                     url TEXT NOT NULL,
                     title TEXT,
                     visited_at INTEGER,
@@ -93,38 +110,26 @@ class SQLiteMeta:
                     version TEXT,
                     domain TEXT,
                     duration_sec INTEGER,
-                    tab_title TEXT
+                    tab_title TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
             """)
             
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS apps (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
                     name TEXT NOT NULL,
                     pid INTEGER,
                     cpu REAL,
                     mem REAL,
                     started_at INTEGER,
                     window_title TEXT,
-                    category TEXT
+                    category TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
             """)
             
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS screenshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    doc_id TEXT,
-                    path TEXT,
-                    captured_at INTEGER,
-                    app_name TEXT,
-                    window_title TEXT,
-                    hash TEXT,
-                    ocr TEXT,
-                    gemini_desc TEXT,
-                    category TEXT,
-                    confidence REAL
-                )
-            """)
             
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS interests (
@@ -195,26 +200,6 @@ class SQLiteMeta:
                 )
             """)
             
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS collected_screenshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    screenshot_path TEXT,
-                    screenshot_data BLOB,
-                    activity_description TEXT,
-                    activity_category TEXT,
-                    activity_confidence REAL,
-                    detected_apps TEXT,  -- JSON as TEXT
-                    detected_text TEXT,  -- JSON as TEXT
-                    detected_objects TEXT,  -- JSON as TEXT
-                    screen_resolution TEXT,
-                    color_mode TEXT,
-                    screenshot_embedding TEXT,  -- JSON as TEXT
-                    activity_embedding TEXT,  -- JSON as TEXT
-                    captured_at INTEGER,
-                    analyzed_at INTEGER
-                )
-            """)
             
             # 사용자 설문지 응답 테이블 추가
             conn.execute("""
@@ -231,30 +216,67 @@ class SQLiteMeta:
                 )
             """)
             
-            # 인덱스 생성
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_web_history_visited_at ON web_history(visited_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_apps_started_at ON apps(started_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_screenshots_captured_at ON screenshots(captured_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_interests_user_updated ON interests(user_id, updated_at)")
-            
-            # 데이터 수집 테이블 인덱스
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_files_user_id ON collected_files(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_files_discovered_at ON collected_files(discovered_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_browser_user_id ON collected_browser_history(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_browser_recorded_at ON collected_browser_history(recorded_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_user_id ON collected_apps(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_recorded_at ON collected_apps(recorded_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_screenshots_user_id ON collected_screenshots(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_screenshots_captured_at ON collected_screenshots(captured_at)")
-            
-            # 데이터베이스 마이그레이션 실행
+            # 데이터베이스 마이그레이션 실행 (먼저 실행하여 컬럼 추가)
             self._migrate_database(conn)
+            
+            # 인덱스 생성 (마이그레이션 후에 실행)
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_user_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+                
+                # user_id 컬럼이 있는 테이블에만 인덱스 생성
+                cursor = conn.execute("PRAGMA table_info(files)")
+                columns = [column[1] for column in cursor.fetchall()]
+                if 'user_id' in columns:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)")
+                    
+                cursor = conn.execute("PRAGMA table_info(web_history)")
+                columns = [column[1] for column in cursor.fetchall()]
+                if 'user_id' in columns:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_web_history_user_id ON web_history(user_id)")
+                    
+                cursor = conn.execute("PRAGMA table_info(apps)")
+                columns = [column[1] for column in cursor.fetchall()]
+                if 'user_id' in columns:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_apps_user_id ON apps(user_id)")
+                    
+                
+                # interests 테이블이 있을 경우에만 인덱스 생성
+                try:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_interests_user_updated ON interests(user_id, updated_at)")
+                except:
+                    pass
+                
+                # 데이터 수집 테이블 인덱스
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_files_user_id ON collected_files(user_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_files_discovered_at ON collected_files(discovered_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_browser_user_id ON collected_browser_history(user_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_browser_recorded_at ON collected_browser_history(recorded_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_user_id ON collected_apps(user_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_recorded_at ON collected_apps(recorded_at)")
+            except Exception as e:
+                logger.warning(f"인덱스 생성 중 일부 오류 발생 (무시됨): {e}")
             
             conn.commit()
     
     def _migrate_database(self, conn):
         """데이터베이스 마이그레이션 실행"""
         try:
+            # 기존 테이블에 user_id 컬럼 추가 (마이그레이션)
+            tables_to_migrate = ['files', 'web_history', 'apps']
+            
+            for table_name in tables_to_migrate:
+                try:
+                    cursor = conn.execute(f"PRAGMA table_info({table_name})")
+                    columns = [column[1] for column in cursor.fetchall()]
+                    
+                    if 'user_id' not in columns:
+                        logger.info(f"{table_name} 테이블에 user_id 컬럼 추가 중...")
+                        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN user_id INTEGER")
+                        logger.info(f"{table_name} 테이블에 user_id 컬럼 추가 완료")
+                except Exception as e:
+                    logger.warning(f"{table_name} 테이블 마이그레이션 중 오류: {e}")
+            
             # collected_files 테이블에 file_hash 컬럼이 없으면 추가
             cursor = conn.execute("PRAGMA table_info(collected_files)")
             columns = [column[1] for column in cursor.fetchall()]
@@ -342,23 +364,6 @@ class SQLiteMeta:
             logger.error(f"앱 정보 삽입 오류: {e}")
             return False
     
-    def insert_screenshot(self, doc_id: str, path: str, captured_at: int = None,
-                          app_name: str = None, window_title: str = None, hash: str = None,
-                          ocr: str = None, gemini_desc: str = None, category: str = None,
-                          confidence: float = None) -> bool:
-        """스크린샷 정보 삽입"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO screenshots 
-                    (doc_id, path, captured_at, app_name, window_title, hash, ocr, gemini_desc, category, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (doc_id, path, captured_at, app_name, window_title, hash, ocr, gemini_desc, category, confidence))
-                conn.commit()
-                return True
-        except Exception as e:
-            logger.error(f"스크린샷 삽입 오류: {e}")
-            return False
     
     def upsert_interest(self, user_id: str, topic: str, score: float = 1.0) -> bool:
         """관심사 업서트"""
@@ -425,24 +430,6 @@ class SQLiteMeta:
             logger.error(f"앱 정보 조회 오류: {e}")
             return []
     
-    def recent_screenshots(self, limit: int = 100, since_ts: int = None) -> List[Dict[str, Any]]:
-        """최근 스크린샷 조회"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                query = "SELECT * FROM screenshots"
-                params = []
-                if since_ts:
-                    query += " WHERE captured_at >= ?"
-                    params.append(since_ts)
-                query += " ORDER BY captured_at DESC LIMIT ?"
-                params.append(limit)
-                
-                cursor = conn.execute(query, params)
-                return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"스크린샷 조회 오류: {e}")
-            return []
     
     def top_interests(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """사용자 관심사 조회"""
@@ -552,38 +539,6 @@ class SQLiteMeta:
                 self.conn.rollback()            
             return False
 
-    def insert_collected_screenshot(self, screenshot_info: Dict[str, Any]) -> bool:
-        """수집된 스크린샷 정보 저장"""
-        try:
-            import json
-            self.conn.execute("""
-                    INSERT INTO collected_screenshots 
-                    (user_id, screenshot_path, screenshot_data, activity_description, activity_category,
-                     activity_confidence, detected_apps, detected_text, detected_objects, screen_resolution,
-                     color_mode, captured_at, analyzed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    screenshot_info['user_id'],
-                    screenshot_info.get('screenshot_path', ''),
-                    screenshot_info.get('screenshot_data'),
-                    screenshot_info.get('activity_description', ''),
-                    screenshot_info.get('activity_category', ''),
-                    screenshot_info.get('activity_confidence', 0.0),
-                    json.dumps(screenshot_info.get('detected_apps', [])),
-                    json.dumps(screenshot_info.get('detected_text', [])),
-                    json.dumps(screenshot_info.get('detected_objects', [])),
-                    screenshot_info.get('screen_resolution', ''),
-                    screenshot_info.get('color_mode', 'light'),
-                    int(datetime.now().timestamp()),
-                    int(datetime.now().timestamp())
-                ))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"수집된 스크린샷 저장 오류: {e}")
-            if self.conn:
-                self.conn.rollback()            
-            return False
 
     def get_collected_files(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
         """사용자 수집 파일 목록 조회"""
@@ -636,22 +591,6 @@ class SQLiteMeta:
                 self.conn.rollback()            
             return []
 
-    def get_collected_screenshots(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-        """사용자 수집 스크린샷 조회"""
-        try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
-                    SELECT * FROM collected_screenshots 
-                    WHERE user_id = ? 
-                    ORDER BY captured_at DESC 
-                    LIMIT ?
-                """, (user_id, limit))
-            return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"수집된 스크린샷 조회 오류: {e}")
-            if self.conn:
-                self.conn.rollback()            
-            return []
 
     def get_collection_stats(self) -> Dict[str, int]:
         """데이터 수집 통계 조회"""
@@ -663,8 +602,6 @@ class SQLiteMeta:
             stats['collected_browser_history'] = cursor.fetchone()[0]
             cursor = self.conn.execute("SELECT COUNT(*) FROM collected_apps")
             stats['collected_apps'] = cursor.fetchone()[0]
-            cursor = self.conn.execute("SELECT COUNT(*) FROM collected_screenshots")
-            stats['collected_screenshots'] = cursor.fetchone()[0]
             return stats
         except Exception as e:
             logger.error(f"수집 통계 조회 오류: {e}")
@@ -844,3 +781,128 @@ class SQLiteMeta:
             if self.conn:
                 self.conn.rollback()            
             return False
+    
+    # === 사용자 관리 메서드들 ===
+    
+    def get_or_create_user_by_google(self, google_id: str, email: str, refresh_token: str = None) -> Optional[Dict[str, Any]]:
+        """Google ID로 사용자를 조회하고, 없으면 새로 생성 후 user 객체를 반환"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            current_time = int(datetime.now().timestamp())
+            
+            # 기존 사용자 조회
+            cursor = self.conn.execute("""
+                SELECT * FROM users WHERE google_user_id = ?
+            """, (google_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                # 사용자 존재 - refresh_token 업데이트 (제공된 경우)
+                if refresh_token:
+                    self.conn.execute("""
+                        UPDATE users 
+                        SET refresh_token = ?, updated_at = ?
+                        WHERE google_user_id = ?
+                    """, (refresh_token, current_time, google_id))
+                    self.conn.commit()
+                    
+                    # 업데이트된 사용자 정보 조회
+                    cursor = self.conn.execute("""
+                        SELECT * FROM users WHERE google_user_id = ?
+                    """, (google_id,))
+                    row = cursor.fetchone()
+                
+                return dict(row) if row else None
+            else:
+                # 새 사용자 생성
+                cursor = self.conn.execute("""
+                    INSERT INTO users 
+                    (google_user_id, email, refresh_token, has_completed_setup, created_at, updated_at)
+                    VALUES (?, ?, ?, 0, ?, ?)
+                """, (google_id, email, refresh_token, current_time, current_time))
+                self.conn.commit()
+                
+                # 생성된 사용자 조회
+                cursor = self.conn.execute("""
+                    SELECT * FROM users WHERE google_user_id = ?
+                """, (google_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+                
+        except Exception as e:
+            logger.error(f"사용자 조회/생성 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return None
+    
+    def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """user_id로 사용자 정보 조회"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM users WHERE user_id = ?
+            """, (user_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"사용자 조회 오류: {e}")
+            return None
+    
+    def get_user_by_google_id(self, google_id: str) -> Optional[Dict[str, Any]]:
+        """google_user_id로 사용자 정보 조회"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM users WHERE google_user_id = ?
+            """, (google_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"사용자 조회 오류: {e}")
+            return None
+    
+    def update_user_setup_status(self, user_id: int, status: int) -> bool:
+        """has_completed_setup 값을 (0 또는 1로) 업데이트"""
+        try:
+            current_time = int(datetime.now().timestamp())
+            self.conn.execute("""
+                UPDATE users 
+                SET has_completed_setup = ?, updated_at = ?
+                WHERE user_id = ?
+            """, (status, current_time, user_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"사용자 설정 상태 업데이트 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+    
+    def update_user_folder(self, user_id: int, folder_path: str) -> bool:
+        """selected_root_folder 경로를 업데이트"""
+        try:
+            current_time = int(datetime.now().timestamp())
+            self.conn.execute("""
+                UPDATE users 
+                SET selected_root_folder = ?, updated_at = ?
+                WHERE user_id = ?
+            """, (folder_path, current_time, user_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"사용자 폴더 경로 업데이트 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+    
+    def get_user_folder(self, user_id: int) -> Optional[str]:
+        """user_id로 selected_root_folder 경로를 조회"""
+        try:
+            cursor = self.conn.execute("""
+                SELECT selected_root_folder FROM users WHERE user_id = ?
+            """, (user_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else None
+        except Exception as e:
+            logger.error(f"사용자 폴더 경로 조회 오류: {e}")
+            return None

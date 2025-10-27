@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from tqdm import tqdm
 import logging
+import requests
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +315,45 @@ def wait_for_backend_server():
     print("❌ 백엔드 서버 시작 시간 초과")
     return False
 
-def perform_user_survey():
+def get_stored_token():
+    """저장된 토큰 조회"""
+    # login_view 모듈에서 get_stored_token 함수를 import하여 사용
+    try:
+        # frontend 디렉토리를 경로에 추가
+        frontend_dir = str(Path("frontend").resolve())
+        if frontend_dir not in sys.path:
+            sys.path.insert(0, frontend_dir)
+        
+        from login_view import get_stored_token as login_get_token
+        return login_get_token()
+    except ImportError as e:
+        print(f"토큰 조회 실패: {e}")
+        return None
+
+def check_auth_and_get_user_info():
+    """인증 확인 및 사용자 정보 반환 - 항상 로그인 창 표시"""
+    print("\n🔐 Google 계정으로 로그인합니다...")
+    
+    # login_view 모듈 임포트
+    try:
+        # frontend 디렉토리를 경로에 추가
+        frontend_dir = str(Path("frontend").resolve())
+        if frontend_dir not in sys.path:
+            sys.path.insert(0, frontend_dir)
+        
+        from login_view import main as login_main
+    except ImportError as e:
+        print(f"❌ 로그인 모듈 import 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
+    # 항상 로그인 화면 실행 (기존 토큰 무시)
+    print("📱 Google 로그인 창을 표시합니다...")
+    user_info = login_main()
+    return user_info
+
+def perform_user_survey(user_id):
     """사용자 설문지를 실행합니다."""
     print("\n📋 사용자 설문지를 시작합니다...")
     
@@ -321,7 +361,6 @@ def perform_user_survey():
         from frontend.survey_dialog import show_survey_dialog
         
         # 설문지 다이얼로그 실행
-        user_id = 1  # 기본 사용자 ID
         success = show_survey_dialog(user_id)
         
         if success:
@@ -336,6 +375,27 @@ def perform_user_survey():
         return False
     except Exception as e:
         print(f"❌ 설문지 실행 중 오류: {e}")
+        return False
+
+def submit_folder_setup(folder_path, token):
+    """폴더 경로를 백엔드에 전송"""
+    try:
+        response = requests.post(
+            "http://localhost:8000/api/v2/settings/initial-setup",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"folder_path": folder_path},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print("✅ 폴더 경로가 백엔드에 저장되었습니다.")
+            return True
+        else:
+            print(f"❌ 백엔드 저장 실패: {response.text}")
+            return False
+    
+    except Exception as e:
+        print(f"❌ 백엔드 저장 중 오류: {e}")
         return False
 
 def perform_folder_selection():
@@ -374,14 +434,13 @@ def perform_folder_selection():
         print(f"❌ 폴더 선택 중 오류: {e}")
         return False
 
-def perform_initial_data_collection_with_progress():
+def perform_initial_data_collection_with_progress(user_id: int):
     """선택된 폴더로 데이터 수집을 시작하고 진행률을 표시합니다."""
-    print("\n📊 데이터 수집을 시작합니다...")
+    print(f"\n📊 사용자 {user_id}의 데이터 수집을 시작합니다...")
     
     try:
         from backend.database.data_collector import get_manager
         
-        user_id = 1
         manager = get_manager(user_id)
         
         collection_thread = threading.Thread(
@@ -573,66 +632,115 @@ def main():
     if not initialize_database():
         return
     
-    while True:     
-        print("\n🔄 전체 시스템을 시작합니다...")
-        backend_process = start_backend()
-        logger.info(f"백엔드 서버 시작: {backend_process}")
-        if not backend_process:
-            logger.error("백엔드 서버 시작에 실패했습니다.")
-            break
+    # 백엔드를 먼저 시작해야 인증 API에 접근 가능
+    print("\n🔄 백엔드 서버를 먼저 시작합니다...")
+    backend_process = start_backend()
+    if not backend_process:
+        print("❌ 백엔드 서버 시작에 실패했습니다.")
+        return
+    
+    # 백엔드 서버 시작 대기
+    if not wait_for_backend_server():
+        print("❌ 백엔드 서버 시작에 실패했습니다.")
+        backend_process.terminate()
+        return
+    
+    # 인증 확인 및 사용자 정보 받기
+    user_info = check_auth_and_get_user_info()
+    if user_info is None:
+        print("❌ 사용자 인증에 실패했습니다. 시스템을 종료합니다.")
+        backend_process.terminate()
+        return
+    
+    # 토큰 저장 (나중에 사용)
+    token = get_stored_token()
+    
+    # 사용자 설정 완료 여부 확인
+    has_completed_setup = user_info.get("has_completed_setup", 0)
+    user_id = user_info.get("user_id")
+
+    # has_completed_setup에 따라 분기
+    if has_completed_setup == 0:
+        # 신규 사용자: 설문지 + 폴더 선택 진행
+        print("\n📋 신규 사용자 설정을 진행합니다...")
+        print("   - 사용자 설문지 작성")
+        print("   - 폴더 선택")
+        print("   - 초기 데이터 수집")
         
-        # 백엔드 서버가 시작된 후 설문지 수행
-        print("⏳ 백엔드 서버 시작을 기다리는 중...")
-        if not wait_for_backend_server():
-            print("❌ 백엔드 서버 시작에 실패했습니다.")
-            backend_process.terminate()
-            break
-        
-        # 사용자 설문지 실행
-        if not perform_user_survey():
+        # 설문지 실행
+        if not perform_user_survey(user_id):
             print("❌ 설문지가 취소되었습니다. 시스템을 종료합니다.")
             backend_process.terminate()
-            break
+            return
         
         # 폴더 선택 수행
         if not perform_folder_selection():
             print("❌ 폴더 선택이 취소되었습니다. 시스템을 종료합니다.")
             backend_process.terminate()
-            break
+            return
         
-        # 초기 데이터 수집 수행 (완료될 때까지 대기)
-        if not perform_initial_data_collection_with_progress():
+        # 선택된 폴더를 백엔드에 전송
+        if selected_folders_global:
+            # 여러 폴더가 선택된 경우 첫 번째 폴더를 사용
+            folder_path = selected_folders_global[0]
+        else:
+            # 전체 사용자 폴더 스캔 선택됨
+            folder_path = None
+        
+        # 백엔드에 폴더 경로 전송
+        if not submit_folder_setup(folder_path or "", token):
+            print("❌ 폴더 경로를 백엔드에 저장하는데 실패했습니다. 시스템을 종료합니다.")
+            backend_process.terminate()
+            return
+        
+        print("✅ 초기 설정이 완료되었습니다.")
+    else:
+        # 기존 사용자: 설문지와 폴더 선택 건너뛰기
+        print("\n✅ 기존 사용자입니다. 초기 설정을 건너뜁니다.")
+        print("   - 설문지: 이미 완료됨")
+        print("   - 폴더 선택: 이미 완료됨")
+        print("   - 기존 데이터 사용")
+        
+    # 초기 데이터 수집 수행 (완료될 때까지 대기)
+    if has_completed_setup == 0:
+        print("\n📊 초기 데이터 수집을 시작합니다...")
+        if not perform_initial_data_collection_with_progress(user_id):
             print("❌ 초기 데이터 수집에 실패했습니다. 시스템을 종료합니다.")
             backend_process.terminate()
-            break
+            return
+    else:
+        print("\n📊 기존 데이터를 사용합니다.")
+        print("   - 이미 수집된 파일 데이터 사용")
+        print("   - 이미 수집된 브라우저 히스토리 사용")
+        print("   - 이미 수집된 앱 사용 기록 사용")
         
-        frontend_process = start_frontend()
-        if not frontend_process:
-            backend_process.terminate()
-            break
-            
-        print("\n🎉 JARVIS Multi-Agent System이 성공적으로 시작되었습니다!")
-        print("=" * 60)
-        print("🔗 API 문서: http://localhost:8000/docs")
-        print("📊 시스템 정보: http://localhost:8000/info")
-        print("🔍 Qdrant 관리: http://localhost:6333/dashboard")
-        print("=" * 60)
-        print("\n시스템을 종료하려면 Ctrl+C를 누르세요...")
+    # 프론트엔드 시작
+    frontend_process = start_frontend()
+    if not frontend_process:
+        backend_process.terminate()
+        return
         
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n🛑 시스템을 종료합니다...")
-            backend_process.terminate()
-            frontend_process.terminate()
-            # Qdrant 서버도 중지할지 묻기
-            if check_docker():
-                choice = input("Qdrant 서버도 중지하시겠습니까? (y/n): ").strip().lower()
-                if choice == 'y':
-                    stop_qdrant_server()
-            print("✅ 시스템이 종료되었습니다.")
-        break
+    print("\n🎉 JARVIS Multi-Agent System이 성공적으로 시작되었습니다!")
+    print("=" * 60)
+    print("🔗 API 문서: http://localhost:8000/docs")
+    print("📊 시스템 정보: http://localhost:8000/info")
+    print("🔍 Qdrant 관리: http://localhost:6333/dashboard")
+    print("=" * 60)
+    print("\n시스템을 종료하려면 Ctrl+C를 누르세요...")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n🛑 시스템을 종료합니다...")
+        backend_process.terminate()
+        frontend_process.terminate()
+        # Qdrant 서버도 중지할지 묻기
+        if check_docker():
+            choice = input("Qdrant 서버도 중지하시겠습니까? (y/n): ").strip().lower()
+            if choice == 'y':
+                stop_qdrant_server()
+        print("✅ 시스템이 종료되었습니다.")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ import logging
 from .qdrant_client import QdrantManager
 from .sqlite_meta import SQLiteMeta
 from pathlib import Path
+from utils.path_utils import get_config_path, get_db_path
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 logger = logging.getLogger(__name__)
 
@@ -27,10 +29,12 @@ class Repository:
     """Qdrant + SQLite 통합 Repository (하이브리드 검색 지원)"""
     
     def __init__(self, config_path: str = "configs.yaml"):
-        absolute_config_path = PROJECT_ROOT / config_path
-        self.config = self._load_config(absolute_config_path)
+        config_file_path = get_config_path(config_path)
+        self.config = self._load_config(config_file_path)
         self.qdrant = QdrantManager(config_path)
-        self.sqlite = SQLiteMeta(self.config.get('sqlite', {}).get('path', './sqlite/meta.db'))
+        # EXE 환경 호환 DB 경로 사용
+        db_path = get_db_path(self.config.get('sqlite', {}).get('path', 'meta.db'))
+        self.sqlite = SQLiteMeta(str(db_path))
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """설정 파일 로드"""
@@ -172,8 +176,6 @@ class Repository:
     def insert_app(self, name: str, **kwargs) -> bool:
         return self.sqlite.insert_app(name, **kwargs)
     
-    def insert_screenshot(self, doc_id: str, path: str, **kwargs) -> bool:
-        return self.sqlite.insert_screenshot(doc_id, path, **kwargs)
     
     def upsert_interest(self, user_id: str, topic: str, score: float = 1.0) -> bool:
         return self.sqlite.upsert_interest(user_id, topic, score)
@@ -187,11 +189,35 @@ class Repository:
     def recent_apps(self, limit: int = 100, since_ts: int = None):
         return self.sqlite.recent_apps(limit, since_ts)
     
-    def recent_screenshots(self, limit: int = 100, since_ts: int = None):
-        return self.sqlite.recent_screenshots(limit, since_ts)
     
     def top_interests(self, user_id: str, limit: int = 10):
         return self.sqlite.top_interests(user_id, limit)
     
     def find_file_by_path(self, path: str):
         return self.sqlite.find_file_by_path(path)
+    
+    # === 사용자 관리 메서드들 ===
+    
+    def get_or_create_user_by_google(self, google_id: str, email: str, refresh_token: str = None):
+        """Google ID로 사용자를 조회하고, 없으면 새로 생성 후 user 객체를 반환"""
+        return self.sqlite.get_or_create_user_by_google(google_id, email, refresh_token)
+    
+    def get_user_by_id(self, user_id: int):
+        """user_id로 사용자 정보 조회"""
+        return self.sqlite.get_user_by_id(user_id)
+    
+    def get_user_by_google_id(self, google_id: str):
+        """google_user_id로 사용자 정보 조회"""
+        return self.sqlite.get_user_by_google_id(google_id)
+    
+    def update_user_setup_status(self, user_id: int, status: int) -> bool:
+        """has_completed_setup 값을 (0 또는 1로) 업데이트"""
+        return self.sqlite.update_user_setup_status(user_id, status)
+    
+    def update_user_folder(self, user_id: int, folder_path: str) -> bool:
+        """selected_root_folder 경로를 업데이트"""
+        return self.sqlite.update_user_folder(user_id, folder_path)
+    
+    def get_user_folder(self, user_id: int):
+        """user_id로 selected_root_folder 경로를 조회"""
+        return self.sqlite.get_user_folder(user_id)

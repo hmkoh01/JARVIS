@@ -265,16 +265,16 @@ class FloatingChatApp:
         
     def create_chat_window(self):
         """채팅창 생성"""
-        # 채팅창 윈도우
+        # 채팅창 윈도우 (헤더 높이 증가에 맞춰 높이 조정)
         self.chat_window = tk.Toplevel(self.root)
         self.chat_window.title("JARVIS AI Assistant")
-        self.chat_window.geometry('500x600')
+        self.chat_window.geometry('500x620')
         self.chat_window.configure(bg='white')
         
         # 버튼과 같은 위치에 배치
         button_x = self.root.winfo_x()
         button_y = self.root.winfo_y()
-        self.chat_window.geometry(f'500x600+{button_x}+{button_y}')
+        self.chat_window.geometry(f'500x620+{button_x}+{button_y}')
         
         # 항상 최상단에 표시
         self.chat_window.attributes('-topmost', True)
@@ -282,30 +282,49 @@ class FloatingChatApp:
         # 윈도우 크기 조정 방지
         self.chat_window.resizable(False, False)
         
-        # 헤더
-        header_frame = tk.Frame(self.chat_window, bg='#4f46e5', height=80)
+        # 헤더 (높이 증가)
+        header_frame = tk.Frame(self.chat_window, bg='#4f46e5', height=100)
         header_frame.pack(fill='x', padx=0, pady=0)
         header_frame.pack_propagate(False)
         
+        # 제목과 부제목을 담을 프레임
+        title_container = tk.Frame(header_frame, bg='#4f46e5')
+        title_container.pack(side='left', fill='both', expand=True, padx=20, pady=15)
+        
         # 제목
         title_label = tk.Label(
-            header_frame,
+            title_container,
             text="JARVIS AI Assistant",
             font=self.title_font,
             bg='#4f46e5',
             fg='white'
         )
-        title_label.pack(side='left', padx=20, pady=20)
+        title_label.pack(anchor='w')
         
         # 부제목
         subtitle_label = tk.Label(
-            header_frame,
+            title_container,
             text="Multi-Agent System",
             font=self.subtitle_font,
             bg='#4f46e5',
             fg='#e0e7ff'
         )
-        subtitle_label.pack(side='left', padx=20, pady=(0, 20))
+        subtitle_label.pack(anchor='w', pady=(5, 0))
+        
+        # 설정 버튼 (더 큰 크기와 여백)
+        settings_button = tk.Button(
+            header_frame,
+            text="⚙️",
+            font=('Arial', 18),
+            bg='#4f46e5',
+            fg='white',
+            relief='flat',
+            cursor='hand2',
+            command=self.show_settings_menu,
+            width=3,
+            height=1
+        )
+        settings_button.pack(side='right', padx=15, pady=25)
         
         # 메시지 영역
         self.messages_frame = tk.Frame(self.chat_window, bg='white')
@@ -762,6 +781,98 @@ class FloatingChatApp:
         text_widget.config(state='disabled')
         text_widget.mark_set(tk.INSERT, '1.0')
         text_widget.see(tk.INSERT)
+    
+    def show_settings_menu(self):
+        """설정 메뉴 표시"""
+        import tkinter.messagebox as messagebox
+        
+        # 메뉴 생성
+        menu = tk.Menu(self.chat_window, tearoff=0)
+        menu.add_command(label="📁 데이터 폴더 변경", command=self.change_data_folder)
+        menu.add_separator()
+        menu.add_command(label="ℹ️ 정보", command=lambda: messagebox.showinfo("JARVIS", "JARVIS Multi-Agent System\nVersion 1.0"))
+        
+        # 설정 버튼 위치에 메뉴 표시 (헤더 높이 증가에 맞춰 조정)
+        button_x = self.chat_window.winfo_rootx() + 450
+        button_y = self.chat_window.winfo_rooty() + 60
+        menu.post(button_x, button_y)
+    
+    def change_data_folder(self):
+        """데이터 폴더 변경"""
+        import tkinter.messagebox as messagebox
+        import sys
+        from pathlib import Path
+        
+        # 확인 대화상자
+        result = messagebox.askyesno(
+            "데이터 폴더 변경",
+            "데이터 폴더를 변경하면 기존 데이터가 모두 삭제되고\n새로운 폴더에서 데이터를 수집합니다.\n\n계속하시겠습니까?"
+        )
+        
+        if not result:
+            return
+        
+        # 폴더 선택 UI 표시
+        try:
+            sys.path.insert(0, str(Path("frontend")))
+            from folder_selector import select_folders
+            
+            # 폴더 선택
+            selected_folders = select_folders()
+            
+            if selected_folders == "cancelled":
+                messagebox.showinfo("알림", "폴더 선택이 취소되었습니다.")
+                return
+            
+            # 폴더 경로 결정
+            if selected_folders is None:
+                # 전체 사용자 폴더 스캔
+                folder_path = ""
+            elif selected_folders:
+                # 첫 번째 폴더 사용
+                folder_path = selected_folders[0]
+            else:
+                messagebox.showwarning("오류", "올바른 폴더를 선택해주세요.")
+                return
+            
+            # 백엔드 API 호출
+            self.call_update_folder_api(folder_path)
+            
+        except Exception as e:
+            messagebox.showerror("오류", f"폴더 선택 중 오류가 발생했습니다: {e}")
+    
+    def call_update_folder_api(self, folder_path: str):
+        """백엔드에 폴더 업데이트 요청"""
+        import tkinter.messagebox as messagebox
+        import sys
+        from pathlib import Path
+        
+        try:
+            # 토큰 조회
+            sys.path.insert(0, str(Path("frontend")))
+            from login_view import get_stored_token
+            
+            token = get_stored_token()
+            if not token:
+                messagebox.showerror("오류", "로그인이 필요합니다.")
+                return
+            
+            # API 호출
+            response = requests.post(
+                f"{self.API_BASE_URL}/settings/update-folder",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"new_folder_path": folder_path},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                messagebox.showinfo("완료", "데이터 폴더가 성공적으로 변경되었습니다.\n새 데이터가 수집되고 있습니다.")
+            else:
+                error_msg = response.json().get("detail", "알 수 없는 오류")
+                messagebox.showerror("오류", f"폴더 변경 실패: {error_msg}")
+                
+        except Exception as e:
+            messagebox.showerror("오류", f"API 호출 중 오류: {e}")
     
     def copy_selected_text(self, event=None):
         """현재 포커스된 텍스트 위젯에서 선택된 텍스트 복사"""

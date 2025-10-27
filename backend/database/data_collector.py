@@ -261,7 +261,14 @@ class FileCollector:
                 
                 for chunk in chunk_infos:
                     all_texts.append(chunk['text'])
-                    all_metas.append({'source': 'file', 'path': file_info['file_path'], 'doc_id': doc_id, 'chunk_id': chunk['chunk_id'], 'snippet': chunk['snippet']})
+                    all_metas.append({
+                        'user_id': self.user_id,  # user_id 포함
+                        'source': 'file', 
+                        'path': file_info['file_path'], 
+                        'doc_id': doc_id, 
+                        'chunk_id': chunk['chunk_id'], 
+                        'snippet': chunk['snippet']
+                    })
                     
                 # 파일 해시 매핑 저장
                 if file_hash:
@@ -329,7 +336,16 @@ class BrowserHistoryCollector:
                     doc_id = f"web_{hashlib.md5(item['url'].encode()).hexdigest()}"
                     for i, chunk in enumerate(chunks):
                         all_texts.append(chunk)
-                        all_metas.append({'source': 'web', 'url': item['url'], 'title': item['title'], 'doc_id': doc_id, 'chunk_id': i, 'timestamp': int(item['visit_time'].timestamp()), 'snippet': chunk[:200]})
+                        all_metas.append({
+                            'user_id': self.user_id,  # user_id 포함
+                            'source': 'web', 
+                            'url': item['url'], 
+                            'title': item['title'], 
+                            'doc_id': doc_id, 
+                            'chunk_id': i, 
+                            'timestamp': int(item['visit_time'].timestamp()), 
+                            'snippet': chunk[:200]
+                        })
             if all_texts:
                 print(f"🧠 BGE-M3로 {len(all_texts)}개 웹 청크 임베딩 생성...")
                 embeddings = embedder.encode_documents(all_texts, batch_size=12)
@@ -397,87 +413,6 @@ class ActiveApplicationCollector:
             if self.sqlite_meta.insert_collected_app(app): saved += 1
         return saved
 
-# -----------------------------------------------------------------------------
-# ScreenActivityCollector
-# -----------------------------------------------------------------------------
-class ScreenActivityCollector:
-    def __init__(self, user_id: int):
-        self.user_id = user_id
-        self.sqlite_meta = SQLiteMeta()
-        self.screenshot_dir = Path("uploads/screenshots")
-        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
-        self.llm = self._initialize_llm()
-    
-    def _initialize_llm(self):
-        try:
-            if settings.GEMINI_API_KEY:
-                import google.generativeai as genai
-                genai.configure(api_key=settings.GEMINI_API_KEY); return genai.GenerativeModel(settings.GEMINI_MODEL)
-        except Exception as e: print(f"LLM 초기화 오류: {e}")
-        return None
-    
-    def capture_screenshot(self) -> Optional[Tuple[bytes, str]]:
-        try:
-            screenshot = ImageGrab.grab()
-            filename = f"screenshot_{self.user_id}_{datetime.now():%Y%m%d_%H%M%S}.png"
-            file_path = self.screenshot_dir / filename
-            screenshot.save(file_path, 'PNG')
-            with open(file_path, 'rb') as f: return f.read(), str(file_path)
-        except Exception as e: print(f"스크린샷 캡처 오류: {e}"); return None
-    
-    async def analyze_screenshot_with_llm(self, image_data: bytes) -> Dict[str, Any]:
-        if not self.llm: return self._fallback_analysis()
-        try:
-            import base64, re
-            prompt = f'JSON 응답만 제공해주세요: ... data:image/png;base64,{base64.b64encode(image_data).decode("utf-8")}' # 프롬프트 생략
-            response = await self.llm.generate_content_async(prompt)
-            if (match := re.search(r'\{.*\}', response.text, re.DOTALL)): return json.loads(match.group())
-        except Exception as e: print(f"LLM 분석 오류: {e}")
-        return self._fallback_analysis()
-    
-    def _fallback_analysis(self) -> Dict[str, Any]:
-        return {"activity_description": "스크린샷 캡처됨", "activity_category": "unknown", "detected_text": []}
-    
-    def save_screen_activity_to_db(self, screenshot_data: bytes, file_path: str, analysis: Dict[str, Any], repo: Repository, embedder: BGEM3Embedder) -> bool:
-        try:
-            screen = ImageGrab.grab()
-            success = self.sqlite_meta.insert_collected_screenshot({
-                'user_id': self.user_id, 'screenshot_path': file_path,
-                'activity_description': analysis.get('activity_description', ''),
-                'activity_category': analysis.get('activity_category', 'unknown'),
-                'detected_text': json.dumps(analysis.get('detected_text', [])),
-                'screen_resolution': f"{screen.width}x{screen.height}"
-            })
-            if success: self._index_screen_activity_for_rag(file_path, analysis, repo, embedder)
-            return success
-        except Exception as e:
-            print(f"화면 활동 저장 오류: {e}")
-            return False
-
-    def _index_screen_activity_for_rag(self, file_path: str, analysis: Dict[str, Any], repo: Repository, embedder: BGEM3Embedder):
-        content = f"화면 활동 요약: {analysis.get('activity_description', '')}\n화면에서 감지된 텍스트: {' '.join(analysis.get('detected_text', []))}"
-        if not content.strip() or not repo: return
-        try:       
-            embeddings = embedder.encode_documents([content], batch_size=1)
-            dense_vec, sparse_vec_data = embeddings['dense_vecs'][0].tolist(), embedder.convert_sparse_to_qdrant_format(embeddings['lexical_weights'][0])
-            
-            # doc_id 생성 (파일 경로 기반)
-            doc_id = f"screen_{hashlib.md5(file_path.encode()).hexdigest()}"
-            
-            meta = {
-                'source': 'screen',
-                'doc_id': doc_id,
-                'path': file_path,
-                'description': analysis.get('activity_description', ''),
-                'category': analysis.get('activity_category', 'unknown'),
-                'timestamp': int(datetime.utcnow().timestamp()),
-                'content': content,  # 전체 내용
-                'snippet': content[:500]  # 검색 결과용 스니펫 (500자 제한)
-            }
-            if not repo.qdrant.upsert_vectors([meta], [dense_vec], [sparse_vec_data]):
-                print("❌ Qdrant 화면 활동 인덱싱 실패")
-        except Exception as e:
-            print(f"화면 활동 RAG 인덱싱 오류: {e}")
 
 # -----------------------------------------------------------------------------
 # DataCollectionManager
@@ -488,13 +423,14 @@ class DataCollectionManager:
         self.file_collector = FileCollector(user_id)
         self.browser_collector = BrowserHistoryCollector(user_id)
         self.app_collector = ActiveApplicationCollector(user_id)
-        self.screen_collector = ScreenActivityCollector(user_id)
         self.running, self.initial_collection_done = False, False
         self.progress, self.progress_message = 0.0, "초기화 중..."
         print("RAG 시스템 핵심 컴포넌트 초기화 중...")
         try:
             self.repository = Repository()
-            self.embedder = BGEM3Embedder()
+            # 싱글톤 임베더 사용
+            from agents.chatbot_agent.rag.react_agent import _get_embedder
+            self.embedder = _get_embedder()
             self.document_parser = DocumentParser()
             print("✅ RAG 시스템 컴포넌트 초기화 완료.")
         except Exception as e:
@@ -551,7 +487,7 @@ class DataCollectionManager:
         print(f"사용자 {self.user_id}의 데이터 수집이 중지되었습니다.")
     
     def _collection_loop(self):
-        intervals = {'file': 3600, 'browser': 1800, 'app': 300, 'screen': 60}
+        intervals = {'file': 3600, 'browser': 1800, 'app': 300}
         last_run = {key: 0 for key in intervals}
         while self.running:
             if not self.repository: time.sleep(10); continue
@@ -559,7 +495,6 @@ class DataCollectionManager:
             if current_time - last_run['file'] >= intervals['file']: self._collect_files(); last_run['file'] = current_time
             if current_time - last_run['browser'] >= intervals['browser']: self._collect_browser_history(); last_run['browser'] = current_time
             if current_time - last_run['app'] >= intervals['app']: self._collect_active_apps(); last_run['app'] = current_time
-            if current_time - last_run['screen'] >= intervals['screen']: self._collect_screen_activity(); last_run['screen'] = current_time
             time.sleep(10)
 
     def _collect_files(self):
@@ -574,14 +509,6 @@ class DataCollectionManager:
         apps = self.app_collector.collect_active_applications()
         self.app_collector.save_active_apps_to_db(apps)
     
-    def _collect_screen_activity(self):
-        if (res := self.screen_collector.capture_screenshot()):
-            image_data, file_path = res
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            analysis = loop.run_until_complete(self.screen_collector.analyze_screenshot_with_llm(image_data))
-            loop.close()
-            self.screen_collector.save_screen_activity_to_db(image_data, file_path, analysis, self.repository, self.embedder)
 # -----------------------------------------------------------------------------
 # 전역 관리 함수
 # -----------------------------------------------------------------------------
