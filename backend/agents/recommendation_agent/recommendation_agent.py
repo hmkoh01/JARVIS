@@ -1,8 +1,13 @@
 import numpy as np
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+from collections import Counter
+import logging
+
 from ..base_agent import BaseAgent, AgentResponse
 from database.sqlite_meta import SQLiteMeta  # 변경됨: SQLAlchemy 대신 SQLiteMeta 사용
+
+logger = logging.getLogger(__name__)
 
 class RecommendationAgent(BaseAgent):
     """추천 및 제안 관련 작업을 처리하는 에이전트"""
@@ -117,6 +122,110 @@ class RecommendationAgent(BaseAgent):
         
         return job_recommendations.get(job_field, "전문 분야에 맞는 자료를 추천드릴 수 있습니다.")
     
+    async def run_periodic_analysis(self, user_id: int, recommendation_type: str = 'scheduled') -> (bool, str):
+        """
+        지난 1주일간의 사용자 데이터를 분석하여 추천을 생성합니다.
+        :return: (성공 여부, 메시지) 튜플
+        """
+        logger.info(f"사용자 {user_id}에 대한 주기적 분석 시작 (타입: {recommendation_type})...")
+        
+        try:
+            # 1. 지난 1주일 데이터 조회
+            one_week_ago = int((datetime.now() - timedelta(days=7)).timestamp())
+            files = self.sqlite_meta.get_collected_files_since(user_id, one_week_ago)
+            history = self.sqlite_meta.get_collected_browser_history_since(user_id, one_week_ago)
+            data_source = "최근 활동"
+
+            # 1차 폴백: 전체 기간 데이터 조회
+            if not files and not history:
+                logger.info(f"User {user_id}: 지난 1주일간 데이터가 없어 전체 데이터를 조회합니다.")
+                files = self.sqlite_meta.get_collected_files(user_id)
+                history = self.sqlite_meta.get_collected_browser_history(user_id)
+                data_source = "전체 활동"
+
+            # 2. 데이터에서 키워드/주제 추출
+            keywords = []
+            
+            # 파일 이름 및 카테고리에서 키워드 추출
+            if files:
+                for f in files:
+                    keywords.extend(self._extract_keywords_from_text(f.get('file_name', '')))
+                    if f.get('file_category'):
+                        keywords.append(f['file_category'])
+
+            # 브라우저 기록 제목에서 키워드 추출
+            if history:
+                for h in history:
+                    keywords.extend(self._extract_keywords_from_text(h.get('title', '')))
+
+            # 2차 폴백: 설문 데이터 기반 키워드 추출
+            if not keywords:
+                logger.info(f"User {user_id}: 활동 데이터가 없어 설문 데이터로 추천을 생성합니다.")
+                survey_data = self._get_user_survey_data(user_id)
+                if survey_data:
+                    data_source = "설문"
+                    job_field = survey_data.get('job_field_other', '') or survey_data.get('job_field', '')
+                    interests = survey_data.get('interests', [])
+                    custom_keywords_str = survey_data.get('custom_keywords', '')
+
+                    if job_field: keywords.append(job_field)
+                    keywords.extend(interests)
+                    if custom_keywords_str: keywords.extend(self._extract_keywords_from_text(custom_keywords_str))
+
+            if not keywords:
+                msg = f"User {user_id}: 분석할 데이터가 전혀 없습니다."
+                logger.info(msg)
+                return False, "분석할 데이터가 부족하여 추천을 생성할 수 없습니다."
+                
+            # 3. 가장 흔한 키워드 찾기 (3글자 이상)
+            keyword_counts = Counter(k for k in keywords if k and len(k) > 2)
+            most_common = keyword_counts.most_common(3)
+
+            if not most_common:
+                msg = f"User {user_id}: 주요 활동 주제를 찾지 못했습니다."
+                logger.info(msg)
+                return False, "데이터에서 주요 활동 주제를 찾지 못했습니다."
+
+            top_keywords = [k[0] for k in most_common]
+            
+            # 4. 추천 생성 및 저장
+            title = "활동 요약 및 추천"
+            content = f"'{data_source}' 데이터를 분석한 결과, '{', '.join(top_keywords)}' 주제에 많은 관심을 보이셨습니다. 이와 관련하여 더 깊이 있는 정보를 찾아보거나 새로운 프로젝트를 시작해 보는 것은 어떠신가요?"
+            
+            # TODO: 중복 추천 방지 로직 추가
+            
+            if self.sqlite_meta.insert_recommendation(user_id, title, content, recommendation_type=recommendation_type):
+                logger.info(f"✅ User {user_id}: 새로운 주간 추천을 생성했습니다: {top_keywords}")
+                return True, "새로운 추천을 성공적으로 생성했습니다."
+            else:
+                logger.error(f"❌ User {user_id}: 추천 저장에 실패했습니다.")
+                return False, "데이터베이스에 추천을 저장하는 데 실패했습니다."
+        except Exception as e:
+            logger.error(f"User {user_id} 분석 중 오류: {e}", exc_info=True)
+            return False, f"추천 생성 중 오류가 발생했습니다: {e}"
+
+    def _extract_keywords_from_text(self, text: str) -> list:
+        """텍스트에서 간단한 키워드를 추출합니다. (개선된 버전)"""
+        if not text:
+            return []
+        
+        import re
+        
+        # 한글, 영어, 숫자만 남기고 나머지 제거
+        processed_text = re.sub(r'[^ \w가-힣]', '', text.lower())
+        words = processed_text.split()
+        
+        # 불용어 리스트 (확장)
+        stopwords = [
+            'and', 'the', 'for', 'with', 'this', 'that', 'from', 'untitled',
+            'com', 'https', 'http', 'www', 'kr', 'ac', 'co',
+            '및', '위한', '통해', '관련', '대한', '입니다', '으로', '에서'
+        ]
+        
+        # 2글자 이상이고 불용어가 아닌 단어만 추출
+        keywords = [word for word in words if len(word) > 1 and word not in stopwords]
+        return list(set(keywords))
+
     def _get_interest_based_recommendations(self, interests: List[str]) -> str:
         """관심사에 따른 추천을 생성합니다."""
         if not interests:

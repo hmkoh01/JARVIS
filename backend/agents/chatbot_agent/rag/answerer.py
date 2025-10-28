@@ -254,6 +254,8 @@ def call_llm_for_answer(question: str, context: Optional[str], user_profile: Opt
 def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], user_id: Optional[int] = None) -> str:
     """검색된 근거(evidences)를 바탕으로 최종 텍스트 답변을 구성합니다."""
     try:
+        answer_prefix = "" # 답변 접두사 초기화
+
         # 사용자 프로필 가져오기 (캐싱 적용 + 최적화)
         user_profile = None
         if user_id:
@@ -292,9 +294,20 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
             # Gemini가 실패한 경우 기본 답변
             return f"안녕하세요! '{question}'에 대해 답변드리겠습니다. 더 구체적인 질문이 있으시면 언제든 말씀해주세요."
         
-        # evidences가 빈 리스트인 경우
+        # evidences가 빈 리스트인 경우, 사용자 프로필을 근거로 사용 시도
         if not evidences:
-            return "죄송합니다. 관련 정보를 찾을 수 없습니다."
+            logger.warning("검색된 근거가 없어 사용자 프로필로 대체합니다.")
+            if user_profile:
+                # 사용자 프로필을 evidence 형식으로 변환
+                evidences = [{
+                    'source': 'user_profile',
+                    'doc_id': 'profile',
+                    'snippet': user_profile
+                }]
+                # 프로필 사용에 대한 안내 문구 추가
+                answer_prefix = "요청하신 내용에 대한 구체적인 정보는 찾지 못했습니다. 대신, 저장된 사용자 프로필을 바탕으로 답변해 드릴게요.\n\n"
+            else:
+                return "죄송합니다. 관련 정보를 찾을 수 없습니다."
 
         # 검색된 정보를 깔끔하게 정리
         context = _clean_search_results(evidences)
@@ -307,42 +320,13 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
             gemini_answer = call_llm_for_answer(question, context, user_profile)
             if gemini_answer:
                 logger.info("Gemini 답변 생성 성공")
-                return gemini_answer
+                return answer_prefix + gemini_answer
         except Exception as e:
-            logger.warning(f"Gemini 답변 생성 실패, 기본 답변 사용: {e}")
+            logger.warning(f"Gemini 답변 생성 실패: {e}")
 
-        # Gemini가 실패한 경우 기본 답변 (기존 방식)
-        security_patterns = _get_security_patterns()
-
-        answer_parts = [f"질문: {question}\n\n", "찾은 정보:\n"]
-        for i, evidence in enumerate(evidences, 1):
-            source = evidence.get('source', 'unknown')
-            doc_id = evidence.get('doc_id', 'unknown')
-            page = evidence.get('page')
-            timestamp = evidence.get('timestamp')
-            snippet = evidence.get('snippet', '')
-            path = evidence.get('path', '')
-            url = evidence.get('url', '')
-
-            # 근거 출처 라벨 생성
-            evidence_label = f"[src:{source} doc:{doc_id}"
-            if page is not None: evidence_label += f" page:{page}"
-            if timestamp is not None: evidence_label += f" t:{timestamp}"
-            evidence_label += "]"
-
-            # 내용 생성 (민감 정보 마스킹 포함)
-            if snippet:
-                content = _redact_sensitive_info(snippet, security_patterns)
-            elif path:
-                content = f"파일: {os.path.basename(path)}"
-            elif url:
-                content = f"웹페이지: {url}"
-            else:
-                content = "관련 정보"
-            
-            answer_parts.append(f"{i}. {evidence_label} {content}\n")
-        
-        return "".join(answer_parts)
+        # Gemini가 실패한 경우, 사용자 친화적인 오류 메시지 반환
+        logger.warning("Gemini 답변 생성에 실패하여 사용자에게 오류 메시지를 반환합니다.")
+        return "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다. 잠시 후 다시 시도해주세요."
     except Exception as e:
         logger.error(f"응답 생성 오류: {e}")
         return "응답 생성 중 오류가 발생했습니다."

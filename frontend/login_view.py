@@ -386,17 +386,16 @@ class LoginWindow:
             content_frame,
             text="Google로 로그인",
             font=self.button_font,
-            bg='#4285f4',
+            bg='#4285F4',
             fg='white',
-            activebackground='#357ae8',
+            activebackground='#357AE8',
             activeforeground='white',
             relief='flat',
             cursor='hand2',
-            width=25,
-            height=2,
+            pady=10,
             command=self.handle_login
         )
-        self.login_button.pack(pady=20)
+        self.login_button.pack(pady=20, fill='x')
         
         # 상태 텍스트
         self.status_label = tk.Label(

@@ -155,10 +155,10 @@ class SurveyDialog:
         
         # 건너뛰기 버튼
         skip_button = tk.Button(button_container, text="건너뛰기", font=self.button_font, 
-                               bg='#6b7280', fg='white', relief='flat', bd=0, cursor='hand2',
-                               command=self.skip_survey, width=12, pady=10)
+                       bg='#e2e8f0', fg='black', relief='flat', bd=0, cursor='hand2',
+                       command=self.skip_survey, width=12, pady=10)
         skip_button.pack(side='left', padx=(0, 10))
-        
+
         # 제출 버튼
         submit_button = tk.Button(button_container, text="제출하기", font=self.button_font,
                                  bg='#4f46e5', fg='white', relief='flat', bd=0, cursor='hand2',
@@ -196,12 +196,14 @@ class SurveyDialog:
                                     activebackground='white',
                                     activeforeground='#374151', indicatoron=True, 
                                     command=self.on_job_selection_change)
-                radio.pack(anchor='w', pady=2)
+                radio.grid(row=i, column=0, sticky='w', pady=2)
             
             # 기타 직접 입력 필드
             self.job_other_entry = tk.Entry(q1_content, font=self.message_font, relief='solid', 
-                                            borderwidth=1, bg='#f9fafb', state='disabled')
-            self.job_other_entry.pack(fill='x', pady=(10, 0))
+                                            borderwidth=1, bg='#f9fafb')
+            # Initially hidden using grid_remove()
+            self.job_other_entry.grid(row=len(job_options), column=0, sticky='ew', pady=(10, 0))
+            self.job_other_entry.grid_remove()
             
             # 질문 2: 관심 주제
             q2_frame = tk.Frame(parent, bg='white', relief='flat', bd=1)
@@ -310,8 +312,10 @@ class SurveyDialog:
     def on_job_selection_change(self):
         """직업 선택이 변경될 때 호출"""
         if self.job_var.get() == "other":
+            self.job_other_entry.grid()
             self.job_other_entry.config(state='normal')
         else:
+            self.job_other_entry.grid_remove()
             self.job_other_entry.config(state='disabled')
             self.job_other_entry.delete(0, tk.END)
     
