@@ -30,6 +30,18 @@ from jose import JWTError, jwt
 router = APIRouter()
 security = HTTPBearer()
 
+def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> int:
+    """JWT에서 user_id 추출"""
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        user_id = payload.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        return user_id
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
 @router.post("/chat")
 async def chat_with_agent(chat_request: ChatRequest) -> ChatResponse:
     """사용자 메시지를 받아서 supervisor를 통해 적절한 에이전트로 라우팅합니다."""
@@ -367,21 +379,92 @@ async def get_user_profile_context(user_id: int):
         raise HTTPException(status_code=500, detail=f"프로필 조회 오류: {str(e)}") 
 
 # ============================================================================
-# 사용자 설정 관련 엔드포인트
+# 추천 관련 엔드포인트
 # ============================================================================
 
-def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> int:
-    """JWT에서 user_id 추출"""
-    token = credentials.credentials
+@router.get("/recommendations")
+async def get_recommendations(user_id: int = Depends(get_current_user_id)):
+    """현재 사용자의 읽지 않은 추천 목록을 조회합니다."""
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        user_id = payload.get("user_id")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token payload")
-        return user_id
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        db = SQLiteMeta()
+        recommendations = db.get_unread_recommendations(user_id)
+        return {
+            "success": True,
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        logger.error(f"추천 조회 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.get("/recommendations/history")
+async def get_recommendation_history(user_id: int = Depends(get_current_user_id)):
+    """현재 사용자의 모든 추천 내역을 조회합니다."""
+    try:
+        db = SQLiteMeta()
+        recommendations = db.get_all_recommendations(user_id)
+        return {
+            "success": True,
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        logger.error(f"추천 내역 조회 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/recommendations/generate")
+async def generate_recommendation(user_id: int = Depends(get_current_user_id)):
+    """현재 사용자를 위해 수동으로 새로운 추천을 생성합니다."""
+    try:
+        db = SQLiteMeta()
+        
+        # 최근 1시간 내 수동 추천 횟수 확인
+        count = db.get_recent_manual_recommendation_count(user_id, hours=1)
+        if count >= 3:
+            raise HTTPException(
+                status_code=429, 
+                detail="최근 1시간 이내에 3번의 수동 추천을 모두 사용하셨습니다. 시간이 조금 지난 후에 다시 사용해주시기 바랍니다."
+            )
+            
+        # 추천 에이전트 가져오기 및 분석 실행
+        recommendation_agent = agent_registry.get_agent("recommendation")
+        if not recommendation_agent:
+            raise HTTPException(status_code=503, detail="추천 기능이 현재 사용 불가능합니다.")
+            
+        success, message = await recommendation_agent.run_periodic_analysis(user_id, recommendation_type='manual')
+        
+        return {
+            "success": success,
+            "message": message
+        }
+    except HTTPException:
+        raise  # HTTPException은 그대로 다시 발생시킴
+    except Exception as e:
+        logger.error(f"수동 추천 생성 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="추천 생성 중 오류가 발생했습니다.")
+
+
+@router.post("/recommendations/{recommendation_id}/read")
+async def mark_recommendation_read(
+    recommendation_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
+    """추천을 읽음으로 표시합니다."""
+    try:
+        db = SQLiteMeta()
+        # TODO: A better check to ensure user owns the recommendation
+        success = db.mark_recommendation_as_read(recommendation_id)
+        if success:
+            return {"success": True, "message": "Recommendation marked as read."}
+        else:
+            raise HTTPException(status_code=404, detail="Recommendation not found or failed to update.")
+    except Exception as e:
+        logger.error(f"추천 읽음 처리 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# 사용자 설정 관련 엔드포인트
+# ============================================================================
 
 @router.post("/settings/initial-setup")
 async def initial_setup(

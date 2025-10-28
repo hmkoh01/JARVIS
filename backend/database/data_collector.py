@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import asyncio
 import hashlib
 from PIL import ImageGrab
+import platform
 
 # 현재 스크립트의 상위 디렉토리(backend)를 Python 경로에 추가
 backend_dir = Path(__file__).parent.parent.absolute()
@@ -309,8 +310,25 @@ class BrowserHistoryCollector:
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.sqlite_meta = SQLiteMeta()
-        self.browser_paths = {'chrome': os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History'), 'edge': os.path.expanduser('~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History')}
+        self.browser_paths = self._get_browser_paths()
         self.parser = DocumentParser()
+
+    def _get_browser_paths(self) -> Dict[str, str]:
+        """현재 운영체제에 맞는 브라우저 히스토리 DB 경로를 반환합니다."""
+        system = platform.system()
+        if system == 'Windows':
+            return {
+                'chrome': os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History'),
+                'edge': os.path.expanduser('~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History')
+            }
+        elif system == 'Darwin':  # macOS
+            return {
+                'chrome': os.path.expanduser('~/Library/Application Support/Google/Chrome/Default/History'),
+                'edge': os.path.expanduser('~/Library/Application Support/Microsoft Edge/Default/History')
+                # Firefox, Safari 등 다른 브라우저 지원 추가 가능
+            }
+        # TODO: Add Linux support
+        return {}
 
     async def _crawl_and_extract_text(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
         if not url.startswith(('http://', 'https://')): return None

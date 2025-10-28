@@ -10,6 +10,7 @@ if str(current_dir) not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from api.routes import router
 from api.auth_routes import router as auth_router
 from core.agent_registry import agent_registry
@@ -20,6 +21,37 @@ from config.logging_config import setup_logging, get_logger
 # 로깅 설정 초기화
 setup_logging()
 logger = get_logger(__name__)
+
+
+# 전역 스케줄러 인스턴스
+scheduler = AsyncIOScheduler()
+
+async def trigger_recommendation_analysis():
+    """
+    주기적으로 추천 분석을 트리거하는 함수.
+    모든 사용자에 대해 분석을 실행합니다.
+    """
+    logger.info("📈 주기적 추천 분석 시작...")
+    try:
+        # agent_registry에서 recommendation 에이전트를 가져옵니다.
+        recommendation_agent = agent_registry.get_agent("recommendation")
+        if recommendation_agent and hasattr(recommendation_agent, 'run_periodic_analysis'):
+            # 모든 사용자에 대해 분석 실행
+            sqlite_meta = SQLiteMeta()
+            all_users = sqlite_meta.get_all_users()
+            if not all_users:
+                logger.info("분석할 사용자가 없습니다.")
+                return
+
+            logger.info(f"{len(all_users)}명의 사용자에 대한 분석을 시작합니다.")
+            for user in all_users:
+                user_id = user['user_id']
+                await recommendation_agent.run_periodic_analysis(user_id)
+        else:
+            logger.warning("Recommendation agent 또는 분석 메서드를 찾을 수 없습니다.")
+
+    except Exception as e:
+        logger.error(f"주기적 추천 분석 중 오류 발생: {e}", exc_info=True)
 
 
 # -----------------------------------------------------------------------------
@@ -35,6 +67,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"⚠️ 데이터베이스 초기화 오류: {e}")
     
+    # 스케줄러 작업 추가 및 시작
+    # 매일 새벽 3시에 실행
+    scheduler.add_job(trigger_recommendation_analysis, 'cron', hour=3, id='recommendation_analysis_job')
+    scheduler.start()
+    logger.info("📅 주기적 추천 분석 스케줄러 시작됨 (매일 새벽 3시)")
+
     logger.info(f"📊 등록된 에이전트: {list(agent_registry.get_agent_descriptions().keys())}")
     logger.info("✅ 시스템이 준비되었습니다!")
     
@@ -42,6 +80,12 @@ async def lifespan(app: FastAPI):
 
     # --- 애플리케이션 종료 시 실행될 코드 ---
     logger.info("🛑 JARVIS Multi-Agent System 종료")
+    
+    # 스케줄러 종료
+    if scheduler.running:
+        scheduler.shutdown()
+        logger.info("📅 스케줄러 종료됨")
+
     try:
         from database.data_collector import data_collection_managers
         logger.info("모든 데이터 수집 관리자 중지 시도...")

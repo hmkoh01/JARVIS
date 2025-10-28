@@ -3,7 +3,7 @@ import sqlite3
 import os
 import re  # <--- 1. 정규 표현식 모듈 추가
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import threading
 logger = logging.getLogger(__name__)
@@ -215,6 +215,19 @@ class SQLiteMeta:
                     created_at INTEGER
                 )
             """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS recommendations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    type TEXT,
+                    status TEXT DEFAULT 'unread',
+                    created_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            """)
             
             # 데이터베이스 마이그레이션 실행 (먼저 실행하여 컬럼 추가)
             self._migrate_database(conn)
@@ -254,6 +267,7 @@ class SQLiteMeta:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_browser_recorded_at ON collected_browser_history(recorded_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_user_id ON collected_apps(user_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_recorded_at ON collected_apps(recorded_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_user_id_status ON recommendations(user_id, status)")
             except Exception as e:
                 logger.warning(f"인덱스 생성 중 일부 오류 발생 (무시됨): {e}")
             
@@ -557,6 +571,20 @@ class SQLiteMeta:
                 self.conn.rollback()            
             return []
 
+    def get_collected_files_since(self, user_id: int, since_ts: int) -> List[Dict[str, Any]]:
+        """특정 시간 이후의 사용자 수집 파일 목록 조회"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM collected_files
+                WHERE user_id = ? AND discovered_at >= ?
+                ORDER BY discovered_at DESC
+            """, (user_id, since_ts))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"시간 기반 수집 파일 조회 오류: {e}")
+            return []
+
     def get_collected_browser_history(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
         """사용자 수집 브라우저 히스토리 조회"""
         try:
@@ -572,6 +600,20 @@ class SQLiteMeta:
             logger.error(f"수집된 브라우저 히스토리 조회 오류: {e}")
             if self.conn:
                 self.conn.rollback()            
+            return []
+
+    def get_collected_browser_history_since(self, user_id: int, since_ts: int) -> List[Dict[str, Any]]:
+        """특정 시간 이후의 사용자 브라우저 히스토리 조회"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM collected_browser_history
+                WHERE user_id = ? AND recorded_at >= ?
+                ORDER BY recorded_at DESC
+            """, (user_id, since_ts))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"시간 기반 브라우저 히스토리 조회 오류: {e}")
             return []
 
     def get_collected_apps(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
@@ -782,8 +824,91 @@ class SQLiteMeta:
                 self.conn.rollback()            
             return False
     
+    # === 추천 관련 메서드들 ===
+
+    def insert_recommendation(self, user_id: int, title: str, content: str, recommendation_type: str = 'scheduled') -> bool:
+        """새로운 추천을 저장합니다."""
+        try:
+            self.conn.execute("""
+                INSERT INTO recommendations (user_id, title, content, type, status, created_at)
+                VALUES (?, ?, ?, ?, 'unread', ?)
+            """, (user_id, title, content, recommendation_type, int(datetime.now().timestamp())))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"추천 저장 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+
+    def get_unread_recommendations(self, user_id: int) -> List[Dict[str, Any]]:
+        """읽지 않은 추천 목록을 조회합니다."""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM recommendations 
+                WHERE user_id = ? AND status = 'unread'
+                ORDER BY created_at DESC
+            """, (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"추천 조회 오류: {e}")
+            return []
+
+    def get_all_recommendations(self, user_id: int) -> List[Dict[str, Any]]:
+        """사용자의 모든 추천 내역을 조회합니다."""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM recommendations
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"모든 추천 내역 조회 오류: {e}")
+            return []
+
+    def get_recent_manual_recommendation_count(self, user_id: int, hours: int = 1) -> int:
+        """지정된 시간 내에 생성된 수동 추천의 개수를 조회합니다."""
+        try:
+            since_ts = int((datetime.now() - timedelta(hours=hours)).timestamp())
+            cursor = self.conn.execute("""
+                SELECT COUNT(*) FROM recommendations
+                WHERE user_id = ? AND type = 'manual' AND created_at >= ?
+            """, (user_id, since_ts))
+            row = cursor.fetchone()
+            return row[0] if row else 0
+        except Exception as e:
+            logger.error(f"최근 수동 추천 횟수 조회 오류: {e}")
+            return 0
+
+    def mark_recommendation_as_read(self, recommendation_id: int) -> bool:
+        """추천을 읽음으로 표시합니다."""
+        try:
+            self.conn.execute("""
+                UPDATE recommendations SET status = 'read' WHERE id = ?
+            """, (recommendation_id,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"추천 읽음 표시 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+
     # === 사용자 관리 메서드들 ===
     
+    def get_all_users(self) -> List[Dict[str, Any]]:
+        """모든 사용자 목록을 조회합니다."""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("SELECT user_id, email FROM users")
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"모든 사용자 조회 오류: {e}")
+            return []
+
     def get_or_create_user_by_google(self, google_id: str, email: str, refresh_token: str = None) -> Optional[Dict[str, Any]]:
         """Google ID로 사용자를 조회하고, 없으면 새로 생성 후 user 객체를 반환"""
         try:

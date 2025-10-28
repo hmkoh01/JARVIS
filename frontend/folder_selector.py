@@ -11,6 +11,8 @@ import threading
 import time
 import logging
 import queue  # 1. 스레드 간 안전한 통신을 위해 queue 모듈 추가
+import platform
+import os
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s:%(message)s')
@@ -24,6 +26,18 @@ class FolderSelector:
         self.root.resizable(True, True)
         self.root.minsize(750, 650)
         
+        # OS-specific settings
+        self.platform = platform.system()
+        if self.platform == "Windows":
+            self.scan_root_name = "C드라이브"
+            self.example_scan_path = f"🔍 {os.path.expanduser('~')}\\Desktop 폴더를 스캔하고 있습니다..."
+        elif self.platform == "Darwin": # macOS
+            self.scan_root_name = "메인 드라이브"
+            self.example_scan_path = f"🔍 {os.path.expanduser('~')}/Desktop 폴더를 스캔하고 있습니다..."
+        else: # Linux etc.
+            self.scan_root_name = "파일 시스템"
+            self.example_scan_path = f"🔍 {os.path.expanduser('~')}/Desktop 폴더를 스캔하고 있습니다..."
+            
         # 창을 화면 중앙에 배치 (geometry 설정 전에)
         self.center_window()
         self.setup_korean_fonts()
@@ -86,10 +100,10 @@ class FolderSelector:
         self.title_font = (self.default_font, 20, 'bold')
         self.subtitle_font = (self.default_font, 14)
         self.message_font = (self.default_font, 12)
-        self.button_font = (self.default_font, 12, 'bold')
+        self.button_font = (self.default_font, 11, 'bold')
     
     def create_ui(self):
-        """UI를 생성합니다. (사용자의 기존 UI 코드와 완전히 동일)"""
+        """UI를 생성합니다."""
         # ======================================================================
         # 이 함수는 사용자가 제공한 원본 UI 코드와 100% 동일합니다.
         # ======================================================================
@@ -115,8 +129,8 @@ class FolderSelector:
         subtitle_label.pack(anchor='w')
         desc_frame = tk.Frame(main_frame, bg='white')
         desc_frame.pack(fill='x', padx=30, pady=(0, 25))
-        desc_label = tk.Label(desc_frame, text="파일 수집할 폴더를 선택하세요.\n사용자 폴더 내의 주요 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=('Malgun Gothic', 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
-        desc_label.pack(anchor='w')
+        desc_label = tk.Label(main_frame, text="파일 수집할 폴더를 선택하세요.\n사용자 폴더 내의 주요 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=('Malgun Gothic', 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
+        desc_label.pack(anchor='w', in_=desc_frame)
         list_container = tk.Frame(main_frame, bg='white')
         list_container.pack(fill='both', expand=True, padx=30, pady=(0, 25))
         list_header = tk.Frame(list_container, bg='#f8fafc', relief='flat', bd=1)
@@ -130,24 +144,54 @@ class FolderSelector:
         self.folder_listbox = tk.Listbox(list_frame, font=('Malgun Gothic', 11), selectmode='multiple', yscrollcommand=scrollbar.set, bg='white', fg='#1f2937', selectbackground='#4f46e5', selectforeground='white', relief='flat', bd=0, highlightthickness=0, activestyle='none', height=12)
         self.folder_listbox.pack(side='left', fill='both', expand=True, padx=5, pady=5)
         scrollbar.config(command=self.folder_listbox.yview)
+
+        # --- 버튼 UI 개선 ---
         button_container = tk.Frame(main_frame, bg='white')
         button_container.pack(fill='x', padx=30, pady=(0, 30))
-        left_buttons = tk.Frame(button_container, bg='white')
-        left_buttons.pack(side='left')
-        refresh_button = tk.Button(left_buttons, text="🔄 새로고침", font=('Malgun Gothic', 10, 'bold'), bg='#6b7280', fg='white', relief='flat', bd=0, cursor='hand2', command=self.load_folders, width=13, pady=10, activebackground='#4b5563', activeforeground='white')
-        refresh_button.pack(side='left', padx=(0, 8))
-        select_all_button = tk.Button(left_buttons, text="✅ 전체 선택", font=('Malgun Gothic', 10, 'bold'), bg='#059669', fg='white', relief='flat', bd=0, cursor='hand2', command=self.select_all_folders, width=13, pady=10, activebackground='#047857', activeforeground='white')
-        select_all_button.pack(side='left', padx=(0, 8))
-        deselect_all_button = tk.Button(left_buttons, text="❌ 선택 해제", font=('Malgun Gothic', 10, 'bold'), bg='#dc2626', fg='white', relief='flat', bd=0, cursor='hand2', command=self.deselect_all_folders, width=13, pady=10, activebackground='#b91c1c', activeforeground='white')
-        deselect_all_button.pack(side='left')
-        right_buttons = tk.Frame(button_container, bg='white')
-        right_buttons.pack(side='right')
-        full_scan_button = tk.Button(right_buttons, text="💾 전체 스캔", font=('Malgun Gothic', 10, 'bold'), bg='#7c3aed', fg='white', relief='flat', bd=0, cursor='hand2', command=self.select_full_drive, width=14, pady=10, activebackground='#6d28d9', activeforeground='white')
-        full_scan_button.pack(side='right', padx=(8, 0))
-        confirm_button = tk.Button(right_buttons, text="🚀 시작하기", font=('Malgun Gothic', 12, 'bold'), bg='#4f46e5', fg='white', relief='flat', bd=0, cursor='hand2', command=self.confirm_selection, width=16, pady=12, activebackground='#4338ca', activeforeground='white')
-        confirm_button.pack(side='right')
+        button_container.columnconfigure([0, 1, 2, 3, 4], weight=1)
+
+        # 버튼 스타일 정의
+        button_style = {
+            'font': self.button_font,
+            'relief': 'flat',
+            'bd': 0,
+            'cursor': 'hand2',
+            'pady': 12,
+            'width': 12
+        }
+        
+        # 1. 새로고침
+        refresh_button = tk.Button(button_container, text="🔄 새로고침", **button_style,
+                                    bg='#e2e8f0', fg='#334155', activebackground='#cbd5e1', activeforeground='#334155',
+                                    command=self.load_folders)
+        refresh_button.grid(row=0, column=0, sticky='ew', padx=4)
+
+        # 2. 전체 선택
+        select_all_button = tk.Button(button_container, text="✅ 전체 선택", **button_style,
+                                       bg='#3b82f6', fg='white', activebackground='#2563eb', activeforeground='white',
+                                       command=self.select_all_folders)
+        select_all_button.grid(row=0, column=1, sticky='ew', padx=4)
+
+        # 3. 선택 해제
+        deselect_all_button = tk.Button(button_container, text="❌ 선택 해제", **button_style,
+                                         bg='#e2e8f0', fg='#334155', activebackground='#cbd5e1', activeforeground='#334155',
+                                         command=self.deselect_all_folders)
+        deselect_all_button.grid(row=0, column=2, sticky='ew', padx=4)
+
+        # 4. 전체 스캔
+        full_scan_button = tk.Button(button_container, text="💾 전체 스캔", **button_style,
+                                     bg='#8b5cf6', fg='white', activebackground='#7c3aed', activeforeground='white',
+                                     command=self.select_full_drive)
+        full_scan_button.grid(row=0, column=3, sticky='ew', padx=4)
+
+        # 5. 시작하기 (메인 액션)
+        confirm_button = tk.Button(button_container, text="🚀 시작하기", **button_style,
+                                    bg='#4f46e5', fg='white', activebackground='#4338ca', activeforeground='white',
+                                    command=self.confirm_selection)
+        confirm_button.grid(row=0, column=4, sticky='ew', padx=4)
+        
         status_frame = tk.Frame(main_frame, bg='#f0f9ff', relief='flat', bd=1)
-        status_frame.pack(fill='x', padx=30, pady=(0, 30))
+        status_frame.pack(fill='x', padx=30, pady=(20, 30))
         self.status_label = tk.Label(status_frame, text="⏳ 폴더 목록을 불러오는 중...", font=('Malgun Gothic', 11), bg='#f0f9ff', fg='#0369a1', pady=12)
         self.status_label.pack()
 
@@ -248,7 +292,7 @@ class FolderSelector:
         # 이 함수는 사용자의 기존 코드와 동일합니다.
         loading_messages = [
             "⏳ 폴더를 검색하는 중입니다...",
-            "🔍 C:\\Users\\koh\\Desktop 폴더를 스캔하고 있습니다...",
+            self.example_scan_path,
             "📁 폴더 정보를 수집하는 중입니다...",
             "⏳ 잠시만 기다려주세요..."
         ]
@@ -267,7 +311,7 @@ class FolderSelector:
         self.folder_listbox.select_clear(0, tk.END)
     
     def select_full_drive(self):
-        result = messagebox.askyesno("전체 스캔", "전체 C드라이브를 스캔하시겠습니까?\n시간이 오래 걸릴 수 있습니다.")
+        result = messagebox.askyesno("전체 스캔", f"전체 {self.scan_root_name}를 스캔하시겠습니까?\n시간이 오래 걸릴 수 있습니다.")
         if result:
             self.selected_folders = None
             self.root.destroy()
@@ -275,7 +319,7 @@ class FolderSelector:
     def confirm_selection(self):
         selected_indices = self.folder_listbox.curselection()
         if not selected_indices:
-            result = messagebox.askyesno("전체 스캔", "폴더를 선택하지 않았습니다.\n전체 C드라이브를 스캔하시겠습니까?")
+            result = messagebox.askyesno("전체 스캔", f"폴더를 선택하지 않았습니다.\n전체 {self.scan_root_name}를 스캔하시겠습니까?")
             if result:
                 self.selected_folders = None
                 self.root.destroy()

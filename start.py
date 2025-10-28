@@ -102,6 +102,14 @@ def start_qdrant_server():
                                   capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
                 print("✅ 기존 Qdrant 컨테이너가 시작되었습니다.")
+                # 서버가 준비될 때까지 대기
+                print("⏳ Qdrant 서버 시작 대기 중...")
+                for i in range(30): # 최대 30초 대기
+                    time.sleep(1)
+                    if check_qdrant_server():
+                        return True
+                print("❌ Qdrant 서버 시작 시간 초과")
+                return False # 시간 초과
             else:
                 print("❌ 기존 컨테이너 시작 실패, 새로 생성합니다...")
                 # 기존 컨테이너 제거 후 새로 생성
@@ -182,7 +190,9 @@ def check_dependencies():
         ('sqlalchemy', 'sqlalchemy'),
         ('pydantic', 'pydantic'),
         ('langgraph', 'langgraph'),
-        ('requests', 'requests')  # Qdrant 서버 확인용
+        ('requests', 'requests'),  # Qdrant 서버 확인용
+        ('apscheduler', 'apscheduler'), # 스케줄러
+        ('FlagEmbedding', 'FlagEmbedding') # BGE-M3 임베딩 모델
     ]
     
     missing_packages = []

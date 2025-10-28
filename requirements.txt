@@ -47,5 +47,6 @@ plotly>=5.17.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 tqdm>=4.66.0
-pywin32>=305  # For Windows system information collection
+pywin32>=305; sys_platform == 'win32'  # For Windows system information collection
 keyring>=24.0.0  # For secure token storage
+apscheduler>=3.10.0 # For background task scheduling

@@ -12,6 +12,7 @@ import threading
 import queue
 from datetime import datetime
 import os
+import platform
 
 class FloatingChatApp:
     def __init__(self):
@@ -50,6 +51,12 @@ class FloatingChatApp:
         
         # 큐 처리 시작
         self.process_message_queue()
+
+        # 추천 알림을 위한 변수
+        self.recommendation_notification_visible = False
+
+        # 추천 알림 확인 시작
+        self.check_for_recommendations()
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
@@ -109,6 +116,10 @@ class FloatingChatApp:
                         # 로딩 메시지 업데이트
                         self.update_loading_message(message['loading_widget'], message['message'])
                         
+                    elif message['type'] == 'show_recommendation':
+                        # 추천 알림 표시
+                        self.show_recommendation_notification(message['recommendations'])
+                        
                 except queue.Empty:
                     break
                     
@@ -126,8 +137,13 @@ class FloatingChatApp:
         """플로팅 버튼 생성"""
         # 메인 윈도우를 완전히 투명하게
         self.root.configure(bg='black')
-        self.root.wm_attributes('-transparentcolor', 'black')
-        
+
+        system = platform.system()
+        if system == "Darwin": # macOS
+            self.root.wm_attributes('-transparent', True)
+        else: # Windows
+            self.root.wm_attributes('-transparentcolor', 'black')
+
         # 윈도우 테두리와 제목 표시줄 제거
         self.root.overrideredirect(True)
         
@@ -311,9 +327,28 @@ class FloatingChatApp:
         )
         subtitle_label.pack(anchor='w', pady=(5, 0))
         
-        # 설정 버튼 (더 큰 크기와 여백)
+        # --- 버튼 컨테이너 ---
+        buttons_container = tk.Frame(header_frame, bg='#4f46e5')
+        buttons_container.pack(side='right', padx=15, pady=25)
+
+        # 추천 내역 버튼
+        recommendation_button = tk.Button(
+            buttons_container,
+            text="💡",
+            font=('Arial', 18),
+            bg='#4f46e5',
+            fg='white',
+            relief='flat',
+            cursor='hand2',
+            command=self.open_recommendation_window,
+            activebackground='#4338CA',
+            activeforeground='white'
+        )
+        recommendation_button.pack(side='left', padx=(0, 5))
+
+        # 설정 버튼
         settings_button = tk.Button(
-            header_frame,
+            buttons_container,
             text="⚙️",
             font=('Arial', 18),
             bg='#4f46e5',
@@ -321,10 +356,10 @@ class FloatingChatApp:
             relief='flat',
             cursor='hand2',
             command=self.show_settings_menu,
-            width=3,
-            height=1
+            activebackground='#4338CA',
+            activeforeground='white'
         )
-        settings_button.pack(side='right', padx=15, pady=25)
+        settings_button.pack(side='left')
         
         # 메시지 영역
         self.messages_frame = tk.Frame(self.chat_window, bg='white')
@@ -365,7 +400,8 @@ class FloatingChatApp:
             font=self.input_font,
             relief='solid',
             borderwidth=2,
-            bg='#f9fafb'
+            bg='#f9fafb',
+            fg='black'  # 글자색을 검은색으로 설정
         )
         self.message_input.pack(side='left', fill='x', expand=True, padx=(0, 15))
         self.message_input.bind('<Return>', self.send_message)
@@ -375,8 +411,10 @@ class FloatingChatApp:
             input_frame,
             text="전송",
             font=self.button_font,
-            bg='#4f46e5',
+            bg='#4F46E5',
             fg='white',
+            activebackground='#4338CA',
+            activeforeground='white',
             relief='flat',
             cursor='hand2',
             command=self.send_message,
@@ -394,6 +432,162 @@ class FloatingChatApp:
         # 채팅창 닫기 이벤트 바인딩
         self.chat_window.protocol("WM_DELETE_WINDOW", self.close_chat_window)
         
+    def open_recommendation_window(self):
+        """추천 내역을 보여주는 새 창을 엽니다."""
+        rec_window = tk.Toplevel(self.chat_window)
+        rec_window.title("JARVIS 추천 내역")
+        rec_window.geometry("600x500")
+        rec_window.configure(bg='white')
+        rec_window.attributes('-topmost', True)
+
+        # --- 상단 프레임: 버튼 및 제목 ---
+        top_frame = tk.Frame(rec_window, bg='white')
+        top_frame.pack(fill='x', padx=15, pady=10)
+
+        title_label = tk.Label(top_frame, text="추천 히스토리", font=(self.default_font, 16, 'bold'), bg='white', fg='black')
+        title_label.pack(side='left')
+
+        generate_button = tk.Button(
+            top_frame,
+            text="새로운 추천 생성하기 🚀",
+            font=self.button_font,
+            bg='#3b82f6', fg='white', relief='flat',
+            cursor='hand2',
+            command=lambda: self.generate_new_recommendation(rec_window) # window 참조 전달
+        )
+        generate_button.pack(side='right')
+
+        # --- 추천 목록 표시 영역 ---
+        history_text = scrolledtext.ScrolledText(
+            rec_window,
+            wrap=tk.WORD,
+            font=(self.default_font, 11),
+            bg='#f9fafb',
+            fg='black',
+            relief='solid',
+            borderwidth=1,
+            padx=10,
+            pady=10,
+            state='disabled' # 읽기 전용
+        )
+        history_text.pack(fill='both', expand=True, padx=15, pady=(0, 15))
+
+        # 추천 내역 로드
+        self.load_recommendation_history(history_text)
+
+    def load_recommendation_history(self, text_widget):
+        """백그라운드에서 추천 내역을 불러와 위젯에 표시합니다."""
+        text_widget.config(state='normal')
+        text_widget.delete('1.0', 'end')
+        text_widget.insert('1.0', "추천 내역을 불러오는 중입니다...")
+        text_widget.config(state='disabled')
+
+        threading.Thread(target=self._fetch_recommendation_history, args=(text_widget,), daemon=True).start()
+
+    def _fetch_recommendation_history(self, text_widget):
+        """[백그라운드 스레드] 추천 히스토리 API를 호출합니다."""
+        try:
+            from login_view import get_stored_token
+            token = get_stored_token()
+            if not token:
+                self.update_text_widget(text_widget, "오류: 로그인이 필요합니다.")
+                return
+
+            response = requests.get(
+                f"{self.API_BASE_URL}/api/v2/recommendations/history",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success") and result.get("recommendations"):
+                    formatted_text = self.format_recommendations(result["recommendations"])
+                    self.update_text_widget(text_widget, formatted_text)
+                else:
+                    self.update_text_widget(text_widget, "아직 생성된 추천이 없습니다.")
+            else:
+                error_msg = response.json().get("detail", "알 수 없는 오류")
+                self.update_text_widget(text_widget, f"추천 내역을 불러오는데 실패했습니다: {error_msg}")
+
+        except requests.exceptions.RequestException as e:
+            self.update_text_widget(text_widget, f"오류: 서버에 연결할 수 없습니다.\n{e}")
+
+    def generate_new_recommendation(self, window):
+        """백그라운드에서 새 추천 생성을 요청합니다."""
+        import tkinter.messagebox as messagebox
+        
+        # 사용자에게 대기 메시지 표시
+        messagebox.showinfo("알림", "새로운 추천 생성을 요청했습니다. 잠시 후 목록이 업데이트됩니다.", parent=window)
+
+        threading.Thread(target=self._request_new_recommendation, args=(window,), daemon=True).start()
+
+    def _request_new_recommendation(self, window):
+        """[백그라운드 스레드] 새 추천 생성 API를 호출합니다."""
+        import tkinter.messagebox as messagebox
+        try:
+            from login_view import get_stored_token
+            token = get_stored_token()
+            if not token:
+                messagebox.showerror("오류", "로그인이 필요합니다.", parent=window)
+                return
+
+            response = requests.post(
+                f"{self.API_BASE_URL}/api/v2/recommendations/generate",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    messagebox.showinfo("성공", result.get("message", "새로운 추천이 생성되었습니다!"), parent=window)
+                    # UI 업데이트는 메인 스레드에서 실행
+                    self.root.after(0, self.refresh_recommendation_window, window)
+                else:
+                    messagebox.showinfo("알림", result.get("message", "추천을 생성하지 못했습니다."), parent=window)
+            elif response.status_code == 429: # Too Many Requests
+                error_msg = response.json().get("detail")
+                messagebox.showwarning("알림", error_msg, parent=window)
+            else:
+                error_msg = response.json().get("detail", "알 수 없는 오류")
+                messagebox.showerror("오류", f"추천 생성에 실패했습니다: {error_msg}", parent=window)
+
+        except requests.exceptions.RequestException as e:
+            messagebox.showerror("오류", f"서버 연결에 실패했습니다: {e}", parent=window)
+
+    def refresh_recommendation_window(self, window):
+        """추천 창의 내용을 새로고침합니다."""
+        # window에서 ScrolledText 위젯 찾기
+        for widget in window.winfo_children():
+            if isinstance(widget, scrolledtext.ScrolledText):
+                self.load_recommendation_history(widget)
+                break
+
+    def update_text_widget(self, text_widget, content):
+        """[메인 스레드 호출용] 텍스트 위젯 내용을 안전하게 업데이트합니다."""
+        def _update():
+            text_widget.config(state='normal')
+            text_widget.delete('1.0', 'end')
+            text_widget.insert('1.0', content)
+            text_widget.config(state='disabled')
+        self.root.after(0, _update)
+
+    def format_recommendations(self, recommendations: list) -> str:
+        """추천 목록을 서식이 있는 텍스트로 변환합니다."""
+        formatted_lines = []
+        for rec in recommendations:
+            dt = datetime.fromtimestamp(rec['created_at'])
+            date_str = dt.strftime('%Y-%m-%d %H:%M')
+            rec_type = "수동 생성" if rec.get('type') == 'manual' else "자동 생성"
+            
+            formatted_lines.append(f"## {rec['title']} ##")
+            formatted_lines.append(f"[{date_str} | {rec_type}]")
+            formatted_lines.append(f"{rec['content']}")
+            formatted_lines.append("-" * 40 + "\n")
+        
+        return "\n".join(formatted_lines)
+
     def toggle_chat_window(self):
         """채팅창 토글"""
         if self.chat_window.state() == 'withdrawn':
@@ -452,9 +646,9 @@ class FloatingChatApp:
             user_container,
             font=self.message_font,
             bg='#eef2ff',
-            fg='#111827',
+            fg='black',
             wrap='word',
-            width=35,
+            width=60,
             height=1,
             relief='flat',
             borderwidth=0,
@@ -493,9 +687,9 @@ class FloatingChatApp:
             bot_container,
             font=self.message_font,
             bg='#f3f4f6',
-            fg='#111827',
+            fg='black',
             wrap='word',
-            width=35,
+            width=60,
             height=1,
             relief='flat',
             borderwidth=0,
@@ -554,9 +748,9 @@ class FloatingChatApp:
             loading_container,
             font=self.message_font,
             bg='#f3f4f6',
-            fg='#6b7280',
+            fg='black',
             wrap='word',
-            width=35,
+            width=60,
             height=1,
             relief='flat',
             borderwidth=0,
@@ -737,6 +931,78 @@ class FloatingChatApp:
         # 타이핑 애니메이션으로 봇 메시지 표시
         self.add_bot_message(bot_response)
         
+    def check_for_recommendations(self):
+        """주기적으로 서버에 새로운 추천이 있는지 확인합니다."""
+        # 백그라운드 스레드에서 API 호출
+        threading.Thread(target=self._fetch_recommendations, daemon=True).start()
+        
+        # 5분 후에 다시 확인
+        self.root.after(300000, self.check_for_recommendations)
+
+    def _fetch_recommendations(self):
+        """[백그라운드 스레드] 추천 API를 호출합니다."""
+        try:
+            from login_view import get_stored_token
+            token = get_stored_token()
+            if not token:
+                return
+
+            response = requests.get(
+                f"{self.API_BASE_URL}/api/v2/recommendations",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success") and result.get("recommendations"):
+                    # UI 스레드에서 알림을 표시하도록 큐에 넣음
+                    self.message_queue.put({
+                        'type': 'show_recommendation',
+                        'recommendations': result["recommendations"]
+                    })
+        except requests.exceptions.RequestException as e:
+            print(f"추천 확인 중 오류: {e}")
+
+    def show_recommendation_notification(self, recommendations):
+        """새로운 추천 알림을 채팅창 헤더에 표시합니다."""
+        if self.recommendation_notification_visible or not recommendations:
+            return
+
+        # 첫 번째 추천을 대표로 사용
+        latest_rec = recommendations[0]
+
+        self.notification_frame = tk.Frame(self.chat_window, bg='#10b981', height=40)
+        self.notification_frame.pack(fill='x', side='top', before=self.messages_frame)
+        self.notification_frame.pack_propagate(False)
+
+        notification_label = tk.Label(
+            self.notification_frame,
+            text=f"💡 새로운 추천: {latest_rec['title']}",
+            font=(self.default_font, 11),
+            bg='#10b981',
+            fg='white'
+        )
+        notification_label.pack(side='left', padx=15, pady=5)
+        
+        close_button = tk.Button(
+            self.notification_frame,
+            text="✕",
+            font=(self.default_font, 11, 'bold'),
+            bg='#10b981',
+            fg='white',
+            relief='flat',
+            command=self.dismiss_recommendation_notification
+        )
+        close_button.pack(side='right', padx=10)
+
+        self.recommendation_notification_visible = True
+
+    def dismiss_recommendation_notification(self):
+        """추천 알림을 닫습니다."""
+        if hasattr(self, 'notification_frame') and self.notification_frame.winfo_exists():
+            self.notification_frame.destroy()
+        self.recommendation_notification_visible = False
+    
     def run(self):
         """애플리케이션 실행"""
         try:
@@ -790,7 +1056,7 @@ class FloatingChatApp:
         menu = tk.Menu(self.chat_window, tearoff=0)
         menu.add_command(label="📁 데이터 폴더 변경", command=self.change_data_folder)
         menu.add_separator()
-        menu.add_command(label="ℹ️ 정보", command=lambda: messagebox.showinfo("JARVIS", "JARVIS Multi-Agent System\nVersion 1.0"))
+        menu.add_command(label="ℹ️ 정보", command=lambda: messagebox.showinfo("JARVIS", "JARVIS Multi-Agent System\nVersion 1.0", parent=self.chat_window))
         
         # 설정 버튼 위치에 메뉴 표시 (헤더 높이 증가에 맞춰 조정)
         button_x = self.chat_window.winfo_rootx() + 450
