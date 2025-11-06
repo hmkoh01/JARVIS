@@ -370,12 +370,18 @@ class FloatingChatApp:
         scrollbar = ttk.Scrollbar(self.messages_frame, orient="vertical", command=self.messages_canvas.yview)
         self.scrollable_frame = tk.Frame(self.messages_canvas, bg='white')
         
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.messages_canvas.configure(scrollregion=self.messages_canvas.bbox("all"))
-        )
+        # 캔버스 창 생성 (먼저 생성해야 함)
+        self.messages_canvas_window = self.messages_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         
-        self.messages_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        def configure_scroll_region(event):
+            # 캔버스 너비에 맞춰서 scrollable_frame의 너비를 제한
+            canvas_width = event.width
+            if canvas_width > 1:  # 유효한 너비인 경우에만
+                self.messages_canvas.itemconfig(self.messages_canvas_window, width=canvas_width)
+            self.messages_canvas.configure(scrollregion=self.messages_canvas.bbox("all"))
+        
+        self.scrollable_frame.bind("<Configure>", configure_scroll_region)
+        self.messages_canvas.bind("<Configure>", configure_scroll_region)
         self.messages_canvas.configure(yscrollcommand=scrollbar.set)
         
         # 마우스 휠 스크롤 바인딩
@@ -639,7 +645,7 @@ class FloatingChatApp:
         
         # 사용자 메시지 컨테이너 (우측 정렬)
         user_container = tk.Frame(message_frame, bg='white')
-        user_container.pack(side='right', padx=(100, 0))
+        user_container.pack(side='right', padx=(50, 15))
         
         # 사용자 메시지 (Text 위젯으로 변경하여 텍스트 선택 가능)
         user_text = tk.Text(
@@ -648,7 +654,7 @@ class FloatingChatApp:
             bg='#eef2ff',
             fg='black',
             wrap='word',
-            width=60,
+            width=35,
             height=1,
             relief='flat',
             borderwidth=0,
@@ -680,7 +686,7 @@ class FloatingChatApp:
         
         # 봇 메시지 컨테이너 (좌측 정렬)
         bot_container = tk.Frame(message_frame, bg='white')
-        bot_container.pack(side='left', padx=(0, 100))
+        bot_container.pack(side='left', padx=(15, 50))
         
         # 봇 메시지 (Text 위젯으로 변경하여 텍스트 선택 가능)
         bot_text = tk.Text(
@@ -689,7 +695,7 @@ class FloatingChatApp:
             bg='#f3f4f6',
             fg='black',
             wrap='word',
-            width=60,
+            width=35,
             height=1,
             relief='flat',
             borderwidth=0,
@@ -741,7 +747,7 @@ class FloatingChatApp:
         
         # 로딩 메시지 컨테이너 (좌측 정렬)
         loading_container = tk.Frame(message_frame, bg='white')
-        loading_container.pack(side='left', padx=(0, 100))
+        loading_container.pack(side='left', padx=(15, 50))
         
         # 로딩 메시지 (Text 위젯으로 변경)
         loading_text = tk.Text(
@@ -750,7 +756,7 @@ class FloatingChatApp:
             bg='#f3f4f6',
             fg='black',
             wrap='word',
-            width=60,
+            width=35,
             height=1,
             relief='flat',
             borderwidth=0,

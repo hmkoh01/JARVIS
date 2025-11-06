@@ -85,19 +85,6 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
                         }
                         h1 { color: #4f46e5; margin-bottom: 20px; }
                         p { color: #666; font-size: 16px; }
-                        .close-btn {
-                            margin-top: 20px;
-                            padding: 10px 20px;
-                            background: #4f46e5;
-                            color: white;
-                            border: none;
-                            border-radius: 5px;
-                            cursor: pointer;
-                            font-size: 14px;
-                        }
-                        .close-btn:hover {
-                            background: #4338ca;
-                        }
                     </style>
                 </head>
                 <body>
@@ -105,7 +92,6 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
                         <h1>✅ 인증 성공!</h1>
                         <p>JARVIS 인증이 완료되었습니다.</p>
                         <p>이 창을 닫으셔도 됩니다.</p>
-                        <button class="close-btn" onclick="window.close(); setTimeout(() => window.close(), 100);">창 닫기</button>
                     </div>
                 </body>
                 </html>

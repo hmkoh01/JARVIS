@@ -22,6 +22,16 @@ from config.logging_config import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
 
+# --- ⬇️ 싱글톤 객체 임포트 및 전역 변수 선언 ⬇️ ---
+from agents.chatbot_agent.rag.react_agent import ReactAgent
+from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
+from database.repository import Repository
+
+# 전역 싱글톤 인스턴스
+global_react_agent: ReactAgent = None
+global_embedder: BGEM3Embedder = None
+global_repository: Repository = None
+
 
 # 전역 스케줄러 인스턴스
 scheduler = AsyncIOScheduler()
@@ -60,14 +70,56 @@ async def trigger_recommendation_analysis():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- 애플리케이션 시작 시 실행될 코드 ---
+    global global_react_agent, global_embedder, global_repository
+    
     logger.info("🚀 JARVIS Multi-Agent System 시작")
+    
+    # 1. SQLite 데이터베이스 초기화
     try:
         SQLiteMeta()
         logger.info("✅ SQLite 데이터베이스 초기화 완료")
     except Exception as e:
         logger.error(f"⚠️ 데이터베이스 초기화 오류: {e}")
     
-    # 스케줄러 작업 추가 및 시작
+    # 2. 싱글톤 리소스 초기화 (BGE-M3 모델, Repository, ReactAgent)
+    logger.info("--- Application Starting: Initializing Singleton Resources ---")
+    try:
+        CONFIG_PATH = "configs.yaml"
+        
+        # 2-1. BGEM3Embedder 초기화 (BGE-M3 모델 로드 - 약 4초 소요)
+        logger.info("📦 BGE-M3 임베더 초기화 시작...")
+        global_embedder = BGEM3Embedder(config_path=CONFIG_PATH)
+        logger.info("✅ BGE-M3 임베더 초기화 완료")
+        
+        # 2-2. Repository 초기화
+        logger.info("📦 Repository 초기화 시작...")
+        global_repository = Repository(config_path=CONFIG_PATH)
+        logger.info("✅ Repository 초기화 완료")
+        
+        # 2-3. ReactAgent 초기화 (의존성 주입)
+        logger.info("📦 ReactAgent 초기화 시작...")
+        global_react_agent = ReactAgent(
+            repository=global_repository,
+            embedder=global_embedder,
+            config_path=CONFIG_PATH
+        )
+        logger.info("✅ ReactAgent 초기화 완료")
+        
+        # 2-4. 전역 싱글톤 인스턴스 설정 (react_agent.py의 함수 기반 래퍼에서 사용)
+        from agents.chatbot_agent.rag.react_agent import set_global_react_agent
+        set_global_react_agent(global_react_agent)
+        logger.info("✅ 전역 ReactAgent 싱글톤 설정 완료")
+        
+        logger.info("--- ✅ Singleton Resources Initialized Successfully ---")
+        
+    except Exception as e:
+        logger.error(f"❌ 싱글톤 리소스 초기화 실패: {e}", exc_info=True)
+        # 실제 운영 시에는 여기서 앱을 종료시킬 수도 있음
+        global_react_agent = None
+        global_embedder = None
+        global_repository = None
+    
+    # 3. 스케줄러 작업 추가 및 시작
     # 매일 새벽 3시에 실행
     scheduler.add_job(trigger_recommendation_analysis, 'cron', hour=3, id='recommendation_analysis_job')
     scheduler.start()

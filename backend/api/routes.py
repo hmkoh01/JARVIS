@@ -11,7 +11,8 @@ backend_dir = Path(__file__).parent.parent.absolute()
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import asyncio
@@ -43,22 +44,58 @@ def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(secu
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 @router.post("/chat")
-async def chat_with_agent(chat_request: ChatRequest) -> ChatResponse:
-    """사용자 메시지를 받아서 supervisor를 통해 적절한 에이전트로 라우팅합니다."""
+async def chat_with_agent(chat_request: ChatRequest, request: Request):
+    """사용자 메시지를 받아서 supervisor를 통해 적절한 에이전트로 라우팅합니다. (스트리밍 지원)"""
     try:
+        # 스트리밍 요청 확인 (Accept 헤더 또는 stream 파라미터)
+        accept_header = request.headers.get("accept", "")
+        stream_requested = "text/event-stream" in accept_header or "stream" in str(request.query_params)
+        
+        # 챗봇 에이전트인 경우 스트리밍 지원
+        # 먼저 supervisor를 통해 에이전트 타입 확인
         user_intent = UserIntent(message=chat_request.message, user_id=chat_request.user_id)
         
-        supervisor_response = await asyncio.wait_for(
-            supervisor.process_user_intent(user_intent),
-            timeout=settings.REQUEST_TIMEOUT
-        )
-        
-        return ChatResponse(
-            success=supervisor_response.success,
-            message=supervisor_response.response.content if supervisor_response.success else supervisor_response.response,
-            agent_type=supervisor_response.response.agent_type if supervisor_response.success else "unknown",
-            metadata=supervisor_response.response.metadata if supervisor_response.success else {}
-        )
+        # 챗봇 에이전트로 직접 라우팅하여 스트리밍 처리
+        if stream_requested:
+            # 스트리밍 모드: compose_answer를 직접 호출
+            from agents.chatbot_agent.rag.react_agent import process as react_process
+            from agents.chatbot_agent.rag.answerer import compose_answer
+            
+            # RAG 에이전트의 process 함수를 사용하여 evidences 가져오기
+            state = {
+                "question": chat_request.message,
+                "user_id": chat_request.user_id,
+                "filters": {}
+            }
+            
+            # react_process를 통해 evidences 가져오기 (비동기 처리 필요)
+            def generate_stream():
+                try:
+                    # react_process를 호출하여 evidences 가져오기
+                    result = react_process(state)
+                    evidences = result.get("evidence", [])
+                    
+                    # compose_answer를 직접 호출하여 스트리밍
+                    for chunk in compose_answer(chat_request.message, evidences, chat_request.user_id):
+                        yield chunk
+                except Exception as e:
+                    logger.error(f"스트리밍 응답 생성 중 오류: {e}", exc_info=True)
+                    yield f"오류가 발생했습니다: {str(e)}"
+            
+            return StreamingResponse(generate_stream(), media_type="text/plain")
+        else:
+            # 비스트리밍 모드: 기존 로직 사용
+            supervisor_response = await asyncio.wait_for(
+                supervisor.process_user_intent(user_intent),
+                timeout=settings.REQUEST_TIMEOUT
+            )
+            
+            return ChatResponse(
+                success=supervisor_response.success,
+                message=supervisor_response.response.content if supervisor_response.success else supervisor_response.response,
+                agent_type=supervisor_response.response.agent_type if supervisor_response.success else "unknown",
+                metadata=supervisor_response.response.metadata if supervisor_response.success else {}
+            )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=408, detail=f"채팅 처리 시간이 초과되었습니다.")
     except Exception as e:
