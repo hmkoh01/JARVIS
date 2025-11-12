@@ -1,6 +1,8 @@
 import os
 import base64
 import logging
+import re
+import html
 from typing import List, Dict, Any, Optional
 from PIL import Image
 import io
@@ -52,13 +54,20 @@ def _clear_expired_cache():
             logger.debug(f"만료된 캐시 {len(expired_keys)}개 항목 정리")
 
 def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
-    """검색 결과를 깔끔하게 정리하여 컨텍스트 생성"""
+    """[수정됨 v2] 검색 결과를 정리하고 HTML 엔티티/태그 및 특수 문자를 제거하여 컨텍스트 생성"""
     if not evidences:
         return ""
     
     context_parts = []
     seen_content = set()  # 중복 내용 방지
     
+    # [수정 1] HTML 태그를 제거하는 정규식
+    tag_remover = re.compile(r'<[^>]+>')
+    # [수정 2] 마크다운/특수기호 제거 정규식 (더 강력하게)
+    special_char_remover = re.compile(r'[|※「」#*<>{}\[\]\\]')
+    # [수정 3] 여러 개의 공백을 하나로 합치는 정규식
+    whitespace_normalizer = re.compile(r'\s+')
+
     for i, evidence in enumerate(evidences[:3], 1):  # 상위 3개만 사용
         snippet = evidence.get('snippet', '')
         if not snippet or snippet in seen_content:
@@ -66,14 +75,26 @@ def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
             
         seen_content.add(snippet)
         
-        # 불필요한 태그나 특수문자 제거
-        snippet = snippet.replace('<!-- image -->', '').replace('#', '').strip()
+        # [수정 4] HTML 엔티티 디코딩 (e.g., &lt; -> <)
+        snippet = html.unescape(snippet)
+        
+        # [수정 5] HTML 태그 제거 (e.g., <들어가며> -> )
+        snippet = tag_remover.sub(' ', snippet)
+        
+        # [수정 6] 기타 특수 기호 제거
+        snippet = special_char_remover.sub(' ', snippet)
+        
+        # [수정 7] 여러 공백/줄바꿈을 하나의 공백으로 정규화
+        snippet = whitespace_normalizer.sub(' ', snippet).strip()
+
         if len(snippet) > 200:  # 너무 긴 내용은 잘라내기
             snippet = snippet[:200] + "..."
         
         context_parts.append(f"{i}. {snippet}")
     
-    return "\n\n".join(context_parts)
+    clean_context = "\n\n".join(context_parts)
+    logger.info(f"--- 정제된 컨텍스트 (v2) ---\n{clean_context}\n--------------------")
+    return clean_context
 
 # ==============================================================================
 # 보안 관련 함수들
@@ -313,6 +334,14 @@ def call_llm_for_answer_stream(question: str, context: Optional[str], user_profi
             import google.generativeai as genai
             from config.settings import settings
             
+            # [추가] .env에서 로드된 API 키를 로깅하여 확인합니다.
+            if not settings.GEMINI_API_KEY:
+                logger.error("!!! 치명적 오류: settings.GEMINI_API_KEY가 비어 있습니다. .env 파일을 확인하세요.")
+                yield "죄송합니다. API 키가 설정되지 않았습니다."
+                return
+            else:
+                logger.info(f"--- API 키 확인 (answerer.py): {settings.GEMINI_API_KEY[:5]}...{settings.GEMINI_API_KEY[-4:]} ---")
+
             # API 키 확인
             if not settings.GEMINI_API_KEY:
                 logger.warning("GEMINI_API_KEY가 설정되지 않았습니다.")
