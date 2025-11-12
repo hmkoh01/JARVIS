@@ -119,6 +119,18 @@ class FloatingChatApp:
                     elif message['type'] == 'show_recommendation':
                         # 추천 알림 표시
                         self.show_recommendation_notification(message['recommendations'])
+                    
+                    elif message['type'] == 'create_streaming_message':
+                        # 스트리밍용 빈 봇 메시지 생성
+                        self.create_streaming_bot_message(message['loading_widget'])
+                    
+                    elif message['type'] == 'update_streaming':
+                        # 스트리밍 메시지 업데이트
+                        self.update_streaming_message(message['text'])
+                    
+                    elif message['type'] == 'complete_streaming':
+                        # 스트리밍 완료
+                        self.complete_streaming_message()
                         
                 except queue.Empty:
                     break
@@ -831,34 +843,100 @@ class FloatingChatApp:
         })
         
     def process_api_request(self, message, loading_text_widget):
-        """봇 응답 가져오기 - 재시도 로직 포함"""
+        """봇 응답 가져오기 - 스트리밍 응답 지원"""
         max_retries = 3
         retry_delay = 2  # 초
-        timeout = 60  # 타임아웃을 30초에서 60초로 증가
+        timeout = 120  # 스트리밍을 위해 타임아웃 증가
         
         for attempt in range(max_retries):
             try:
-                # API 호출 - Supervisor 기반 처리
+                # API 호출 - 스트리밍 지원하는 /process 엔드포인트 사용
                 response = requests.post(
                     f"{self.API_BASE_URL}/api/v2/process",
                     json={"message": message, "user_id": 1},
-                    timeout=timeout
+                    headers={"Accept": "text/event-stream"},  # 스트리밍 요청
+                    timeout=timeout,
+                    stream=True  # 스트리밍 모드
                 )
                 
                 if response.status_code == 200:
-                    result = response.json()
-                    # Supervisor 응답 구조에 맞게 처리
-                    if result.get("success"):
-                        bot_response = result.get("content", "응답을 처리할 수 없습니다.")
-                    else:
-                        bot_response = result.get("content", "처리 중 오류가 발생했습니다.")
+                    # 스트리밍 응답 처리
+                    accumulated_response = ""
                     
-                    # 큐를 통해 결과 전달
+                    # 로딩 메시지 제거하고 빈 봇 메시지 생성
                     self.message_queue.put({
-                        'type': 'bot_response',
-                        'response': bot_response,
+                        'type': 'create_streaming_message',
                         'loading_widget': loading_text_widget
                     })
+                    
+                    # 스트리밍 응답을 읽기
+                    try:
+                        print(f"[DEBUG] 스트리밍 응답 읽기 시작...")
+                        
+                        # iter_content를 사용하여 바이트 스트림 읽기 후 디코딩
+                        for chunk_bytes in response.iter_content(chunk_size=512, decode_unicode=False):
+                            if chunk_bytes:
+                                try:
+                                    # UTF-8로 디코딩
+                                    chunk_text = chunk_bytes.decode('utf-8')
+                                    accumulated_response += chunk_text
+                                    print(f"[DEBUG] 청크 수신: {len(chunk_text)} 글자, 누적: {len(accumulated_response)} 글자")
+                                    
+                                    # 큐를 통해 스트리밍 업데이트 전달
+                                    self.message_queue.put({
+                                        'type': 'update_streaming',
+                                        'text': accumulated_response
+                                    })
+                                except UnicodeDecodeError as e:
+                                    print(f"[DEBUG] UTF-8 디코딩 오류: {e}")
+                                    continue
+                        
+                        print(f"[DEBUG] 스트리밍 읽기 완료. 총 길이: {len(accumulated_response)}")
+                        
+                        # 응답이 비어있으면 전체 텍스트를 한 번에 읽기 시도
+                        if not accumulated_response:
+                            print(f"[DEBUG] 누적 응답이 비어있음. response.text 사용 시도...")
+                            accumulated_response = response.text
+                            if accumulated_response:
+                                print(f"[DEBUG] response.text로 읽기 성공: {len(accumulated_response)} 글자")
+                                self.message_queue.put({
+                                    'type': 'update_streaming',
+                                    'text': accumulated_response
+                                })
+                            else:
+                                print(f"[DEBUG] response.text도 비어있음")
+                                
+                    except Exception as stream_error:
+                        print(f"[ERROR] 스트리밍 읽기 오류: {stream_error}")
+                        import traceback
+                        traceback.print_exc()
+                        
+                        # 오류 발생 시 전체 응답 읽기 시도
+                        try:
+                            accumulated_response = response.text
+                            if accumulated_response:
+                                print(f"[DEBUG] 폴백으로 읽기 성공: {len(accumulated_response)} 글자")
+                                self.message_queue.put({
+                                    'type': 'update_streaming',
+                                    'text': accumulated_response
+                                })
+                        except Exception as e:
+                            print(f"[ERROR] 응답 읽기 완전 실패: {e}")
+                    
+                    # 응답이 비어있는 경우 처리
+                    if not accumulated_response:
+                        print(f"[ERROR] 최종적으로 응답을 받지 못함")
+                        self.message_queue.put({
+                            'type': 'bot_response',
+                            'response': "응답을 받지 못했습니다. 다시 시도해주세요.",
+                            'loading_widget': loading_text_widget
+                        })
+                    else:
+                        print(f"[DEBUG] 스트리밍 완료 신호 전송")
+                        # 스트리밍 완료
+                        self.message_queue.put({
+                            'type': 'complete_streaming'
+                        })
                     return
                 else:
                     error_msg = f"Error: {response.status_code} - {response.text}"
@@ -936,6 +1014,67 @@ class FloatingChatApp:
         
         # 타이핑 애니메이션으로 봇 메시지 표시
         self.add_bot_message(bot_response)
+    
+    def create_streaming_bot_message(self, loading_text_widget):
+        """스트리밍용 빈 봇 메시지를 생성합니다."""
+        # 로딩 메시지 제거
+        self.remove_loading_message(loading_text_widget)
+        
+        # 봇 메시지 프레임 생성
+        message_frame = tk.Frame(self.scrollable_frame, bg='white')
+        message_frame.pack(fill='x', pady=8)
+        
+        # 봇 메시지 컨테이너 (좌측 정렬)
+        bot_container = tk.Frame(message_frame, bg='white')
+        bot_container.pack(side='left', padx=(15, 50))
+        
+        # 봇 메시지 (Text 위젯으로 변경하여 텍스트 선택 가능)
+        bot_text = tk.Text(
+            bot_container,
+            font=self.message_font,
+            bg='#f3f4f6',
+            fg='black',
+            wrap='word',
+            width=35,
+            height=1,
+            relief='flat',
+            borderwidth=0,
+            padx=15,
+            pady=10,
+            state='disabled',
+            cursor='arrow'
+        )
+        bot_text.pack()
+        
+        # 스트리밍 메시지 위젯 저장
+        self.streaming_text_widget = bot_text
+        
+        # 스크롤을 맨 아래로
+        self.messages_canvas.update_idletasks()
+        self.messages_canvas.yview_moveto(1)
+    
+    def update_streaming_message(self, text):
+        """스트리밍 메시지를 업데이트합니다."""
+        if hasattr(self, 'streaming_text_widget') and self.streaming_text_widget.winfo_exists():
+            # Text 위젯에 텍스트 업데이트
+            self.streaming_text_widget.config(state='normal')
+            self.streaming_text_widget.delete('1.0', 'end')
+            self.streaming_text_widget.insert('1.0', text)
+            self.streaming_text_widget.config(state='disabled')
+            
+            # 텍스트 높이에 맞게 조정
+            self.streaming_text_widget.update_idletasks()
+            text_height = self.streaming_text_widget.tk.call((self.streaming_text_widget, 'count', '-update', '-displaylines', '1.0', 'end'))
+            self.streaming_text_widget.config(height=max(1, text_height))
+            
+            # 스크롤을 맨 아래로
+            self.messages_canvas.update_idletasks()
+            self.messages_canvas.yview_moveto(1)
+    
+    def complete_streaming_message(self):
+        """스트리밍 메시지를 완료합니다."""
+        if hasattr(self, 'streaming_text_widget'):
+            delattr(self, 'streaming_text_widget')
         
     def check_for_recommendations(self):
         """주기적으로 서버에 새로운 추천이 있는지 확인합니다."""

@@ -26,11 +26,13 @@ logger = get_logger(__name__)
 from agents.chatbot_agent.rag.react_agent import ReactAgent
 from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
 from database.repository import Repository
+from database.user_profile_indexer import UserProfileIndexer
 
 # 전역 싱글톤 인스턴스
 global_react_agent: ReactAgent = None
 global_embedder: BGEM3Embedder = None
 global_repository: Repository = None
+global_profile_indexer: UserProfileIndexer = None
 
 
 # 전역 스케줄러 인스턴스
@@ -110,6 +112,16 @@ async def lifespan(app: FastAPI):
         set_global_react_agent(global_react_agent)
         logger.info("✅ 전역 ReactAgent 싱글톤 설정 완료")
         
+        # 2-5. UserProfileIndexer 초기화 (의존성 주입)
+        logger.info("📦 UserProfileIndexer 초기화 시작...")
+        global_profile_indexer = UserProfileIndexer(
+            repository=global_repository,
+            embedder=global_embedder
+        )
+        from database.user_profile_indexer import set_global_profile_indexer
+        set_global_profile_indexer(global_profile_indexer)
+        logger.info("✅ UserProfileIndexer 초기화 완료")
+        
         logger.info("--- ✅ Singleton Resources Initialized Successfully ---")
         
     except Exception as e:
@@ -127,6 +139,12 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"📊 등록된 에이전트: {list(agent_registry.get_agent_descriptions().keys())}")
     logger.info("✅ 시스템이 준비되었습니다!")
+    
+    # 4. app.state에 전역 인스턴스 저장 (라우터에서 접근 가능하도록)
+    app.state.repository = global_repository
+    app.state.embedder = global_embedder
+    app.state.react_agent = global_react_agent
+    app.state.profile_indexer = global_profile_indexer
     
     yield  # 이 시점에서 애플리케이션이 실행됨
 

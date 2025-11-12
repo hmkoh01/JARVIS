@@ -17,12 +17,31 @@ from database.sqlite_meta import SQLiteMeta
 from database.repository import Repository
 from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
 
+_global_profile_indexer: Optional["UserProfileIndexer"] = None
+
+
+def set_global_profile_indexer(indexer: "UserProfileIndexer") -> None:
+    """전역 UserProfileIndexer 인스턴스를 등록합니다."""
+    global _global_profile_indexer
+    _global_profile_indexer = indexer
+
+
+def get_global_profile_indexer() -> "UserProfileIndexer":
+    """등록된 전역 UserProfileIndexer 인스턴스를 반환합니다."""
+    if _global_profile_indexer is None:
+        raise RuntimeError("전역 UserProfileIndexer 인스턴스가 초기화되지 않았습니다.")
+    return _global_profile_indexer
+
 
 class UserProfileIndexer:
-    def __init__(self):
+    def __init__(self, repository: Repository, embedder: BGEM3Embedder):
+        """
+        싱글톤 패턴으로 관리되는 UserProfileIndexer.
+        Repository와 BGEM3Embedder를 주입받아 사용합니다.
+        """
         self.sqlite_meta = SQLiteMeta()
-        self.repository = Repository()
-        self.embedder = BGEM3Embedder()
+        self.repository = repository  # 주입받은 싱글톤 인스턴스 사용
+        self.embedder = embedder      # 주입받은 싱글톤 인스턴스 사용
     
     def convert_survey_to_text(self, survey_data: dict) -> str:
         """설문 데이터를 자연어 텍스트로 변환합니다."""

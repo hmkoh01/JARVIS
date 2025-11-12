@@ -46,7 +46,7 @@ class QdrantManager:
                         'batch_size': 12
                     },
                     'sqlite': {
-                        'path': './sqlite/meta.db'
+                        'path': 'meta.db'
                     },
                     'retrieval': {
                         'k_candidates': 40,
@@ -70,7 +70,7 @@ class QdrantManager:
                     'batch_size': 12
                 },
                 'sqlite': {
-                    'path': './sqlite/meta.db'
+                    'path': 'meta.db'
                 },
                 'retrieval': {
                     'k_candidates': 40,
@@ -181,6 +181,10 @@ class QdrantManager:
             # 4. 두 검색을 한 번에 실행 (네트워크 효율성)
             try:
                 # SearchRequest 생성 시 올바른 파라미터 사용
+                request_kwargs = {}
+                if qdrant_filter:
+                    request_kwargs['filter'] = qdrant_filter
+
                 dense_request = models.SearchRequest(
                     vector=models.NamedVector(
                         name="dense",
@@ -188,7 +192,8 @@ class QdrantManager:
                     ),
                     limit=limit,
                     with_payload=True,
-                    params=models.SearchParams(hnsw_ef=128)
+                    params=models.SearchParams(hnsw_ef=128),
+                    **request_kwargs
                 )
                 
                 sparse_request = models.SearchRequest(
@@ -197,13 +202,9 @@ class QdrantManager:
                         vector=sparse_vector
                     ),
                     limit=limit,
-                    with_payload=True
+                    with_payload=True,
+                    **request_kwargs
                 )
-                
-                # 필터가 있는 경우에만 추가
-                if qdrant_filter:
-                    dense_request.query_filter = qdrant_filter
-                    sparse_request.query_filter = qdrant_filter
                 
                 dense_results, sparse_results = self.client.search_batch(
                     collection_name=self.collection_name,

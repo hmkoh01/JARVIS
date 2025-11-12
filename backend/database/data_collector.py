@@ -10,6 +10,9 @@ import json
 import sqlite3
 import psutil
 import threading
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import asyncio
@@ -25,8 +28,36 @@ if str(backend_dir) not in sys.path:
 from config.settings import settings
 from .repository import Repository
 from .sqlite_meta import SQLiteMeta
-from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
 from .document_parser import DocumentParser
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
+
+logger = logging.getLogger(__name__)
+
+def init_worker_logging():
+    """
+    ProcessPoolExecutor 워커의 로깅을 완전히 억제하여
+    불필요한 INFO 로그(모듈 초기화 등) 스팸을 방지합니다.
+    """
+    # 워커 프로세스의 루트 로거 설정
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.WARNING)
+    
+    # 기존의 모든 핸들러 제거 (중복 로그 방지)
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # WARNING 레벨의 간단한 콘솔 핸들러만 추가
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+    root_logger.addHandler(console_handler)
+    
+    # 자식 로거들도 WARNING 레벨로 설정
+    for logger_name in ['backend.config.logging_config', '__main__']:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 # -----------------------------------------------------------------------------
 # FileCollector
@@ -35,9 +66,10 @@ class FileCollector:
     """사용자 드라이브의 파일들을 수집하는 클래스"""
     def __init__(self, user_id: int):
         self.user_id = user_id
+        self.logger = logger.getChild(f"FileCollector[user={user_id}]")
         self.sqlite_meta = SQLiteMeta()
         self.supported_extensions = {
-            'document': ['.txt', '.doc', '.docx', '.pdf', '.hwp', '.md', '.rtf', '.odt', '.tex'],
+            'document': ['.txt', '.doc', '.docx', '.pdf', '.md', '.rtf', '.odt', '.tex'],
             'spreadsheet': ['.xls', '.xlsx', '.csv', '.ods', '.tsv'],
             'presentation': ['.ppt', '.pptx', '.odp', '.key'],
             'code': ['.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', '.java', '.cpp', '.c', '.h', 
@@ -98,7 +130,7 @@ class FileCollector:
         stored_modified = self.sqlite_meta.get_file_last_modified(file_path)
         return stored_modified is None or last_modified > stored_modified
 
-    def get_user_folders(self) -> List[Dict[str, Any]]:
+    def get_user_folders(self, calculate_size: bool = True) -> List[Dict[str, Any]]:
         """사용자 홈 디렉토리의 모든 폴더를 스캔하고 크기를 계산하여 반환합니다."""
         folders = []
         base_path = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -112,22 +144,33 @@ class FileCollector:
                         try:
                             stat = entry.stat()
                             
-                            dir_size = self._get_directory_size(entry.path)
-                            
+                            if calculate_size:
+                                dir_size = self._get_directory_size(entry.path)
+                                size_formatted = self._format_size(dir_size) if dir_size is not None else "(크기 계산 실패)"
+                            else:
+                                dir_size = None
+                                size_formatted = "(크기 미계산)"
+
                             folders.append({
                                 'name': entry.name,
                                 'path': entry.path,
-                                'size_formatted': self._format_size(dir_size),
+                                'size_formatted': size_formatted,
                                 'modified_date': datetime.fromtimestamp(stat.st_mtime)
                             })
                         except (OSError, PermissionError):
                             continue
         except Exception as e:
-            print(f"사용자 폴더를 읽는 중 오류 발생: {e}")
+            self.logger.error("사용자 폴더를 읽는 중 오류 발생: %s", e, exc_info=True)
 
         return sorted(folders, key=lambda x: x['name'].lower())
 
-    def collect_files_from_drive(self, incremental: bool, manager: 'DataCollectionManager', selected_folders: Optional[List[str]]) -> List[Dict[str, Any]]:
+    def collect_files_from_drive(
+        self,
+        incremental: bool,
+        manager: 'DataCollectionManager',
+        selected_folders: Optional[List[str]],
+        progress_bounds: Tuple[float, float] = (0.0, 50.0)
+    ) -> List[Dict[str, Any]]:
         paths_to_scan = []
         if selected_folders is None:
             # "전체 사용자 폴더 스캔"이 선택된 경우, 기본 폴더 목록을 가져옵니다.
@@ -137,7 +180,7 @@ class FileCollector:
             paths_to_scan = selected_folders
         
         if not paths_to_scan: 
-            print("⚠️ 스캔할 폴더가 없습니다.")
+            self.logger.warning("⚠️ 스캔할 폴더가 없습니다.")
             return []
 
         collected_files = []
@@ -145,13 +188,21 @@ class FileCollector:
         skipped_by_extension = 0
         skipped_by_hash = 0
         
+        progress_start, progress_end = progress_bounds
+        progress_range = max(progress_end - progress_start, 0.0)
+
+        if manager:
+            manager.progress = progress_start
+
+        total_paths = len(paths_to_scan)
+
         for i, folder_path in enumerate(paths_to_scan):
             # 경로를 운영체제에 맞게 정규화하여 경로 구분자 문제를 해결합니다.
             normalized_path = os.path.normpath(folder_path)
             
-            if manager: 
-                # 0-80% 범위에서 진행률 계산
-                manager.progress = (i / len(paths_to_scan)) * 80.0
+            if manager and total_paths > 0: 
+                # progress_start ~ progress_end 범위에서 진행률 계산
+                manager.progress = progress_start + ((i + 1) / total_paths) * progress_range
                 # 정규화된 경로를 사용해 폴더 이름을 가져옵니다.
                 manager.progress_message = f"📁 스캔 중: {Path(normalized_path).name}"
             
@@ -164,6 +215,9 @@ class FileCollector:
                             total_scanned += 1
                             file_path = os.path.join(root, file)
                             file_ext = Path(file_path).suffix.lower()
+                            
+                            if file.startswith("~$"):
+                                continue
                             
                             if file_ext not in self.allowed_extensions:
                                 skipped_by_extension += 1
@@ -192,30 +246,37 @@ class FileCollector:
                             })
                         except (PermissionError, OSError, FileNotFoundError): continue
             except Exception as e: 
-                print(f"폴더 스캔 오류 {normalized_path}: {e}")
+                self.logger.error("폴더 스캔 오류 %s: %s", normalized_path, e, exc_info=True)
         
-        # 파일 수집 완료 시 80%로 설정
+        # 파일 수집 완료 시 progress_end로 설정
         if manager:
-            manager.progress = 80.0
+            if total_paths > 0:
+                manager.progress = progress_end
+            else:
+                manager.progress = progress_start
         
         # 수집 결과 로깅
-        print(f"\n📊 파일 수집 결과:")
-        print(f"   - 총 스캔한 파일: {total_scanned}개")
-        print(f"   - 지원되지 않는 확장자로 제외: {skipped_by_extension}개")
-        print(f"   - 이미 수집된 파일(중복)로 제외: {skipped_by_hash}개")
-        print(f"   - 새로 수집할 파일: {len(collected_files)}개")
+        self.logger.info("📊 파일 수집 결과 - 총 스캔: %d, 확장자 제외: %d, 중복 제외: %d, 신규 파일: %d",
+                         total_scanned, skipped_by_extension, skipped_by_hash, len(collected_files))
         
         if len(collected_files) == 0 and total_scanned > 0:
-            print(f"\n⚠️ 지원되는 확장자 목록: {', '.join(sorted(self.allowed_extensions))}")
+            self.logger.warning("⚠️ 지원되는 확장자 목록: %s", ', '.join(sorted(self.allowed_extensions)))
         
         return collected_files
 
-    def save_files_to_db(self, files: List[Dict[str, Any]], repo: Repository, embedder: BGEM3Embedder, parser: DocumentParser) -> int:
+    def save_files_to_db(
+        self,
+        files: List[Dict[str, Any]],
+        repo: Repository,
+        embedder: 'BGEM3Embedder',
+        parser: DocumentParser,
+        manager: Optional['DataCollectionManager'] = None
+    ) -> int:
         if not files:
-            print("⚠️ 저장할 파일이 없습니다.")
+            self.logger.warning("⚠️ 저장할 파일이 없습니다.")
             return 0
         if not repo:
-            print("⚠️ Repository가 초기화되지 않았습니다.")
+            self.logger.error("⚠️ Repository가 초기화되지 않았습니다.")
             return 0
             
         saved_count, text_files = 0, []
@@ -227,81 +288,258 @@ class FileCollector:
                     if file_info['file_category'] in ['document', 'spreadsheet', 'presentation', 'code', 'note']:
                         text_files.append(file_info)
             self.sqlite_meta.conn.commit()
-            print(f"✅ SQLite 파일 메타데이터 저장: {saved_count}개")
-            print(f"   - 텍스트 인덱싱 대상 파일: {len(text_files)}개")
+            self.logger.info("✅ SQLite 파일 메타데이터 저장: %d개, 텍스트 인덱싱 대상: %d개",
+                             saved_count, len(text_files))
         except Exception as e: 
             self.sqlite_meta.conn.rollback()
-            print(f"❌ SQLite 파일 저장 실패: {e}")
+            self.logger.error("❌ SQLite 파일 저장 실패: %s", e, exc_info=True)
             return 0
         
         if text_files:
-            self._batch_index_text_files(text_files, repo, embedder, parser)
+            self._batch_index_text_files(text_files, repo, embedder, parser, manager)
         else:
-            print("⚠️ 텍스트 인덱싱 대상 파일이 없습니다.")
+            self.logger.warning("⚠️ 텍스트 인덱싱 대상 파일이 없습니다.")
         return saved_count
 
-    def _batch_index_text_files(self, text_files: List[Dict[str, Any]], repo: Repository, embedder: BGEM3Embedder, parser: DocumentParser):
-        print(f"\n📝 텍스트 파일 인덱싱 시작... ({len(text_files)}개 파일)")
-        
-        all_texts, all_metas = [], []
-        parsed_count = 0
-        failed_count = 0
-        file_hash_map = {}  # file_hash를 추적하기 위한 맵
-        
-        for file_info in text_files:
+    @staticmethod
+    def _parse_single_file(file_info: Dict[str, Any], parser_ref: Any, user_id: int):
+        """(헬퍼 함수) 단일 파일을 파싱. ProcessPoolExecutor에서 실행됨."""
+        try:
+            parser = None
+            if parser_ref is not None:
+                if isinstance(parser_ref, type):
+                    parser = parser_ref()
+                else:
+                    parser = parser_ref
+            if parser is None or not hasattr(parser, "parse_and_chunk"):
+                from .document_parser import DocumentParser as _DocumentParser
+                parser = _DocumentParser()
+
             try:
                 chunk_infos = parser.parse_and_chunk(file_info['file_path'])
-                if not chunk_infos:
-                    print(f"⚠️ 청크 없음: {file_info['file_name']}")
-                    failed_count += 1
-                    continue
-                
-                parsed_count += 1
-                doc_id = f"file_{hashlib.md5(file_info['file_path'].encode()).hexdigest()}"
-                file_hash = file_info.get('file_hash', '')
-                
-                for chunk in chunk_infos:
-                    all_texts.append(chunk['text'])
-                    all_metas.append({
-                        'user_id': self.user_id,  # user_id 포함
-                        'source': 'file', 
-                        'path': file_info['file_path'], 
-                        'doc_id': doc_id, 
-                        'chunk_id': chunk['chunk_id'], 
-                        'snippet': chunk['snippet']
-                    })
-                    
-                # 파일 해시 매핑 저장
-                if file_hash:
-                    file_hash_map[file_info['file_path']] = file_hash
-                
-                print(f"   ✓ {file_info['file_name']}: {len(chunk_infos)}개 청크")
+            except RuntimeError as e:
+                return None, file_info['file_name'], f"Docling RuntimeError: {e}"
             except Exception as e:
-                failed_count += 1
-                print(f"   ✗ 파일 파싱 오류 {file_info['file_name']}: {e}")
-        
-        print(f"\n📊 파싱 결과: 성공 {parsed_count}개, 실패 {failed_count}개, 총 청크 {len(all_texts)}개")
-        
-        if not all_texts:
-            print("⚠️ 인덱싱할 텍스트 청크가 없습니다.")
+                return None, file_info['file_name'], f"Parsing Exception: {e}"
+            if not chunk_infos:
+                return None, file_info['file_name'], "청크 없음"
+
+            doc_id = f"file_{hashlib.md5(file_info['file_path'].encode()).hexdigest()}"
+            file_hash = file_info.get('file_hash', '')
+
+            texts = []
+            metas = []
+            for chunk in chunk_infos:
+                texts.append(chunk['text'])
+                metas.append({
+                    'user_id': user_id,
+                    'source': 'file',
+                    'path': file_info['file_path'],
+                    'doc_id': doc_id,
+                    'chunk_id': chunk['chunk_id'],
+                    'snippet': chunk['snippet'],
+                    'content': chunk['text']
+                })
+
+            return (texts, metas, file_hash, file_info['file_path'], len(chunk_infos)), file_info['file_name'], None
+        # [수정] 자식 프로세스에서 발생 가능한 모든 오류를 잡기 위해 BaseException 사용
+        except BaseException as e:
+            return None, file_info['file_name'], f"Worker setup error: {e}"
+
+    def _process_and_upload_batch(
+        self,
+        repo: Repository,
+        embedder: 'BGEM3Embedder',
+        texts: List[str],
+        metas: List[Dict[str, Any]],
+        batch_size: int
+    ):
+        """청크 배치를 받아 임베딩하고 Qdrant에 업로드합니다."""
+        if not texts:
             return
-            
-        print(f"🧠 BGE-M3로 {len(all_texts)}개 파일 청크 임베딩 생성...")
-        embeddings = embedder.encode_documents(all_texts, batch_size=12)
-        dense_vectors, sparse_vectors = embeddings['dense_vecs'].tolist(), [embedder.convert_sparse_to_qdrant_format(lw) for lw in embeddings['lexical_weights']]
+
+        self.logger.info(
+            "🧠 청크 %d개 배치 임베딩 및 업로드 중... (Embedding Batch Size: %d)",
+            len(texts),
+            batch_size
+        )
+        try:
+            embeddings = embedder.encode_documents(texts, batch_size=batch_size)
+            dense_vectors = embeddings['dense_vecs'].tolist()
+            sparse_vectors = [
+                embedder.convert_sparse_to_qdrant_format(lw)
+                for lw in embeddings['lexical_weights']
+            ]
+
+            if repo.qdrant.upsert_vectors(metas, dense_vectors, sparse_vectors):
+                self.logger.info("   ... ✅ Qdrant 업로드 성공: %d개", len(texts))
+            else:
+                self.logger.error("   ... ❌ Qdrant 업로드 실패")
+        except Exception as e:
+            # MemoryError 등 치명적 오류가 발생할 수 있으므로 상세 로그
+            self.logger.error("   ... ❌ 임베딩/업로드 중 치명적 오류: %s", e, exc_info=True)
+
+    def _batch_index_text_files(
+        self,
+        text_files: List[Dict[str, Any]],
+        repo: Repository,
+        embedder: 'BGEM3Embedder',
+        parser: DocumentParser,
+        manager: Optional['DataCollectionManager'] = None
+    ):
+        # 중복 파일 경로 제거 (동일 파일은 한 번만 파싱)
+        seen_paths = set()
+        unique_text_files: List[Dict[str, Any]] = []
+        duplicate_count = 0
+
+        for file_info in text_files:
+            file_path = file_info.get('file_path')
+            if not file_path:
+                self.logger.debug("텍스트 인덱싱 대상에서 file_path가 없는 항목을 건너뜁니다: %s", file_info)
+                continue
+
+            normalized_path = os.path.normcase(os.path.abspath(file_path))
+            if normalized_path in seen_paths:
+                duplicate_count += 1
+                continue
+
+            seen_paths.add(normalized_path)
+            unique_text_files.append(file_info)
+
+        if duplicate_count:
+            self.logger.debug("텍스트 인덱싱 대상에서 중복 파일 %d개를 제외했습니다.", duplicate_count)
+
+        text_files = unique_text_files
+
+        cpu_count = multiprocessing.cpu_count()
+        self.logger.info(
+            "📝 텍스트 파일 인덱싱 시작 - 파일 %d개, 사용 코어 %d개",
+            len(text_files),
+            cpu_count
+        )
         
-        if repo.qdrant.upsert_vectors(all_metas, dense_vectors, sparse_vectors):
-            print(f"✅ Qdrant에 파일 청크 {len(dense_vectors)}개 인덱싱 완료")
+        # 진행률 업데이트 (파싱 시작)
+        if manager:
+            manager.progress_message = f"📄 파일 파싱 중... (총 {len(text_files)}개)"
+
+        # 1. 환경에 따라 다른 처리 전략 설정
+        is_gpu_available = getattr(embedder, "device", "cpu") == "cuda"
+        embedding_batch_size = 128 if is_gpu_available else 32
+        cpu_micro_batch_threshold = 5000  # CPU 모드에서 RAM 보호용 임계값
+
+        all_texts: List[str] = []
+        all_metas: List[Dict[str, Any]] = []
+        total_chunk_count = 0
+        parsed_count = 0
+        failed_count = 0
+        file_hash_map: Dict[str, str] = {}
+
+        # --- 1. 파싱 (Parsing) ---
+        # GPU 여부와 관계없이, 파싱은 항상 ProcessPoolExecutor로 병렬 처리합니다.
+
+        max_workers = min(cpu_count, 8) if cpu_count > 0 else 1
+        parser_ref = parser.__class__ if parser is not None else DocumentParser
+
+        self.logger.info("--- [1/2] 파일 파싱 시작 (병렬 처리) ---")
+        with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker_logging) as executor:
+            futures = {
+                executor.submit(self._parse_single_file, file_info, parser_ref, self.user_id): file_info
+                for file_info in text_files
+            }
+
+            total_files = len(text_files)
+            completed_files = 0
             
-            # Qdrant 저장 성공 시 SQLite에 인덱싱 완료 표시
-            if file_hash_map:
-                indexed_hashes = list(file_hash_map.values())
-                if self.sqlite_meta.mark_files_indexed(indexed_hashes):
-                    print(f"✅ {len(indexed_hashes)}개 파일 인덱싱 완료 표시")
+            for future in as_completed(futures):
+                result, file_name, error = future.result()
+                completed_files += 1
+                
+                if result:
+                    texts, metas, file_hash, file_path, chunk_count = result
+
+                    # 모든 결과를 RAM의 단일 리스트로 수집
+                    all_texts.extend(texts)
+                    all_metas.extend(metas)
+
+                    total_chunk_count += len(texts)
+                    if file_hash:
+                        file_hash_map[file_path] = file_hash # file_path를 키로 사용
+                    parsed_count += 1
+                    self.logger.info("   ✓ %s: %d개 청크 (파싱 완료)", file_name, chunk_count)
                 else:
-                    print(f"⚠️ 파일 인덱싱 표시 실패 (검색은 정상 작동)")
+                    failed_count += 1
+                    self.logger.warning("   ✗ 파일 파싱 오류 %s: %s", file_name, error)
+                
+                # 진행률 업데이트 (매 파일마다)
+                if manager and total_files > 0:
+                    manager.progress_message = f"📄 파일 파싱 중... ({completed_files}/{total_files})"
+
+        self.logger.info(
+            "📊 파싱 결과 - 성공 %d개, 실패 %d개, 총 청크 %d개",
+            parsed_count,
+            failed_count,
+            total_chunk_count
+        )
+
+        if not all_texts:
+            self.logger.warning("⚠️ 인덱싱할 텍스트 청크가 없습니다.")
+            return
+
+        # --- 2. 임베딩 & 업로드 (Embedding & Upload) ---
+        # 이 단계에서만 GPU/CPU 로직을 분기합니다.
+
+        self.logger.info("--- [2/2] 임베딩 및 업로드 시작 (모드: %s) ---", "GPU" if is_gpu_available else "CPU")
+        
+        # 진행률 업데이트 (임베딩 시작)
+        if manager:
+            manager.progress_message = f"🧠 임베딩 생성 중... (총 {len(all_texts)}개 청크)"
+
+        if is_gpu_available:
+            # GPU 모드: 수집된 모든 청크를 한 번에 처리 (빠름)
+            if all_texts:
+                self.logger.info("--- GPU 모드: 총 %d개 청크 일괄 처리 ---", len(all_texts))
+                self._process_and_upload_batch(
+                    repo,
+                    embedder,
+                    all_texts,
+                    all_metas,
+                    embedding_batch_size
+                )
         else:
-            print("❌ Qdrant 파일 인덱싱 실패")
+            # CPU 모드: OOM 방지를 위해 마이크로 배치로 잘라서 처리 (안정적)
+            self.logger.warning("--- CPU 모드: %d개 청크를 %d개 단위로 분할 처리 ---",
+                               len(all_texts), cpu_micro_batch_threshold)
+
+            total_batches = (len(all_texts) + cpu_micro_batch_threshold - 1) // cpu_micro_batch_threshold
+            
+            for i in range(0, len(all_texts), cpu_micro_batch_threshold):
+                batch_texts = all_texts[i:i + cpu_micro_batch_threshold]
+                batch_metas = all_metas[i:i + cpu_micro_batch_threshold]
+
+                if batch_texts:
+                    batch_num = i // cpu_micro_batch_threshold + 1
+                    self.logger.info(f"--- CPU 배치 {batch_num}/{total_batches} 처리 중... ---")
+                    
+                    # 진행률 업데이트
+                    if manager:
+                        manager.progress_message = f"🧠 임베딩 생성 중... (배치 {batch_num}/{total_batches})"
+                    
+                    self._process_and_upload_batch(
+                        repo,
+                        embedder,
+                        batch_texts,
+                        batch_metas,
+                        embedding_batch_size
+                    )
+
+        # --- 3. SQLite 상태 업데이트 ---
+        if file_hash_map:
+            # file_hash_map의 값(해시)들을 리스트로 만듭니다.
+            indexed_hashes = list(file_hash_map.values())
+            if self.sqlite_meta.mark_files_indexed(indexed_hashes):
+                self.logger.info("✅ %d개 파일 인덱싱 완료 표시", len(indexed_hashes))
+            else:
+                self.logger.warning("⚠️ 파일 인덱싱 표시 실패 (검색은 정상 작동)")
 
 # -----------------------------------------------------------------------------
 # BrowserHistoryCollector
@@ -309,6 +547,7 @@ class FileCollector:
 class BrowserHistoryCollector:
     def __init__(self, user_id: int):
         self.user_id = user_id
+        self.logger = logger.getChild(f"BrowserHistoryCollector[user={user_id}]")
         self.sqlite_meta = SQLiteMeta()
         self.browser_paths = self._get_browser_paths()
         self.parser = DocumentParser()
@@ -341,13 +580,15 @@ class BrowserHistoryCollector:
                     return soup.get_text(separator='\n', strip=True)
         except: return None
 
-    def _batch_index_web_pages(self, history_data: List[Dict[str, Any]], repo: Repository, embedder: BGEM3Embedder):
+    def _batch_index_web_pages(self, history_data: List[Dict[str, Any]], repo: Repository, embedder: 'BGEM3Embedder'):
         async def main():
             all_texts, all_metas = [], []
-            async with aiohttp.ClientSession() as session:
+            connector = aiohttp.TCPConnector(limit=20)
+            async with aiohttp.ClientSession(connector=connector) as session:
                 tasks = [self._crawl_and_extract_text(session, item['url']) for item in history_data]
                 crawled_contents = await asyncio.gather(*tasks)
-                print(f"📄 총 {len(history_data)}개 URL 중 {len([c for c in crawled_contents if c])}개 크롤링 성공")
+                self.logger.info("📄 총 %d개 URL 중 %d개 크롤링 성공",
+                                 len(history_data), len([c for c in crawled_contents if c]))
                 for item, content in zip(history_data, crawled_contents):
                     if not content: continue
                     chunks = self.parser.chunk_text(content)
@@ -362,15 +603,17 @@ class BrowserHistoryCollector:
                             'doc_id': doc_id, 
                             'chunk_id': i, 
                             'timestamp': int(item['visit_time'].timestamp()), 
-                            'snippet': chunk[:200]
+                            'snippet': chunk[:200],
+                            'content': chunk
                         })
             if all_texts:
-                print(f"🧠 BGE-M3로 {len(all_texts)}개 웹 청크 임베딩 생성...")
-                embeddings = embedder.encode_documents(all_texts, batch_size=12)
+                self.logger.info("🧠 BGE-M3로 %d개 웹 청크 임베딩 생성...", len(all_texts))
+                embeddings = embedder.encode_documents(all_texts, batch_size=64)
                 dense_vectors, sparse_vectors = embeddings['dense_vecs'].tolist(), [embedder.convert_sparse_to_qdrant_format(lw) for lw in embeddings['lexical_weights']]
                 if repo.qdrant.upsert_vectors(all_metas, dense_vectors, sparse_vectors):
-                    print(f"✅ Qdrant에 웹 청크 {len(dense_vectors)}개 인덱싱 완료")
-                else: print("❌ Qdrant 웹 청크 인덱싱 실패")
+                    self.logger.info("✅ Qdrant에 웹 청크 %d개 인덱싱 완료", len(dense_vectors))
+                else:
+                    self.logger.error("❌ Qdrant 웹 청크 인덱싱 실패")
         asyncio.run(main())
 
     def _get_browser_history(self, browser_name: str, incremental: bool) -> List[Dict[str, Any]]:
@@ -389,7 +632,8 @@ class BrowserHistoryCollector:
                 if not self.sqlite_meta.is_browser_history_duplicate(self.user_id, row[0], visit_time):
                     history_data.append({'user_id': self.user_id, 'browser_name': browser_name, 'url': row[0], 'title': row[1], 'visit_time': visit_time})
             conn.close()
-        except Exception as e: print(f"{browser_name} 히스토리 수집 오류: {e}")
+        except Exception as e:
+            self.logger.error("%s 히스토리 수집 오류: %s", browser_name, e, exc_info=True)
         finally:
             if os.path.exists(temp_path): os.remove(temp_path)
         return history_data
@@ -397,7 +641,7 @@ class BrowserHistoryCollector:
     def collect_all_browser_history(self, incremental: bool = True) -> List[Dict[str, Any]]:
         return self._get_browser_history('Chrome', incremental) + self._get_browser_history('Edge', incremental)
 
-    def save_browser_history_to_db(self, history_data: List[Dict[str, Any]], repo: Repository, embedder: BGEM3Embedder) -> int:
+    def save_browser_history_to_db(self, history_data: List[Dict[str, Any]], repo: Repository, embedder: 'BGEM3Embedder') -> int:
         if not history_data or not repo: return 0
         saved_count = 0
         try:
@@ -405,8 +649,11 @@ class BrowserHistoryCollector:
             for item in history_data:
                 if self.sqlite_meta.insert_collected_browser_history(item): saved_count += 1
             self.sqlite_meta.conn.commit()
-            print(f"✅ SQLite 브라우저 히스토리 저장: {saved_count}개")
-        except Exception as e: self.sqlite_meta.conn.rollback(); print(f"❌ SQLite 히스토리 저장 실패: {e}"); return 0
+            self.logger.info("✅ SQLite 브라우저 히스토리 저장: %d개", saved_count)
+        except Exception as e:
+            self.sqlite_meta.conn.rollback()
+            self.logger.error("❌ SQLite 히스토리 저장 실패: %s", e, exc_info=True)
+            return 0
         self._batch_index_web_pages(history_data, repo, embedder)
         return saved_count
 
@@ -436,73 +683,102 @@ class ActiveApplicationCollector:
 # DataCollectionManager
 # -----------------------------------------------------------------------------
 class DataCollectionManager:
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, repository: Repository, embedder: 'BGEM3Embedder'):
         self.user_id = user_id
+        self.logger = logger.getChild(f"DataCollectionManager[user={user_id}]")
         self.file_collector = FileCollector(user_id)
         self.browser_collector = BrowserHistoryCollector(user_id)
         self.app_collector = ActiveApplicationCollector(user_id)
         self.running, self.initial_collection_done = False, False
         self.progress, self.progress_message = 0.0, "초기화 중..."
-        print("RAG 시스템 핵심 컴포넌트 초기화 중...")
+        self.logger.info("RAG 시스템 핵심 컴포넌트 초기화 중...")
         try:
-            self.repository = Repository()
-            # 싱글톤 임베더 사용
-            from agents.chatbot_agent.rag.react_agent import _get_embedder
-            self.embedder = _get_embedder()
+            self.repository = repository
+            self.embedder = embedder
             self.document_parser = DocumentParser()
-            print("✅ RAG 시스템 컴포넌트 초기화 완료.")
+            self.logger.info("✅ RAG 시스템 컴포넌트 초기화 완료.")
         except Exception as e:
-            print(f"❌ RAG 시스템 컴포넌트 초기화 실패: {e}")
+            self.logger.error("❌ RAG 시스템 컴포넌트 초기화 실패: %s", e, exc_info=True)
             self.repository = self.embedder = self.document_parser = None
 
     def start_collection(self, selected_folders: List[str]):
-        if self.running: return
-        self.selected_folders, self.running = selected_folders, True
+        if self.running:
+            self.logger.debug("데이터 수집이 이미 실행 중입니다. 새로운 요청을 무시합니다.")
+            return
+
+        self.selected_folders = selected_folders
+        self.running = True
         self.collection_thread = threading.Thread(target=self._collection_loop, daemon=True)
         self.collection_thread.start()
-        print(f"사용자 {self.user_id}의 데이터 수집이 시작되었습니다.")
+        folder_desc = "전체 사용자 폴더" if selected_folders is None else f"{len(selected_folders)}개 폴더"
+        self.logger.info("사용자 %d의 데이터 수집을 시작했습니다. 대상: %s", self.user_id, folder_desc)
     
     def perform_initial_collection(self, selected_folders: List[str]):
         """초기 데이터 수집을 수행합니다."""
         if not self.repository:
             self.progress_message = "오류: RAG 시스템 초기화 실패"
-            self.initial_collection_done = True
+            self.logger.error("Repository가 초기화되지 않아 초기 데이터 수집을 실행할 수 없습니다.")
+            self.initial_collection_done = False
             return
 
         # 선택된 폴더를 나중에 백그라운드 수집에서도 사용할 수 있도록 저장합니다.
         self.selected_folders = selected_folders
-        print("초기 데이터 수집을 시작합니다...")
+        folder_desc = "전체 사용자 폴더" if selected_folders is None else f"{len(selected_folders)}개 폴더"
+        self.logger.info("초기 데이터 수집을 시작합니다. 대상: %s", folder_desc)
 
+        success = False
+        progress_points = {
+            "file_collection": 50.0,
+            "browser_history": 65.0,
+            "file_embedding": 85.0,
+            "browser_embedding": 95.0,
+            "complete": 100.0
+        }
         try:
             self.progress_message = "📁 초기 파일 수집 중..."
-            files = self.file_collector.collect_files_from_drive(False, self, self.selected_folders)
-            # collect_files_from_drive가 이미 80%로 설정함
+            files = self.file_collector.collect_files_from_drive(
+                False,
+                self,
+                self.selected_folders,
+                (0.0, progress_points["file_collection"])
+            )
 
-            self.progress = 82.0
+            self.progress = max(self.progress, progress_points["file_collection"])
             self.progress_message = "🌐 브라우저 히스토리 수집 중..."
             history = self.browser_collector.collect_all_browser_history(False)
+            self.logger.debug("브라우저 히스토리 %d개 항목 수집 완료", len(history))
 
-            self.progress = 87.0
+            self.progress = max(self.progress, progress_points["browser_history"])
             self.progress_message = "💾 파일 임베딩 생성 및 저장 중..."
-            self.file_collector.save_files_to_db(files, self.repository, self.embedder, self.document_parser)
+            self.file_collector.save_files_to_db(files, self.repository, self.embedder, self.document_parser, manager=self)
             
-            self.progress = 93.0
+            self.progress = max(self.progress, progress_points["file_embedding"])
             self.progress_message = "💾 웹 콘텐츠 임베딩 생성 및 저장 중..."
             self.browser_collector.save_browser_history_to_db(history, self.repository, self.embedder)
 
-            self.progress = 100.0
+            self.progress = max(self.progress, progress_points["browser_embedding"])
+            self.progress = progress_points["complete"]
             self.progress_message = "🎉 초기 데이터 수집 완료!"
+            self.logger.info("초기 데이터 수집이 성공적으로 완료되었습니다.")
+            success = True
 
         except Exception as e:
-            print(f"❌ 초기 데이터 수집 오류: {e}")
+            self.logger.error("❌ 초기 데이터 수집 오류: %s", e, exc_info=True)
             self.progress_message = "오류 발생"
         finally:
-            self.initial_collection_done = True
+            self.initial_collection_done = success
+            if not success:
+                self.logger.warning("초기 데이터 수집이 실패했습니다. 이후 요청 시 재시도할 수 있습니다.")
+            else:
+                # 초기 수집이 성공적으로 완료되면 백그라운드 수집 자동 시작
+                self.logger.info("백그라운드 데이터 수집 스케줄러를 시작합니다.")
+                self.start_collection(selected_folders)
     
     def stop_collection(self):
         self.running = False
-        if hasattr(self, 'collection_thread') and self.collection_thread: self.collection_thread.join()
-        print(f"사용자 {self.user_id}의 데이터 수집이 중지되었습니다.")
+        if hasattr(self, 'collection_thread') and self.collection_thread:
+            self.collection_thread.join()
+        self.logger.info("사용자 %d의 데이터 수집이 중지되었습니다.", self.user_id)
     
     def _collection_loop(self):
         intervals = {'file': 3600, 'browser': 1800, 'app': 300}
@@ -517,7 +793,7 @@ class DataCollectionManager:
 
     def _collect_files(self):
         files = self.file_collector.collect_files_from_drive(True, self, self.selected_folders)
-        self.file_collector.save_files_to_db(files, self.repository, self.embedder, self.document_parser)
+        self.file_collector.save_files_to_db(files, self.repository, self.embedder, self.document_parser, manager=self)
     
     def _collect_browser_history(self):
         history = self.browser_collector.collect_all_browser_history(True)
@@ -531,7 +807,11 @@ class DataCollectionManager:
 # 전역 관리 함수
 # -----------------------------------------------------------------------------
 data_collection_managers = {}
-def get_manager(user_id: int) -> DataCollectionManager:
+def get_manager(user_id: int, repository: Repository, embedder: 'BGEM3Embedder') -> DataCollectionManager:
     if user_id not in data_collection_managers:
-        data_collection_managers[user_id] = DataCollectionManager(user_id)
+        data_collection_managers[user_id] = DataCollectionManager(
+            user_id=user_id,
+            repository=repository,
+            embedder=embedder
+        )
     return data_collection_managers[user_id]

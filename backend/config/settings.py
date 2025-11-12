@@ -41,7 +41,8 @@ class Settings(BaseSettings):
 
     # 로깅 설정
     LOG_LEVEL: str = "DEBUG"  # DEBUG로 변경하여 더 자세한 로그 확인
-    LOG_FILE_PATH: str = "./backend/logs/jarvis.log"  # 로그 파일 경로 추가
+    ENABLE_FILE_LOG: bool = False  # 기본적으로 파일 로깅 비활성화
+    LOG_FILE_PATH: str = ""  # 파일 로깅을 사용할 경우 경로
     LOG_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
     LOG_BACKUP_COUNT: int = 5  # 백업 파일 개수
     

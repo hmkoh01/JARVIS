@@ -15,9 +15,13 @@ from langgraph.graph import StateGraph
 from langgraph.constants import START, END
 from langgraph.graph.message import add_messages
 import google.generativeai as genai
+import logging
+import threading
 from config.settings import settings
 from core.agent_registry import agent_registry
 from agents.base_agent import AgentResponse
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agents.base_agent import BaseAgent
@@ -64,20 +68,24 @@ class LangGraphSupervisor:
     def _initialize_llm(self):
         """LLM을 초기화합니다."""
         try:
-            print(f" GEMINI_API_KEY 확인: {settings.GEMINI_API_KEY[:10]}..." if settings.GEMINI_API_KEY else "❌ GEMINI_API_KEY 없음")
+            logger.debug(
+                f"GEMINI_API_KEY 확인: {settings.GEMINI_API_KEY[:10]}..."
+                if settings.GEMINI_API_KEY
+                else "GEMINI_API_KEY 없음"
+            )
             
             # Gemini API 우선 사용
             if settings.GEMINI_API_KEY:
-                print("🚀 Gemini API 초기화 시도...")
+                logger.info("Gemini API 초기화 시도...")
                 genai.configure(api_key=settings.GEMINI_API_KEY)
                 model = genai.GenerativeModel(settings.GEMINI_MODEL)
-                print("✅ Gemini API 초기화 성공")
+                logger.info("Gemini API 초기화 성공")
                 return model
             else:
-                print("❌ GEMINI_API_KEY가 설정되지 않았습니다.")
+                logger.warning("GEMINI_API_KEY가 설정되지 않았습니다.")
                 return None
         except Exception as e:
-            print(f"❌ LLM 초기화 오류: {e}")
+            logger.error(f"LLM 초기화 오류: {e}")
             return None
     
     def _create_agent_graph(self) -> StateGraph:
@@ -133,7 +141,7 @@ class LangGraphSupervisor:
             
             return new_state
         except Exception as e:
-            print(f"의도 분석 오류: {e}")
+            logger.error(f"의도 분석 오류: {e}", exc_info=True)
             # 오류 발생 시 기본값 설정
             new_state = state.copy()
             new_state["reasoning"] = "의도 분석 중 오류가 발생했습니다."
@@ -145,7 +153,7 @@ class LangGraphSupervisor:
         try:
             # LLM이 초기화되지 않은 경우 기본 응답 반환
             if self.llm is None:
-                print("LLM이 초기화되지 않았습니다. 기본 의도 분석을 사용합니다.")
+                logger.warning("LLM이 초기화되지 않았습니다. 기본 의도 분석을 사용합니다.")
                 return self._fallback_intent_analysis(user_input)
             
             # LLM 프롬프트 생성
@@ -168,7 +176,7 @@ class LangGraphSupervisor:
             return parsed_analysis
             
         except Exception as e:
-            print(f"LLM 의도 분석 오류: {e}")
+            logger.error(f"LLM 의도 분석 오류: {e}", exc_info=True)
             return self._fallback_intent_analysis(user_input)
 
     def _fallback_intent_analysis(self, user_input: str) -> Dict[str, Any]:
@@ -279,10 +287,10 @@ JSON 응답만 제공해주세요:
                 return parsed
             else:
                 # JSON이 없으면 키워드 기반 폴백
-                return 
+                return {}
                 
         except Exception as e:
-            print(f"LLM 응답 파싱 오류: {e}")
+            logger.error(f"LLM 응답 파싱 오류: {e}", exc_info=True)
             return {}
 
     async def _agent_selector_node(self, state: AgentState) -> AgentState:
@@ -465,6 +473,16 @@ JSON 응답만 제공해주세요:
             
             # 그래프 실행
             result = await self.graph.ainvoke(initial_state)
+            logger.info("Supervisor 그래프 실행 결과: final_response_preview='%s', agent_responses=%s",
+                         result.get("final_response"),
+                         [
+                             {
+                                 "agent_type": resp.get("agent_type"),
+                                 "success": resp.get("success"),
+                                 "content_preview": (resp.get("content") or "")[:120]
+                             }
+                             for resp in result.get("agent_responses", [])
+                         ])
             
             # 결과를 SupervisorResponse로 변환
             return SupervisorResponse(
@@ -551,7 +569,7 @@ JSON 응답만 제공해주세요:
             return combined_response
             
         except Exception as e:
-            print(f"에이전트 응답 통합 오류: {e}")
+            logger.error(f"에이전트 응답 통합 오류: {e}", exc_info=True)
             # 오류 발생 시 첫 번째 성공한 응답 반환
             for resp in agent_responses:
                 if resp["success"]:
@@ -559,4 +577,14 @@ JSON 응답만 제공해주세요:
             return "에이전트 응답 통합 중 오류가 발생했습니다."
 
 # 전역 Supervisor 인스턴스 (LangGraph 기반)
-supervisor = LangGraphSupervisor() 
+_supervisor_instance: Optional[LangGraphSupervisor] = None
+_supervisor_lock = threading.Lock()
+
+def get_supervisor() -> LangGraphSupervisor:
+    """Lazy singleton accessor for LangGraphSupervisor."""
+    global _supervisor_instance
+    if _supervisor_instance is None:
+        with _supervisor_lock:
+            if _supervisor_instance is None:
+                _supervisor_instance = LangGraphSupervisor()
+    return _supervisor_instance

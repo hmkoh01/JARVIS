@@ -184,6 +184,7 @@ def check_dependencies():
     """필요한 의존성 확인"""
     print("🔍 의존성 확인 중...")
     
+    import importlib.util
     required_packages = [
         ('fastapi', 'fastapi'),
         ('uvicorn', 'uvicorn'),
@@ -198,8 +199,10 @@ def check_dependencies():
     missing_packages = []
     for package_name, import_name in required_packages:
         try:
-            __import__(import_name)
-        except ImportError:
+            if importlib.util.find_spec(import_name) is None:
+                missing_packages.append(package_name)
+        except Exception:
+            # find_spec 자체가 실패한 경우에도 누락된 것으로 간주
             missing_packages.append(package_name)
     
     if missing_packages:
@@ -241,18 +244,8 @@ MAX_IMAGE_SIZE_MB=10
 
 def create_directories():
     """필요한 디렉토리 생성"""
-    print("📁 디렉토리 생성 중...")
-    
-    directories = [
-        "uploads",
-        "uploads/images",
-        "backend/logs"
-    ]
-    
-    for directory in directories:
-        Path(directory).mkdir(parents=True, exist_ok=True)
-    
-    print("✅ 필요한 디렉토리가 생성되었습니다.")
+    # 로그 폴더는 자동 생성하지 않음 (logging_config에서 필요시 생성)
+    pass
 
 def check_frontend_file():
     """프론트엔드 파일 확인"""
@@ -334,7 +327,7 @@ def get_stored_token():
         if frontend_dir not in sys.path:
             sys.path.insert(0, frontend_dir)
         
-        from login_view import get_stored_token as login_get_token
+        from frontend.login_view import get_stored_token as login_get_token
         return login_get_token()
     except ImportError as e:
         print(f"토큰 조회 실패: {e}")
@@ -351,7 +344,7 @@ def check_auth_and_get_user_info():
         if frontend_dir not in sys.path:
             sys.path.insert(0, frontend_dir)
         
-        from login_view import main as login_main
+        from frontend.login_view import main as login_main
     except ImportError as e:
         print(f"❌ 로그인 모듈 import 실패: {e}")
         import traceback
@@ -449,47 +442,116 @@ def perform_initial_data_collection_with_progress(user_id: int):
     print(f"\n📊 사용자 {user_id}의 데이터 수집을 시작합니다...")
     
     try:
-        from backend.database.data_collector import get_manager
+        # 백엔드 API를 통해 데이터 수집 시작
+        token = get_stored_token()
+        if not token:
+            print("❌ 인증 토큰을 찾을 수 없습니다.")
+            return False
         
-        manager = get_manager(user_id)
+        # 선택된 폴더 목록 준비
+        folders_to_send = selected_folders_global if selected_folders_global else []
         
-        collection_thread = threading.Thread(
-            target=manager.perform_initial_collection, args=(selected_folders_global,), daemon=True
+        # API 호출
+        response = requests.post(
+            f"http://localhost:8000/api/v2/data-collection/start/{user_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"selected_folders": folders_to_send},
+            timeout=10
         )
-        collection_thread.start()
         
-        # 프로그레스 바 표시
-        with tqdm(total=100, desc="초기 데이터 수집", unit="%", 
-                  bar_format="{l_bar}{bar}| {n:.1f}% [{elapsed}<{remaining}, {desc}]") as pbar:
-            
-            # 초기 데이터 수집이 완료될 때까지 대기
-            while not manager.initial_collection_done:
-                current_progress = manager.progress
-                pbar.update(current_progress - pbar.n)
-                pbar.set_description_str(manager.progress_message)
-                time.sleep(0.5)
-
-            # 완료 시 100%로 채우고 최종 메시지 표시
-            pbar.update(100 - pbar.n)
-            pbar.set_description_str(manager.progress_message)
+        if response.status_code != 200:
+            print(f"❌ 데이터 수집 시작 실패: {response.text}")
+            return False
         
-        if "오류" in manager.progress_message:
-             print(f"❌ 초기 데이터 수집 중 오류가 발생했습니다: {manager.progress_message}")
-             return False
+        print("✅ 데이터 수집이 백그라운드에서 시작되었습니다.")
+        print("   초기 수집이 완료될 때까지 기다리는 중...")
 
-        print("✅ 초기 데이터 수집이 성공적으로 완료되었습니다.")
+        status_url = f"http://localhost:8000/api/v2/data-collection/status/{user_id}"
+        import time
+        import math
 
-        # ✨ 추가: 초기 수집 완료 후, 백그라운드 증분 수집을 시작합니다.
-        print("\n🔄 백그라운드에서 증분 데이터 수집을 시작합니다...")
-        manager.start_collection(selected_folders_global)
+        polling_interval = 3  # seconds
+        max_wait_seconds = 30 * 60  # 30 minutes
+        elapsed = 0
+        last_logged_progress = None
+        consecutive_failures = 0
+        max_failures = 5
+        stalled_counter = 0  # 진행률이 멈춘 횟수 추적
+        max_stalled_checks = 20  # 60초(3초 * 20) 동안 진행률이 안 바뀌면 경고
 
+        while elapsed < max_wait_seconds:
+            time.sleep(polling_interval)
+            elapsed += polling_interval
+
+            try:
+                status_resp = requests.get(status_url, timeout=10)
+            except Exception as e:
+                print(f"\n⚠️ 수집 상태 조회 오류: {e}")
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    print("\n❌ 백엔드와의 통신에 반복적으로 실패하여 초기 수집을 중단합니다.")
+                    return False
+                continue
+
+            if status_resp.status_code != 200:
+                print(f"\n⚠️ 수집 상태 조회 실패 ({status_resp.status_code}): {status_resp.text}")
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    print("\n❌ 백엔드와의 통신에 반복적으로 실패하여 초기 수집을 중단합니다.")
+                    return False
+                continue
+
+            consecutive_failures = 0
+            status_data = status_resp.json()
+            progress = status_data.get("progress", 0.0) or 0.0
+            progress_message = status_data.get("progress_message", "")
+            running = status_data.get("running", False)
+            done = status_data.get("is_done", False)
+
+            # 간단한 진행률 출력 (같은 줄 업데이트)
+            if isinstance(progress, (int, float)):
+                rounded_progress = math.floor(progress * 10) / 10  # 한 자리 소수
+            else:
+                rounded_progress = progress
+
+            # 진행률이 변경되었는지 확인
+            if last_logged_progress == rounded_progress and rounded_progress < 100 and not done:
+                stalled_counter += 1
+                if stalled_counter >= max_stalled_checks:
+                    print(f"\n⚠️ 진행률이 {rounded_progress}%에서 {stalled_counter * polling_interval}초 동안 멈춰 있습니다.")
+                    print("   백그라운드에서 계속 처리 중일 수 있습니다. 백엔드 로그를 확인하세요.")
+                    # 계속 대기 (무한 폴링 방지를 위해 최종적으로는 타임아웃 발생)
+            else:
+                stalled_counter = 0  # 진행률이 변경되면 카운터 리셋
+
+            if last_logged_progress != rounded_progress or progress_message:
+                print(f"\r   진행률: {rounded_progress}% - {progress_message[:80]}", end="", flush=True)
+                last_logged_progress = rounded_progress
+
+            # 초기 수집 완료 조건 확인
+            if done:
+                print()  # 진행률 줄 마감
+                if rounded_progress >= 100:
+                    print("✅ 초기 데이터 수집이 완료되었습니다.")
+                else:
+                    print(f"⚠️ 초기 데이터 수집이 종료되었습니다 (진행률: {rounded_progress}%). 자세한 로그를 확인하세요.")
+
+                if running:
+                    print("   백그라운드 수집 스케줄러가 실행 중입니다.")
+                else:
+                    print("   백그라운드 수집은 다음 주기에 시작됩니다.")
+                break
+        else:
+            # while 루프가 자연 종료된 경우 (시간 초과)
+            print("\n⚠️ 초기 데이터 수집이 예상 시간 내에 완료되지 않았습니다.")
+            print("   백그라운드에서 계속 진행 중일 수 있으니, 필요하다면 상태를 다시 확인하세요.")
+        
         return True
         
-    except ImportError as e:
-        print(f"❌ 모듈 import 오류: {e}")
-        return False
     except Exception as e:
         print(f"❌ 초기 데이터 수집 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def start_backend():

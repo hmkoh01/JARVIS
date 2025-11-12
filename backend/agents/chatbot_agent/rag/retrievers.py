@@ -67,6 +67,20 @@ def retrieve_local(question: str, repo: Repository, embedder: BGEM3Embedder,
         logger.info(f"검색 완료: {len(top_candidates)}개 결과 반환")
         if top_candidates:
             logger.debug(f"상위 결과 점수: {[c['score'] for c in top_candidates[:3]]}")
+            logger.info("상위 5개 컨텍스트 미리보기:")
+            for idx, candidate in enumerate(top_candidates[:5], start=1):
+                snippet = (candidate.get('snippet') or '').replace('\n', ' ').strip()
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "..."
+                logger.info(
+                    "  %d) score=%.4f doc_id=%s snippet=%s",
+                    idx,
+                    candidate.get('score', 0.0) or 0.0,
+                    candidate.get('doc_id', 'unknown'),
+                    snippet
+                )
+        else:
+            logger.info("상위 컨텍스트 미리보기를 표시할 결과가 없습니다.")
         
         return top_candidates
         

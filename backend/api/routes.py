@@ -20,10 +20,12 @@ import threading # 백그라운드 작업을 위해 추가
 
 from config.settings import settings
 from .schemas import UserIntent, ChatRequest, ChatResponse
-from core.supervisor import supervisor
+from core.supervisor import get_supervisor
 from core.agent_registry import agent_registry
 
 from database.data_collector import get_manager, data_collection_managers
+from database.repository import Repository
+from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
 from database.sqlite_meta import SQLiteMeta
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
@@ -85,8 +87,9 @@ async def chat_with_agent(chat_request: ChatRequest, request: Request):
             return StreamingResponse(generate_stream(), media_type="text/plain")
         else:
             # 비스트리밍 모드: 기존 로직 사용
+            supervisor_instance = get_supervisor()
             supervisor_response = await asyncio.wait_for(
-                supervisor.process_user_intent(user_intent),
+                supervisor_instance.process_user_intent(user_intent),
                 timeout=settings.REQUEST_TIMEOUT
             )
             
@@ -103,26 +106,97 @@ async def chat_with_agent(chat_request: ChatRequest, request: Request):
         raise HTTPException(status_code=500, detail=f"채팅 처리 중 오류가 발생했습니다: {str(e)}")
 
 @router.post("/process")
-async def process_message(request: dict):
-    """프론트엔드용 메시지 처리 엔드포인트"""
+async def process_message(request_data: dict, request: Request):
+    """프론트엔드용 메시지 처리 엔드포인트 (스트리밍 지원)"""
     try:
-        message = request.get("message", "")
-        user_id = request.get("user_id", 1)
+        message = request_data.get("message", "")
+        user_id = request_data.get("user_id", 1)
+        
+        # 스트리밍 요청 확인 (Accept 헤더)
+        accept_header = request.headers.get("accept", "")
+        stream_requested = "text/event-stream" in accept_header
         
         user_intent = UserIntent(message=message, user_id=user_id)
         
-        supervisor_response = await asyncio.wait_for(
-            supervisor.process_user_intent(user_intent),
-            timeout=settings.REQUEST_TIMEOUT
-        )
-        
-        # 프론트엔드가 기대하는 형식으로 반환
-        return {
-            "success": supervisor_response.success,
-            "content": supervisor_response.response.content if supervisor_response.success else str(supervisor_response.response),
-            "agent_type": supervisor_response.response.agent_type if supervisor_response.success else "unknown",
-            "metadata": supervisor_response.response.metadata if supervisor_response.success else {}
-        }
+        if stream_requested:
+            # 스트리밍 모드: supervisor를 통해 한 번만 처리
+            logger.info("스트리밍 모드: supervisor를 통한 처리 시작")
+            supervisor_instance = get_supervisor()
+            supervisor_response = await asyncio.wait_for(
+                supervisor_instance.process_user_intent(user_intent),
+                timeout=settings.REQUEST_TIMEOUT
+            )
+
+            metadata = supervisor_response.metadata or {}
+            agent_responses = metadata.get("agent_responses", [])
+
+            if supervisor_response.success:
+                content = supervisor_response.response.content or ""
+                if not content.strip():
+                    for agent_resp in agent_responses:
+                        if agent_resp.get("success") and agent_resp.get("content"):
+                            content = agent_resp["content"]
+                            logger.warning("Supervisor 최종 응답이 비어 있어 첫 번째 에이전트 응답으로 대체했습니다.")
+                            break
+                if not content.strip():
+                    logger.error("Supervisor 응답이 여전히 비어 있습니다. 기본 메시지를 반환합니다.")
+                    content = "죄송합니다. 관련 응답을 생성하지 못했습니다."
+                logger.info(f"Supervisor 응답 성공, 길이: {len(content)} 글자")
+            else:
+                error_msg = str(supervisor_response.response)
+                logger.error(f"Supervisor 응답 실패: {error_msg}")
+                content = f"처리 중 오류가 발생했습니다: {error_msg}"
+
+            async def generate_stream():
+                try:
+                    if not content:
+                        yield "응답이 비어 있습니다."
+                        return
+
+                    chunk_size = 80
+                    for i in range(0, len(content), chunk_size):
+                        chunk = content[i:i + chunk_size]
+                        yield chunk
+                        await asyncio.sleep(0.01)
+                except Exception as e:
+                    logger.error(f"스트리밍 응답 생성 중 오류: {e}", exc_info=True)
+                    yield f"오류가 발생했습니다: {str(e)}"
+
+            return StreamingResponse(generate_stream(), media_type="text/plain")
+        else:
+            # 비스트리밍 모드: 기존 로직 사용
+            supervisor_instance = get_supervisor()
+            supervisor_response = await asyncio.wait_for(
+                supervisor_instance.process_user_intent(user_intent),
+                timeout=settings.REQUEST_TIMEOUT
+            )
+
+            metadata = supervisor_response.metadata or {}
+            agent_responses = metadata.get("agent_responses", [])
+
+            if supervisor_response.success:
+                content = supervisor_response.response.content or ""
+                if not content.strip():
+                    for agent_resp in agent_responses:
+                        if agent_resp.get("success") and agent_resp.get("content"):
+                            content = agent_resp["content"]
+                            logger.warning("Supervisor 최종 응답이 비어 있어 첫 번째 에이전트 응답으로 대체했습니다.")
+                            break
+                if not content.strip():
+                    logger.error("Supervisor 응답이 여전히 비어 있습니다. 기본 메시지를 반환합니다.")
+                    content = "죄송합니다. 관련 응답을 생성하지 못했습니다."
+            else:
+                content = str(supervisor_response.response)
+                if not content.strip():
+                    content = "처리 중 오류가 발생했습니다."
+            
+            # 프론트엔드가 기대하는 형식으로 반환
+            return {
+                "success": supervisor_response.success,
+                "content": content,
+                "agent_type": supervisor_response.response.agent_type if supervisor_response.success else "unknown",
+                "metadata": supervisor_response.response.metadata if supervisor_response.success else {}
+            }
     except asyncio.TimeoutError:
         return {
             "success": False,
@@ -170,19 +244,33 @@ async def health_check():
 # -----------------------------------------------------------------------------
 
 @router.get("/data-collection/folders")
-async def get_user_folders_endpoint():
+async def get_user_folders_endpoint(request: Request):
     """사용자의 기본 폴더(바탕화면, 문서, 다운로드) 목록을 조회합니다."""
     try:
-        manager = get_manager(user_id=0) 
-        folders = manager.file_collector.get_user_folders()
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+
+        if repository is None or embedder is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Singleton resources are not initialised yet. Please retry shortly."
+            )
+
+        # TODO: 실제 인증 로직으로 사용자 ID를 추출하도록 교체
+        user_id = getattr(request.state, "user_id", 1)
+
+        manager = get_manager(user_id=user_id, repository=repository, embedder=embedder)
+        folders = manager.file_collector.get_user_folders(calculate_size=True)
         return {
             "success": True,
             "folders": folders,
             "total_count": len(folders),
             "timestamp": datetime.utcnow().isoformat()
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"폴더 목록 조회 오류: {e}", exc_info=True)
+        logger.error("폴더 목록 조회 오류: %s", e, exc_info=True)
         return {
             "success": False,
             "message": f"폴더 목록 조회 오류: {str(e)}",
@@ -191,35 +279,50 @@ async def get_user_folders_endpoint():
         }
 
 @router.post("/data-collection/start/{user_id}")
-async def start_data_collection(user_id: int, payload: Dict[str, List[str]]):
+async def start_data_collection(user_id: int, payload: Dict[str, List[str]], request: Request):
     """Starts data collection for a specific user."""
     try:
         selected_folders = payload.get("selected_folders")
         if not selected_folders:
             raise HTTPException(status_code=400, detail="You must select folders to scan.")
 
-        manager = get_manager(user_id)
+        # app.state에서 전역 인스턴스 가져오기
+        repository = request.app.state.repository
+        embedder = request.app.state.embedder
+        
+        manager = get_manager(user_id, repository=repository, embedder=embedder)
 
+        # 초기 수집이 완료되지 않았다면 초기 수집만 실행 (중복 방지)
         if not manager.initial_collection_done:
-            thread = threading.Thread(target=manager.perform_initial_collection, daemon=True)
+            thread = threading.Thread(target=manager.perform_initial_collection, args=(selected_folders,), daemon=True)
             thread.start()
-
+            # 초기 수집 중에는 백그라운드 수집을 시작하지 않음 (중복 파싱 방지)
+            return {
+                "success": True,
+                "message": f"Initial data collection started for user {user_id}. The scan is running in the background.",
+            }
+        
+        # 초기 수집이 이미 완료된 경우에만 백그라운드 수집 시작
         manager.start_collection(selected_folders)
         
         return {
             "success": True,
-            "message": f"Data collection started for user {user_id}. The initial scan is running in the background.",
+            "message": f"Background data collection started for user {user_id}.",
         }
     except Exception as e:
         logger.error(f"Error starting collection: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error starting collection: {str(e)}")
 
 @router.post("/data-collection/stop/{user_id}")
-async def stop_data_collection(user_id: int):
+async def stop_data_collection(user_id: int, request: Request):
     """Stops data collection for a specific user."""
     try:
         if user_id in data_collection_managers:
-            manager = get_manager(user_id)
+            # app.state에서 전역 인스턴스 가져오기
+            repository = request.app.state.repository
+            embedder = request.app.state.embedder
+            
+            manager = get_manager(user_id, repository=repository, embedder=embedder)
             manager.stop_collection()
             del data_collection_managers[user_id]
             return {"message": f"Data collection stopped for user {user_id}."}
@@ -243,19 +346,34 @@ async def stop_all_collections():
 
 
 @router.get("/data-collection/status/{user_id}")
-async def get_data_collection_status(user_id: int):
+async def get_data_collection_status(user_id: int, request: Request):
     """Checks the data collection status (progress) for a user."""
-    if user_id in data_collection_managers:
-        manager = data_collection_managers[user_id]
+    try:
+        if user_id not in data_collection_managers:
+            raise HTTPException(status_code=404, detail="No collection manager found for this user.")
+
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+
+        if repository is None or embedder is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Singleton resources are not initialised yet. Please retry shortly."
+            )
+
+        manager = get_manager(user_id=user_id, repository=repository, embedder=embedder)
+
         return {
-            "user_id": user_id,
-            "running": manager.running,
-            "initial_collection_done": manager.initial_collection_done,
             "progress": manager.progress,
-            "progress_message": manager.progress_message
+            "progress_message": manager.progress_message,
+            "is_done": manager.initial_collection_done,
+            "running": manager.running
         }
-    else:
-        raise HTTPException(status_code=404, detail="No collection manager found for this user.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("데이터 수집 상태 조회 오류: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"데이터 수집 상태 조회 오류: {str(e)}")
 
 @router.get("/data-collection/stats")
 async def get_data_collection_stats():
@@ -335,12 +453,13 @@ async def check_survey_completed(user_id: int):
         raise HTTPException(status_code=500, detail=f"설문지 완료 여부 확인 오류: {str(e)}")
 
 @router.post("/user-profile/{user_id}/index")
-async def index_user_profile(user_id: int):
+async def index_user_profile(user_id: int, request: Request):
     """사용자 프로필을 Qdrant에 인덱싱합니다."""
     try:
         from database.user_profile_indexer import UserProfileIndexer
         
-        indexer = UserProfileIndexer()
+        # 전역 싱글톤 인스턴스 사용
+        indexer: UserProfileIndexer = request.app.state.profile_indexer
         success = indexer.index_user_profile(user_id)
         
         if success:
@@ -360,7 +479,7 @@ async def index_user_profile(user_id: int):
         raise HTTPException(status_code=500, detail=f"프로필 인덱싱 오류: {str(e)}")
 
 @router.post("/user-profile/{user_id}/update")
-async def update_user_profile(user_id: int, survey_data: dict):
+async def update_user_profile(user_id: int, survey_data: dict, request: Request):
     """사용자 설문조사를 업데이트하고 프로필을 재인덱싱합니다."""
     try:
         from database.user_profile_indexer import UserProfileIndexer
@@ -376,8 +495,8 @@ async def update_user_profile(user_id: int, survey_data: dict):
                 "timestamp": datetime.utcnow().isoformat()
             }
         
-        # Qdrant에 프로필 재인덱싱
-        indexer = UserProfileIndexer()
+        # 전역 싱글톤 인스턴스 사용
+        indexer: UserProfileIndexer = request.app.state.profile_indexer
         index_success = indexer.update_user_profile(user_id)
         
         return {
@@ -391,12 +510,13 @@ async def update_user_profile(user_id: int, survey_data: dict):
         raise HTTPException(status_code=500, detail=f"프로필 업데이트 오류: {str(e)}")
 
 @router.get("/user-profile/{user_id}")
-async def get_user_profile_context(user_id: int):
+async def get_user_profile_context(user_id: int, request: Request):
     """사용자 프로필을 텍스트 형태로 반환합니다."""
     try:
         from database.user_profile_indexer import UserProfileIndexer
         
-        indexer = UserProfileIndexer()
+        # 전역 싱글톤 인스턴스 사용
+        indexer: UserProfileIndexer = request.app.state.profile_indexer
         profile_text = indexer.get_profile_as_context(user_id)
         
         if profile_text:
@@ -560,8 +680,12 @@ async def update_folder(
         # 1. 데이터 수집 중지
         logger.info("데이터 수집 중지 중...")
         from database.data_collector import get_manager
-        manager = get_manager(user_id)
-        if manager:
+        # app.state에서 전역 인스턴스 가져오기 (FastAPI Request 객체 필요)
+        # 이 엔드포인트는 async 함수이므로 request_obj 파라미터 추가 필요
+        # 임시로 기존 매니저가 있으면 중지만 수행
+        from database.data_collector import data_collection_managers
+        if user_id in data_collection_managers:
+            manager = data_collection_managers[user_id]
             manager.stop_collection()
         
         # 2. SQLite에서 user_id 관련 데이터 삭제

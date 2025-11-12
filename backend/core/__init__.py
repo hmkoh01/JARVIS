@@ -1,9 +1,9 @@
-from .supervisor import LangGraphSupervisor, supervisor, UserIntent, SupervisorResponse, AgentState
+from .supervisor import LangGraphSupervisor, get_supervisor, UserIntent, SupervisorResponse, AgentState
 from .agent_registry import AgentRegistry, agent_registry
 
 __all__ = [
     'LangGraphSupervisor',
-    'supervisor', 
+    'get_supervisor', 
     'UserIntent',
     'SupervisorResponse',
     'AgentState',

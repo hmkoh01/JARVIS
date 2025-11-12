@@ -2,6 +2,7 @@
 import sqlite3
 import os
 import re  # <--- 1. 정규 표현식 모듈 추가
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import logging
@@ -25,8 +26,11 @@ class SQLiteMeta:
             return os.path.join(directory, sanitized_filename)
         return sanitized_filename
 
-    def __init__(self, db_path: str = "./sqlite/meta.db"):
-        self.db_path = self._sanitize_path(db_path)
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None:
+            backend_dir = Path(__file__).resolve().parents[1]
+            db_path = backend_dir / "sqlite" / "meta.db"
+        self.db_path = self._sanitize_path(str(db_path))
         self._ensure_db_dir()
         self._thread_local = threading.local()
         self._init_db()
@@ -37,7 +41,8 @@ class SQLiteMeta:
         if not hasattr(self._thread_local, 'conn') or self._thread_local.conn is None:
             try:
                 connection = sqlite3.connect(self.db_path)
-                connection.execute("PRAGMA journal_mode=WAL")
+                # WAL 모드를 사용하지 않아 파일 1개만 생성됨
+                connection.execute("PRAGMA journal_mode=DELETE")
                 connection.execute("PRAGMA synchronous=NORMAL")
                 connection.row_factory = sqlite3.Row
                 self._thread_local.conn = connection

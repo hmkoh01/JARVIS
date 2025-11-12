@@ -49,7 +49,7 @@ class Repository:
                         'collection_name': 'user_context'
                     },
                     'sqlite': {
-                        'path': './sqlite/meta.db'
+                        'path': 'meta.db'
                     },
                     'retrieval': {
                         'k_candidates': 40,
@@ -68,7 +68,7 @@ class Repository:
                     'collection_name': 'user_context'
                 },
                 'sqlite': {
-                    'path': './sqlite/meta.db'
+                    'path': 'meta.db'
                 },
                 'retrieval': {
                     'k_candidates': 40,

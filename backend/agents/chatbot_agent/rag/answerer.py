@@ -143,6 +143,15 @@ def call_llm_for_answer(question: str, context: Optional[str], user_profile: Opt
             
             # Gemini 모델 초기화 (최적화된 설정 + 안전성 설정)
             genai.configure(api_key=settings.GEMINI_API_KEY)
+
+            # 안전성 설정을 완화하여 스트림 차단 여부를 진단 (문제 해결 후 재조정 필요)
+            temp_safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+
             model = genai.GenerativeModel(
                 model_name="gemini-2.5-flash",
                 generation_config={
@@ -152,24 +161,7 @@ def call_llm_for_answer(question: str, context: Optional[str], user_profile: Opt
                     "max_output_tokens": 200,  # 응답 길이 제한
                     "response_mime_type": "text/plain"
                 },
-                safety_settings=[
-                    {
-                        "category": "HARM_CATEGORY_HARASSMENT",
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_HATE_SPEECH", 
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    }
-                ]
+                safety_settings=temp_safety_settings
             )
             
             # 사용자 프로필 컨텍스트 생성 (dict 또는 문자열 형태 모두 지원)
@@ -264,32 +256,14 @@ You are responding to a user you know. Use the following context to personalize 
 
 질문: {question}
 
-답변:
-
-[답변 생성 후 규칙]
-답변 생성이 완료되면, 답변 내용과 사용자의 원래 질문을 바탕으로 사용자가 다음에 할 법한 관련 질문 2~3개를 생성해야 합니다.
-생성된 질문 목록은 명확하게 구분되도록 다음 형식으로만 제공해야 합니다:
-
-[SUGGESTED_QUESTIONS]
-1. [첫 번째 추천 질문]
-2. [두 번째 추천 질문]
-3. [세 번째 추천 질문]"""
+답변:"""
             else:
                 # GENERAL_CHAT 경로
                 prompt = f"""{user_context_prompt}일반적인 질문에 간결하고 친근하게 답변하세요.
 
 질문: {question}
 
-답변:
-
-[답변 생성 후 규칙]
-답변 생성이 완료되면, 답변 내용과 사용자의 원래 질문을 바탕으로 사용자가 다음에 할 법한 관련 질문 2~3개를 생성해야 합니다.
-생성된 질문 목록은 명확하게 구분되도록 다음 형식으로만 제공해야 합니다:
-
-[SUGGESTED_QUESTIONS]
-1. [첫 번째 추천 질문]
-2. [두 번째 추천 질문]
-3. [세 번째 추천 질문]"""
+답변:"""
 
             # Gemini API 호출 (타임아웃 설정 + 오류 처리 개선)
             try:
@@ -347,6 +321,15 @@ def call_llm_for_answer_stream(question: str, context: Optional[str], user_profi
             
             # Gemini 모델 초기화 (최적화된 설정 + 안전성 설정)
             genai.configure(api_key=settings.GEMINI_API_KEY)
+
+            # 안전성 설정을 완화하여 스트림 차단 여부를 진단 (문제 해결 후 재조정 필요)
+            temp_safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+
             model = genai.GenerativeModel(
                 model_name="gemini-2.5-flash",
                 generation_config={
@@ -356,24 +339,7 @@ def call_llm_for_answer_stream(question: str, context: Optional[str], user_profi
                     "max_output_tokens": 200,  # 응답 길이 제한
                     "response_mime_type": "text/plain"
                 },
-                safety_settings=[
-                    {
-                        "category": "HARM_CATEGORY_HARASSMENT",
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_HATE_SPEECH", 
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                    }
-                ]
+                safety_settings=temp_safety_settings
             )
             
             # 사용자 프로필 컨텍스트 생성 (dict 또는 문자열 형태 모두 지원)
@@ -468,64 +434,86 @@ You are responding to a user you know. Use the following context to personalize 
 
 질문: {question}
 
-답변:
-
-[답변 생성 후 규칙]
-답변 생성이 완료되면, 답변 내용과 사용자의 원래 질문을 바탕으로 사용자가 다음에 할 법한 관련 질문 2~3개를 생성해야 합니다.
-생성된 질문 목록은 명확하게 구분되도록 다음 형식으로만 제공해야 합니다:
-
-[SUGGESTED_QUESTIONS]
-1. [첫 번째 추천 질문]
-2. [두 번째 추천 질문]
-3. [세 번째 추천 질문]"""
+답변:"""
             else:
                 # GENERAL_CHAT 경로
                 prompt = f"""{user_context_prompt}일반적인 질문에 간결하고 친근하게 답변하세요.
 
 질문: {question}
 
-답변:
-
-[답변 생성 후 규칙]
-답변 생성이 완료되면, 답변 내용과 사용자의 원래 질문을 바탕으로 사용자가 다음에 할 법한 관련 질문 2~3개를 생성해야 합니다.
-생성된 질문 목록은 명확하게 구분되도록 다음 형식으로만 제공해야 합니다:
-
-[SUGGESTED_QUESTIONS]
-1. [첫 번째 추천 질문]
-2. [두 번째 추천 질문]
-3. [세 번째 추천 질문]"""
+답변:"""
 
             # Gemini API 스트리밍 호출
+            unified_chunks = []
+
+            def _extract_text_from_chunk(chunk) -> str:
+                text_parts = []
+                try:
+                    if hasattr(chunk, "to_dict"):
+                        logger.info("Gemini chunk raw (dict): %s", chunk.to_dict())
+                    else:
+                        logger.info("Gemini chunk raw (repr): %s", repr(chunk))
+                except Exception:
+                    logger.info("Gemini chunk raw: <unserializable>")
+
+                if getattr(chunk, "text", None):
+                    text_parts.append(chunk.text)
+
+                candidates = getattr(chunk, "candidates", [])
+                if candidates:
+                    for candidate in candidates:
+                        parts = getattr(candidate, "content", None)
+                        if parts and getattr(parts, "parts", None):
+                            for part in parts.parts:
+                                part_text = getattr(part, "text", None)
+                                if part_text:
+                                    text_parts.append(part_text)
+                        if getattr(candidate, "finish_reason", None) == 2:
+                            logger.warning("Gemini API가 안전성 정책으로 인해 응답을 차단했습니다.")
+                            text_parts.append("죄송합니다. 해당 질문에 대해 안전한 답변을 제공할 수 없습니다.")
+                        elif getattr(candidate, "finish_reason", None) == 3:
+                            logger.warning("Gemini API가 저작권 정책으로 인해 응답을 차단했습니다.")
+                            text_parts.append("죄송합니다. 저작권 정책으로 인해 해당 내용을 제공할 수 없습니다.")
+
+                extracted = "".join(text_parts)
+                if extracted:
+                    logger.debug("Gemini chunk extracted text: %s", extracted[:200])
+                else:
+                    logger.debug("Gemini chunk without text: %s", chunk)
+                return extracted
+
             try:
                 response = model.generate_content(
                     prompt,
-                    stream=True,  # 스트리밍 모드 활성화
-                    request_options={"timeout": 5}  # 5초 타임아웃
+                    stream=True,
+                    request_options={"timeout": 5}
                 )
-                
-                # 스트리밍 응답 처리
-                for chunk in response:
-                    if chunk.text:
-                        yield chunk.text
+                logger.info("Gemini streaming response object type: %s", type(response))
+
+                for idx, chunk in enumerate(response):
+                    logger.info("Gemini chunk #%d raw object: %s", idx, repr(chunk))
+                    chunk_text = _extract_text_from_chunk(chunk)
+                    if chunk_text:
+                        unified_chunks.append(chunk_text)
+                        yield chunk_text
                     else:
-                        # finish_reason 확인
-                        if hasattr(chunk, 'candidates') and chunk.candidates:
-                            candidate = chunk.candidates[0]
-                            if hasattr(candidate, 'finish_reason'):
-                                if candidate.finish_reason == 2:  # SAFETY
-                                    logger.warning("Gemini API가 안전성 정책으로 인해 응답을 차단했습니다.")
-                                    yield "죄송합니다. 해당 질문에 대해 안전한 답변을 제공할 수 없습니다."
-                                    return
-                                elif candidate.finish_reason == 3:  # RECITATION
-                                    logger.warning("Gemini API가 저작권 정책으로 인해 응답을 차단했습니다.")
-                                    yield "죄송합니다. 저작권 정책으로 인해 해당 내용을 제공할 수 없습니다."
-                                    return
-                
-                logger.info("Gemini 스트리밍 답변 생성 성공")
-                    
+                        logger.info("Gemini chunk #%d produced no text.", idx)
+
+                logger.info("Gemini 스트리밍이 정상적으로 종료되었습니다.")
+                if not unified_chunks:
+                    logger.warning("Gemini 스트리밍 응답이 비어 있습니다. (unified_chunks=0)")
+                    yield "죄송합니다. API가 빈 응답을 반환했습니다. (No chunks)"
+                else:
+                    logger.info("Gemini 스트리밍 답변 생성 성공 (총 %d개 청크)", len(unified_chunks))
+
+            except StopIteration as stop_err:
+                logger.error("Gemini 스트림이 즉시 StopIteration을 반환했습니다. API 키, 결제 상태 또는 안전 설정을 확인하세요.", exc_info=True)
+                yield "죄송합니다. API가 빈 스트림을 반환했습니다. (안전 설정 또는 API 키 문제일 수 있습니다)"
+                return
             except Exception as api_error:
-                logger.error(f"Gemini API 호출 중 오류: {api_error}")
-                yield "죄송합니다. 답변 생성 중 오류가 발생했습니다."
+                logger.error("Gemini API 호출 중 오류 발생", exc_info=True)
+                yield f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {api_error}"
+                return
                 
         except ImportError:
             logger.warning("google-generativeai 라이브러리가 설치되지 않았습니다.")
@@ -563,9 +551,9 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
             # 2. 캐시에 없으면 DB에서 조회하고 캐시에 저장
             if cached_profile_str is None:
                 try:
-                    from database.user_profile_indexer import UserProfileIndexer
+                    from database.user_profile_indexer import get_global_profile_indexer
                     from database.sqlite_meta import SQLiteMeta
-                    indexer = UserProfileIndexer()
+                    indexer = get_global_profile_indexer()
                     sqlite_meta = SQLiteMeta()
                     # dict 형태로 설문 데이터 가져오기
                     user_profile = sqlite_meta.get_user_survey_response(user_id)
@@ -613,8 +601,8 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
                 # 사용자 프로필을 evidence 형식으로 변환
                 # dict 형태인 경우 문자열로 변환
                 if isinstance(user_profile, dict):
-                    from database.user_profile_indexer import UserProfileIndexer
-                    indexer = UserProfileIndexer()
+                    from database.user_profile_indexer import get_global_profile_indexer
+                    indexer = get_global_profile_indexer()
                     profile_snippet = indexer.convert_survey_to_text(user_profile)
                 else:
                     profile_snippet = str(user_profile)
@@ -655,76 +643,3 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
         logger.error(f"응답 생성 오류: {e}")
         yield "응답 생성 중 오류가 발생했습니다."
 
-
-def call_vlm_for_answer(question: str, images: List[Image.Image]) -> Optional[str]:
-    """VLM을 사용하여 이미지 기반 답변을 생성합니다."""
-    try:
-        # VLM 설정 확인
-        vlm_config = _get_vlm_config()
-        if not vlm_config.get('enabled', False):
-            logger.debug("VLM이 비활성화되어 있습니다.")
-            return None
-        
-        # 이미지를 base64로 변환
-        images_b64 = images_to_base64(images)
-        if not images_b64:
-            logger.warning("이미지 base64 변환 실패")
-            return None
-        
-        # VLM API 호출 (실제 구현은 VLM 서비스에 따라 다름)
-        # 여기서는 간단한 템플릿 기반 답변 반환
-        return f"이미지를 분석한 결과, {len(images)}개의 이미지에서 관련 정보를 찾았습니다. 질문: {question}"
-        
-    except Exception as e:
-        logger.error(f"VLM 답변 생성 오류: {e}")
-        return None
-
-# ==============================================================================
-# VLM 관련 설정 및 초기화
-# ==============================================================================
-
-_vlm_config = None
-
-def _initialize_vlm_resources():
-    """VLM 리소스를 초기화합니다."""
-    global _vlm_config
-    try:
-        _vlm_config = _load_vlm_config()
-        
-        if _vlm_config.get('enabled', False):
-            logger.info("VLM 리소스 초기화 완료")
-        else:
-            logger.info("VLM이 비활성화되어 있습니다.")
-            
-    except Exception as e:
-        logger.error(f"VLM 초기화 오류: {e}")
-        _vlm_config = {'enabled': False}
-
-def _load_vlm_config(config_path: str = "configs.yaml") -> Dict[str, Any]:
-    """VLM 설정을 로드합니다."""
-    try:
-        import yaml
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-                return config.get('vlm', {})
-        else:
-            return {
-                'enabled': False,
-                'api_url': '',
-                'api_key': '',
-                'model': 'gpt-4-vision-preview'
-            }
-    except Exception as e:
-        logger.error(f"VLM 설정 로드 오류: {e}")
-        return {'enabled': False}
-
-def _get_vlm_config() -> Dict[str, Any]:
-    """VLM 설정을 반환합니다."""
-    global _vlm_config
-    if _vlm_config is None:
-        _initialize_vlm_resources()
-    return _vlm_config or {'enabled': False}
-
-# VLM 리소스 초기화
-_initialize_vlm_resources()

@@ -33,8 +33,9 @@ class DocumentParser:
         
         # Docling 컨버터 초기화
         if DOCLING_AVAILABLE:
-            self.converter = DocumentConverter()
-            logger.info("✅ Docling 문서 파서 초기화 완료")
+            converter_kwargs = self._build_converter_kwargs()
+            self.converter = DocumentConverter(**converter_kwargs)
+            logger.info("✅ Docling 문서 파서 초기화 완료 (커스텀 설정 적용)")
         else:
             self.converter = None
             logger.warning("⚠️ Docling이 없어 기본 파서를 사용합니다")
@@ -66,6 +67,31 @@ class DocumentParser:
         except Exception as e:
             logger.error(f"설정 로드 오류: {e}")
             return {}
+
+    def _build_converter_kwargs(self) -> Dict[str, Any]:
+        """Docling 설정을 기반으로 DocumentConverter 초기화 파라미터를 생성합니다."""
+        kwargs: Dict[str, Any] = {}
+
+        pdf_config: Dict[str, Any] = self.docling_config.get('pdf', {}) if isinstance(self.docling_config, dict) else {}
+
+        if pdf_config:
+            try:
+                from docling.datamodel.base_models import InputFormat
+                from docling.datamodel.pipeline_options import PdfPipelineOptions
+                from docling.document_converter import PdfFormatOption
+            except ImportError:
+                logger.warning("Docling PDF 설정을 적용하지 못했습니다 (필요한 모듈을 불러올 수 없음).")
+            else:
+                pdf_options = PdfPipelineOptions()
+
+                if 'ocr_enabled' in pdf_config:
+                    pdf_options.do_ocr = bool(pdf_config['ocr_enabled'])
+
+                kwargs['format_options'] = {
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)
+                }
+
+        return kwargs
     
     def parse_document(self, file_path: str) -> Optional[str]:
         """
@@ -112,7 +138,7 @@ class DocumentParser:
                 return result.document.export_to_markdown()
                 
         except Exception as e:
-            logger.error(f"Docling 파싱 오류 {file_path}: {e}")
+            logger.warning(f"Docling 파싱 오류(fallback 시도) {file_path}: {e}")
             # Fallback
             return self._parse_basic(file_path)
     
