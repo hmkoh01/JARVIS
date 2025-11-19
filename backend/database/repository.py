@@ -24,6 +24,7 @@ class Hit:
     url: Optional[str] = None
     timestamp: Optional[int] = None
     snippet: Optional[str] = None
+    content: Optional[str] = None
 
 class Repository:
     """Qdrant + SQLite 통합 Repository (하이브리드 검색 지원)"""
@@ -131,7 +132,8 @@ class Repository:
                     path=payload.get('path'),
                     url=payload.get('url'),
                     timestamp=payload.get('timestamp'),
-                    snippet=payload.get('snippet') or payload.get('content', '')  # content도 fallback으로 사용
+                    snippet=payload.get('snippet') or payload.get('content', ''),  # content도 fallback으로 사용
+                    content=payload.get('content')
                 )
                 hits.append(hit)
             

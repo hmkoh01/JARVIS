@@ -116,6 +116,42 @@ def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
     logger.info(f"--- 정제된 컨텍스트 (v2) ---\n{clean_context}\n--------------------")
     return clean_context
 
+def _format_citations(evidences: List[Dict[str, Any]]) -> str:
+    """검색된 근거를 바탕으로 출처 목록 문자열을 생성합니다."""
+    if not evidences:
+        return ""
+    
+    citations = []
+    
+    for i, evidence in enumerate(evidences[:3], 1):
+        source_value = evidence.get('source', '') or ''
+        source_type = source_value.lower()
+        path = (evidence.get('path') or '').strip()
+        title = (evidence.get('title') or '').strip() or "무제"
+        url = (evidence.get('url') or '').strip()
+        snippet = (evidence.get('snippet') or '').strip()
+        full_content = (evidence.get('content') or '').strip()
+        
+        # 표시할 제목/경로 결정
+        if source_type == 'file':
+            display_label = path or title or evidence.get('doc_id', '알 수 없는 파일')
+        elif source_type == 'web' or source_value.startswith(('http://', 'https://')):
+            display_label = title or url or evidence.get('doc_id', '알 수 없는 웹 페이지')
+        else:
+            display_label = title or path or url or source_value or evidence.get('doc_id', '알 수 없는 출처')
+        
+        body_text = full_content or snippet
+        if not body_text:
+            body_text = "관련 내용을 불러올 수 없습니다."
+        
+        # 형식: [n] 표시할제목
+        #       > 내용...
+        citation_text = f"[{i}] {display_label}\n> {body_text}"
+        citations.append(citation_text)
+        
+    return "\n\n".join(citations)
+
+
 # ==============================================================================
 # 보안 관련 함수들
 # ==============================================================================
@@ -293,16 +329,18 @@ You are responding to a user you know. Use the following context to personalize 
             # 프롬프트 구성 (간소화 + 품질 개선)
             if context:
                 # STANDARD_RAG 또는 SUMMARY_QUERY 경로
-                prompt = f"""{user_context_prompt}검색된 정보를 바탕으로 질문에 간결하게 답변하세요.
+                prompt = f"""{user_context_prompt}검색된 정보를 바탕으로 질문에 답변하세요. 답변의 각 문장 끝에 관련 정보의 출처 번호를 [1], [2]와 같이 인라인으로 표시하세요. (주의: [1, 2] 형식이 아닌 [1], [2] 형식으로 분리해서 표기)
 
 정보:
-{context[:600]}  # 컨텍스트 길이 제한
+{context[:1000]}  # 컨텍스트 길이 제한
 
 규칙:
 - 검색된 정보만 사용하여 답변
 - 2-3문장으로 간결하게
 - 중복 내용 제거
 - 핵심만 전달
+- 반드시 문장 끝에 [1]과 같은 출처 번호 표기
+- 여러 출처 인용 시 [1, 2]가 아닌 [1], [2]로 표기
 
 질문: {question}
 
@@ -513,6 +551,12 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
         try:
             for chunk in call_llm_for_answer_stream(question, context, user_profile):
                 yield chunk
+            
+            # [추가] 답변 끝에 출처 목록 추가
+            citations_str = _format_citations(evidences)
+            if citations_str:
+                yield "\n\n[참고 문헌]\n" + citations_str
+
             logger.info("Gemini 답변 생성 성공")
         except Exception as e:
             logger.warning(f"Gemini 답변 생성 실패: {e}")
