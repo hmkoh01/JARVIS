@@ -9,6 +9,15 @@ import io
 from datetime import datetime, timedelta
 import threading
 
+# Gemini API FinishReason 상수 (정수 값)
+# 1 = STOP (정상 종료)
+# 2 = MAX_TOKENS (토큰 제한 도달)
+# 3 = SAFETY (안전 차단)
+# 4 = RECITATION (저작권 차단)
+FINISH_REASON_MAX_TOKENS = 2
+FINISH_REASON_SAFETY = 3
+FINISH_REASON_RECITATION = 4
+
 logger = logging.getLogger(__name__)
 
 # 사용자 프로필 캐시 (메모리 기반)
@@ -65,6 +74,13 @@ def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
     tag_remover = re.compile(r'<[^>]+>')
     # [수정 2] 마크다운/특수기호 제거 정규식 (더 강력하게)
     special_char_remover = re.compile(r'[|※「」#*<>{}\[\]\\]')
+    
+    # [추가] PII(개인정보) 마스킹 패턴
+    # 1. 학번/전화번호/숫자 6자리 이상 (20200661 등)
+    pii_number_pattern = re.compile(r'\b\d{6,}\b')
+    # 2. 이름 패턴 (성명 + 공백/특수문자 + 2~4글자 한글) - 단순화된 버전
+    pii_name_pattern = re.compile(r'(성명|이름)[\s|:：]+[가-힣]{2,4}')
+
     # [수정 3] 여러 개의 공백을 하나로 합치는 정규식
     whitespace_normalizer = re.compile(r'\s+')
 
@@ -74,6 +90,10 @@ def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
             continue
             
         seen_content.add(snippet)
+        
+        # [추가] PII 마스킹 실행
+        snippet = pii_number_pattern.sub('[숫자정보]', snippet)
+        snippet = pii_name_pattern.sub(r'\1 [이름]', snippet)
         
         # [수정 4] HTML 엔티티 디코딩 (e.g., &lt; -> <)
         snippet = html.unescape(snippet)
@@ -149,183 +169,6 @@ def images_to_base64(images: List[Image.Image]) -> List[str]:
 # Gemini LLM 호출 함수
 # ==============================================================================
 
-def call_llm_for_answer(question: str, context: Optional[str], user_profile: Optional[Any] = None) -> Optional[str]:
-    """Gemini 모델을 사용하여 답변을 생성합니다."""
-    try:
-        # Gemini API 호출
-        try:
-            import google.generativeai as genai
-            from config.settings import settings
-            
-            # API 키 확인
-            if not settings.GEMINI_API_KEY:
-                logger.warning("GEMINI_API_KEY가 설정되지 않았습니다.")
-                return None
-            
-            # Gemini 모델 초기화 (최적화된 설정 + 안전성 설정)
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-
-            # 안전성 설정을 완화하여 스트림 차단 여부를 진단 (문제 해결 후 재조정 필요)
-            temp_safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
-
-            model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
-                generation_config={
-                    "temperature": 0.7,
-                    "top_p": 0.8,
-                    "top_k": 40,
-                    "max_output_tokens": 200,  # 응답 길이 제한
-                    "response_mime_type": "text/plain"
-                },
-                safety_settings=temp_safety_settings
-            )
-            
-            # 사용자 프로필 컨텍스트 생성 (dict 또는 문자열 형태 모두 지원)
-            user_context_prompt = ""
-            if user_profile:
-                if isinstance(user_profile, dict):
-                    # dict 형태의 프로필을 구조화된 형태로 변환
-                    profile_parts = []
-                    
-                    # 관심 주제
-                    interests = user_profile.get('interests', [])
-                    if interests:
-                        interest_mapping = {
-                            'tech': 'IT/최신 기술',
-                            'finance': '경제/금융/투자',
-                            'ai': '인공지능/데이터 과학',
-                            'design': '디자인/예술',
-                            'marketing': '마케팅/비즈니스',
-                            'productivity': '생산성/자기계발',
-                            'health': '건강/운동',
-                            'travel': '여행/문화'
-                        }
-                        interest_texts = [interest_mapping.get(interest, interest) for interest in interests]
-                        profile_parts.append(f"관심 주제: {', '.join(interest_texts)}")
-                    
-                    # 직업 분야
-                    job_field = user_profile.get('job_field', '')
-                    job_field_other = user_profile.get('job_field_other', '')
-                    if job_field == 'other' and job_field_other:
-                        profile_parts.append(f"직업: {job_field_other}")
-                    elif job_field:
-                        job_mapping = {
-                            'student': '학생',
-                            'developer': '개발자/엔지니어',
-                            'designer': '디자이너',
-                            'planner': '기획자/마케터',
-                            'researcher': '연구원/교육자'
-                        }
-                        profile_parts.append(f"직업: {job_mapping.get(job_field, job_field)}")
-                    
-                    # 도움 받고 싶은 영역
-                    help_preferences = user_profile.get('help_preferences', [])
-                    if help_preferences:
-                        help_mapping = {
-                            'work_search': '업무 관련 정보 검색 및 요약',
-                            'inspiration': '새로운 아이디어나 영감 얻기',
-                            'writing': '글쓰기 보조',
-                            'learning': '개인적인 학습 및 지식 확장'
-                        }
-                        help_texts = [help_mapping.get(help, help) for help in help_preferences]
-                        profile_parts.append(f"도움 받고 싶은 영역: {', '.join(help_texts)}")
-                    
-                    # 사용자 정의 키워드
-                    custom_keywords = user_profile.get('custom_keywords', '')
-                    if custom_keywords:
-                        profile_parts.append(f"특별 관심 키워드: {custom_keywords}")
-                    
-                    if profile_parts:
-                        profile_summary = " | ".join(profile_parts)
-                        user_context_prompt = f"""
-[User Context]
-You are responding to a user you know. Use the following context to personalize your answer:
-
-{profile_summary}
-
----
-"""
-                elif isinstance(user_profile, str):
-                    # 문자열 형태의 프로필 (하위 호환성)
-                    user_context_prompt = f"""
-[User Context]
-You are responding to a user you know. Use the following context to personalize your answer:
-
-{user_profile[:300]}
-
----
-"""
-            
-            # 프롬프트 구성 (간소화 + 품질 개선)
-            if context:
-                # STANDARD_RAG 또는 SUMMARY_QUERY 경로
-                prompt = f"""{user_context_prompt}검색된 정보를 바탕으로 질문에 간결하게 답변하세요.
-
-정보:
-{context[:600]}  # 컨텍스트 길이 제한
-
-규칙:
-- 검색된 정보만 사용하여 답변
-- 2-3문장으로 간결하게
-- 중복 내용 제거
-- 핵심만 전달
-
-질문: {question}
-
-답변:"""
-            else:
-                # GENERAL_CHAT 경로
-                prompt = f"""{user_context_prompt}일반적인 질문에 간결하고 친근하게 답변하세요.
-
-질문: {question}
-
-답변:"""
-
-            # Gemini API 호출 (타임아웃 설정 + 오류 처리 개선)
-            try:
-                response = model.generate_content(
-                    prompt,
-                    request_options={"timeout": 5}  # 5초 타임아웃
-                )
-                
-                if response and response.text:
-                    logger.info("Gemini 답변 생성 성공")
-                    return response.text.strip()
-                else:
-                    # finish_reason 확인
-                    if hasattr(response, 'candidates') and response.candidates:
-                        candidate = response.candidates[0]
-                        if hasattr(candidate, 'finish_reason'):
-                            if candidate.finish_reason == 2:  # SAFETY
-                                logger.warning("Gemini API가 안전성 정책으로 인해 응답을 차단했습니다.")
-                                return "죄송합니다. 해당 질문에 대해 안전한 답변을 제공할 수 없습니다."
-                            elif candidate.finish_reason == 3:  # RECITATION
-                                logger.warning("Gemini API가 저작권 정책으로 인해 응답을 차단했습니다.")
-                                return "죄송합니다. 저작권 정책으로 인해 해당 내용을 제공할 수 없습니다."
-                    
-                    logger.warning("Gemini 응답이 비어있습니다.")
-                    return None
-                    
-            except Exception as api_error:
-                logger.error(f"Gemini API 호출 중 오류: {api_error}")
-                return None
-                
-        except ImportError:
-            logger.warning("google-generativeai 라이브러리가 설치되지 않았습니다.")
-            return None
-        except Exception as e:
-            logger.error(f"Gemini API 호출 오류: {e}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"LLM 호출 오류: {e}")
-        return None
-
 def call_llm_for_answer_stream(question: str, context: Optional[str], user_profile: Optional[Any] = None):
     """Gemini 모델을 사용하여 스트리밍 방식으로 답변을 생성합니다 (제너레이터)."""
     try:
@@ -360,12 +203,12 @@ def call_llm_for_answer_stream(question: str, context: Optional[str], user_profi
             ]
 
             model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
+                model_name="gemini-2.5-pro",
                 generation_config={
                     "temperature": 0.7,
                     "top_p": 0.8,
                     "top_k": 40,
-                    "max_output_tokens": 200,  # 응답 길이 제한
+                    "max_output_tokens": 4096,
                     "response_mime_type": "text/plain"
                 },
                 safety_settings=temp_safety_settings
@@ -477,45 +320,53 @@ You are responding to a user you know. Use the following context to personalize 
 
             def _extract_text_from_chunk(chunk) -> str:
                 text_parts = []
-                try:
-                    if hasattr(chunk, "to_dict"):
-                        logger.info("Gemini chunk raw (dict): %s", chunk.to_dict())
-                    else:
-                        logger.info("Gemini chunk raw (repr): %s", repr(chunk))
-                except Exception:
-                    logger.info("Gemini chunk raw: <unserializable>")
-
-                if getattr(chunk, "text", None):
-                    text_parts.append(chunk.text)
-
+                
+                # candidates를 먼저 확인
                 candidates = getattr(chunk, "candidates", [])
                 if candidates:
                     for candidate in candidates:
-                        parts = getattr(candidate, "content", None)
-                        if parts and getattr(parts, "parts", None):
-                            for part in parts.parts:
+                        # FinishReason 확인 (정수 값 사용)
+                        finish_reason = getattr(candidate, "finish_reason", None)
+                        
+                        # 1. 안전 차단 (SAFETY = 3)
+                        if finish_reason == FINISH_REASON_SAFETY:
+                            logger.warning(f"Gemini API가 안전성 정책으로 응답을 차단했습니다. (Reason: {finish_reason})")
+                            text_parts.append("\n[주의: 안전 정책에 의해 답변이 차단되었습니다.]")
+                            continue 
+                            
+                        # 2. 저작권 차단 (RECITATION = 4)
+                        if finish_reason == FINISH_REASON_RECITATION:
+                            logger.warning(f"Gemini API가 저작권 정책으로 응답을 차단했습니다. (Reason: {finish_reason})")
+                            text_parts.append("\n[주의: 저작권 정책에 의해 답변이 차단되었습니다.]")
+                            continue
+
+                        # 3. 길이 제한 (MAX_TOKENS = 2) - 이건 오류가 아님, 로그만 남김
+                        if finish_reason == FINISH_REASON_MAX_TOKENS:
+                            logger.info("답변이 최대 토큰 제한에 도달했습니다.")
+                        
+                        # 텍스트 추출
+                        content = getattr(candidate, "content", None)
+                        if content and getattr(content, "parts", None):
+                            for part in content.parts:
                                 part_text = getattr(part, "text", None)
                                 if part_text:
                                     text_parts.append(part_text)
-                        if getattr(candidate, "finish_reason", None) == 2:
-                            logger.warning("Gemini API가 안전성 정책으로 인해 응답을 차단했습니다.")
-                            text_parts.append("죄송합니다. 해당 질문에 대해 안전한 답변을 제공할 수 없습니다.")
-                        elif getattr(candidate, "finish_reason", None) == 3:
-                            logger.warning("Gemini API가 저작권 정책으로 인해 응답을 차단했습니다.")
-                            text_parts.append("죄송합니다. 저작권 정책으로 인해 해당 내용을 제공할 수 없습니다.")
 
-                extracted = "".join(text_parts)
-                if extracted:
-                    logger.debug("Gemini chunk extracted text: %s", extracted[:200])
-                else:
-                    logger.debug("Gemini chunk without text: %s", chunk)
-                return extracted
+                # (이하 text_parts가 비었을 때 안전 접근 로직은 유지)
+                if not text_parts:
+                    try:
+                        if getattr(chunk, "text", None):
+                            text_parts.append(chunk.text)
+                    except Exception:
+                        pass 
+
+                return "".join(text_parts)
 
             try:
                 response = model.generate_content(
                     prompt,
                     stream=True,
-                    request_options={"timeout": 5}
+                    request_options={"timeout": 60}
                 )
                 logger.info("Gemini streaming response object type: %s", type(response))
 
