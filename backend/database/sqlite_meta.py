@@ -233,6 +233,82 @@ class SQLiteMeta:
                     FOREIGN KEY (user_id) REFERENCES users(user_id)
                 )
             """)
+
+            # --- ⬇️ New Schema for AI Context ⬇️ ---
+
+            # 1. Activity Sessions (Grouping Logs)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS activity_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    start_time INTEGER NOT NULL,
+                    end_time INTEGER,
+                    duration INTEGER,
+                    dominant_app TEXT,
+                    dominant_topic TEXT,
+                    summary TEXT,
+                    created_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            """)
+
+            # 2. User Contexts (Projects/Topics)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_contexts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    keywords TEXT,  -- JSON list
+                    created_at INTEGER,
+                    last_active_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            """)
+
+            # 3. Knowledge Entities (Lite Knowledge Graph)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_entities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    type TEXT,  -- e.g., "Technology", "Location", "Person"
+                    weight REAL DEFAULT 1.0,
+                    created_at INTEGER,
+                    UNIQUE(name, type)
+                )
+            """)
+
+            # 4. Entity Relations (Many-to-Many)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS entity_relations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_id INTEGER NOT NULL,
+                    source_id TEXT NOT NULL,  -- doc_id, url, etc.
+                    source_type TEXT NOT NULL, -- "file", "web", "app"
+                    relation_type TEXT, -- "mentioned_in", "author_of", etc.
+                    created_at INTEGER,
+                    FOREIGN KEY (entity_id) REFERENCES knowledge_entities(id)
+                )
+            """)
+
+            # 5. Chat Interactions (with Context)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_interactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    session_id INTEGER,
+                    query TEXT NOT NULL,
+                    response TEXT,
+                    context_used TEXT, -- JSON
+                    user_feedback INTEGER DEFAULT 0, -- +1, -1, 0
+                    created_at INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id),
+                    FOREIGN KEY (session_id) REFERENCES activity_sessions(id)
+                )
+            """)
+            
+            # Add session_id column to raw logs if not exists (for linking)
+            self._add_column_if_not_exists(conn, "collected_apps", "session_id", "INTEGER")
+            self._add_column_if_not_exists(conn, "collected_browser_history", "session_id", "INTEGER")
             
             # 데이터베이스 마이그레이션 실행 (먼저 실행하여 컬럼 추가)
             self._migrate_database(conn)
@@ -273,10 +349,29 @@ class SQLiteMeta:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_user_id ON collected_apps(user_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_collected_apps_recorded_at ON collected_apps(recorded_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_user_id_status ON recommendations(user_id, status)")
+
+                # New Schema Indexes
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_sessions_user_time ON activity_sessions(user_id, start_time)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_user_contexts_user_active ON user_contexts(user_id, last_active_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_relations_entity ON entity_relations(entity_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_relations_source ON entity_relations(source_id, source_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_interactions_user_session ON chat_interactions(user_id, session_id)")
+                
             except Exception as e:
                 logger.warning(f"인덱스 생성 중 일부 오류 발생 (무시됨): {e}")
             
             conn.commit()
+
+    def _add_column_if_not_exists(self, conn, table_name, column_name, column_type):
+        """Helper to add a column if it doesn't exist."""
+        try:
+            cursor = conn.execute(f"PRAGMA table_info({table_name})")
+            columns = [column[1] for column in cursor.fetchall()]
+            if column_name not in columns:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                logger.info(f"Added column {column_name} to {table_name}")
+        except Exception as e:
+            logger.warning(f"Failed to add column {column_name} to {table_name}: {e}")
     
     def _migrate_database(self, conn):
         """데이터베이스 마이그레이션 실행"""
@@ -801,11 +896,15 @@ class SQLiteMeta:
                     LIMIT 1
                 """, (user_id,))
             row = cursor.fetchone()
+            
             if row:
                 result = dict(row)
-                # JSON 문자열을 파이썬 객체로 변환
-                result['interests'] = json.loads(result['interests']) if result['interests'] else []
-                result['help_preferences'] = json.loads(result['help_preferences']) if result['help_preferences'] else []
+                # JSON 문자열을 파싱하여 반환
+                try:
+                    result['interests'] = json.loads(result['interests']) if result['interests'] else []
+                    result['help_preferences'] = json.loads(result['help_preferences']) if result['help_preferences'] else []
+                except:
+                    pass
                 return result
             return None
         except Exception as e:
@@ -1036,3 +1135,133 @@ class SQLiteMeta:
         except Exception as e:
             logger.error(f"사용자 폴더 경로 조회 오류: {e}")
             return None
+
+    # === New Methods for AI Context Schema ===
+
+    def create_activity_session(self, user_id: int, start_time: int, end_time: int = None, 
+                              dominant_app: str = None, dominant_topic: str = None, summary: str = None) -> int:
+        """새로운 활동 세션 생성"""
+        try:
+            cursor = self.conn.execute("""
+                INSERT INTO activity_sessions 
+                (user_id, start_time, end_time, duration, dominant_app, dominant_topic, summary, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id, start_time, end_time, 
+                (end_time - start_time) if end_time else 0,
+                dominant_app, dominant_topic, summary, 
+                int(datetime.now().timestamp())
+            ))
+            self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"세션 생성 오류: {e}")
+            return -1
+
+    def update_activity_session(self, session_id: int, end_time: int = None, summary: str = None):
+        """활동 세션 업데이트"""
+        try:
+            updates = []
+            params = []
+            if end_time:
+                updates.append("end_time = ?, duration = ? - start_time")
+                params.extend([end_time, end_time])
+            if summary:
+                updates.append("summary = ?")
+                params.append(summary)
+            
+            if not updates: return
+            
+            params.append(session_id)
+            self.conn.execute(f"""
+                UPDATE activity_sessions 
+                SET {', '.join(updates)}
+                WHERE id = ?
+            """, params)
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"세션 업데이트 오류: {e}")
+
+    def link_logs_to_session(self, table_name: str, log_ids: List[int], session_id: int):
+        """로그들을 세션에 연결"""
+        try:
+            if not log_ids: return
+            placeholders = ','.join(['?' for _ in log_ids])
+            self.conn.execute(f"""
+                UPDATE {table_name}
+                SET session_id = ?
+                WHERE id IN ({placeholders})
+            """, [session_id] + log_ids)
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"로그 세션 연결 오류 ({table_name}): {e}")
+
+    def get_unprocessed_logs(self, table_name: str, user_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+        """세션이 할당되지 않은 로그 조회"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute(f"""
+                SELECT * FROM {table_name}
+                WHERE user_id = ? AND (session_id IS NULL OR session_id = 0)
+                ORDER BY recorded_at ASC
+                LIMIT ?
+            """, (user_id, limit))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"미처리 로그 조회 오류 ({table_name}): {e}")
+            return []
+
+    def upsert_entity(self, name: str, type: str, weight: float = 1.0) -> int:
+        """엔티티 생성 또는 업데이트"""
+        try:
+            # Check existence
+            cursor = self.conn.execute(
+                "SELECT id, weight FROM knowledge_entities WHERE name = ? AND type = ?", 
+                (name, type)
+            )
+            row = cursor.fetchone()
+            
+            if row:
+                # Update weight (increment)
+                new_weight = row[1] + 0.1
+                self.conn.execute(
+                    "UPDATE knowledge_entities SET weight = ? WHERE id = ?",
+                    (new_weight, row[0])
+                )
+                return row[0]
+            else:
+                # Insert
+                cursor = self.conn.execute("""
+                    INSERT INTO knowledge_entities (name, type, weight, created_at)
+                    VALUES (?, ?, ?, ?)
+                """, (name, type, weight, int(datetime.now().timestamp())))
+                self.conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"엔티티 업서트 오류: {e}")
+            return -1
+
+    def add_entity_relation(self, entity_id: int, source_id: str, source_type: str, relation_type: str = "mentioned"):
+        """엔티티 관계 추가"""
+        try:
+            self.conn.execute("""
+                INSERT INTO entity_relations (entity_id, source_id, source_type, relation_type, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (entity_id, source_id, source_type, relation_type, int(datetime.now().timestamp())))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"엔티티 관계 추가 오류: {e}")
+
+    def log_chat_interaction(self, user_id: int, query: str, response: str, 
+                           context_used: str = None, session_id: int = None) -> int:
+        """채팅 상호작용 기록"""
+        try:
+            cursor = self.conn.execute("""
+                INSERT INTO chat_interactions (user_id, session_id, query, response, context_used, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, session_id, query, response, context_used, int(datetime.now().timestamp())))
+            self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"채팅 기록 오류: {e}")
+            return -1

@@ -301,6 +301,28 @@ class FileCollector:
             self.logger.warning("⚠️ 텍스트 인덱싱 대상 파일이 없습니다.")
         return saved_count
 
+    def _extract_and_save_entities(self, text: str, source_id: str, source_type: str):
+        """텍스트에서 엔티티를 추출하고 저장"""
+        try:
+            import re
+            # 1. 이메일 추출
+            emails = re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+            for email in emails:
+                entity_id = self.sqlite_meta.upsert_entity(email, 'Person')
+                if entity_id > 0:
+                    self.sqlite_meta.add_entity_relation(entity_id, source_id, source_type, 'mentioned_in')
+
+            # 2. 주요 기술 키워드 (예시)
+            tech_keywords = ['Python', 'Java', 'JavaScript', 'TypeScript', 'React', 'Vue', 'FastAPI', 
+                           'Django', 'Spring', 'Docker', 'Kubernetes', 'AWS', 'Azure', 'GCP', 'SQL', 'NoSQL']
+            for kw in tech_keywords:
+                if kw.lower() in text.lower():
+                    entity_id = self.sqlite_meta.upsert_entity(kw, 'Technology')
+                    if entity_id > 0:
+                        self.sqlite_meta.add_entity_relation(entity_id, source_id, source_type, 'mentioned_in')
+        except Exception as e:
+            self.logger.warning(f"엔티티 추출 중 오류: {e}")
+
     @staticmethod
     def _parse_single_file(file_info: Dict[str, Any], parser_ref: Any, user_id: int):
         """(헬퍼 함수) 단일 파일을 파싱. ProcessPoolExecutor에서 실행됨."""
@@ -466,6 +488,11 @@ class FileCollector:
                         file_hash_map[file_path] = file_hash # file_path를 키로 사용
                     parsed_count += 1
                     self.logger.info("   ✓ %s: %d개 청크 (파싱 완료)", file_name, chunk_count)
+                    
+                    # [New] 첫 번째 청크에서 엔티티 추출 (성능을 위해 일부만)
+                    if texts:
+                        self._extract_and_save_entities(texts[0][:2000], file_path, 'file')
+
                 else:
                     failed_count += 1
                     self.logger.warning("   ✗ 파일 파싱 오류 %s: %s", file_name, error)
@@ -550,7 +577,28 @@ class BrowserHistoryCollector:
         self.logger = logger.getChild(f"BrowserHistoryCollector[user={user_id}]")
         self.sqlite_meta = SQLiteMeta()
         self.browser_paths = self._get_browser_paths()
+        self.browser_paths = self._get_browser_paths()
         self.parser = DocumentParser()
+
+    def _extract_and_save_entities(self, text: str, source_id: str, source_type: str):
+        """텍스트에서 엔티티를 추출하고 저장 (FileCollector와 로직 공유 가능)"""
+        try:
+            import re
+            emails = re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+            for email in emails:
+                entity_id = self.sqlite_meta.upsert_entity(email, 'Person')
+                if entity_id > 0:
+                    self.sqlite_meta.add_entity_relation(entity_id, source_id, source_type, 'mentioned_in')
+
+            tech_keywords = ['Python', 'Java', 'JavaScript', 'TypeScript', 'React', 'Vue', 'FastAPI', 
+                           'Django', 'Spring', 'Docker', 'Kubernetes', 'AWS', 'Azure', 'GCP', 'SQL', 'NoSQL']
+            for kw in tech_keywords:
+                if kw.lower() in text.lower():
+                    entity_id = self.sqlite_meta.upsert_entity(kw, 'Technology')
+                    if entity_id > 0:
+                        self.sqlite_meta.add_entity_relation(entity_id, source_id, source_type, 'mentioned_in')
+        except Exception as e:
+            self.logger.warning(f"엔티티 추출 중 오류: {e}")
 
     def _get_browser_paths(self) -> Dict[str, str]:
         """현재 운영체제에 맞는 브라우저 히스토리 DB 경로를 반환합니다."""
@@ -606,6 +654,10 @@ class BrowserHistoryCollector:
                             'snippet': chunk[:200],
                             'content': chunk
                         })
+                        
+                        # [New] 첫 번째 청크에서 엔티티 추출
+                        if i == 0:
+                            self._extract_and_save_entities(chunk[:2000], item['url'], 'web')
             if all_texts:
                 self.logger.info("🧠 BGE-M3로 %d개 웹 청크 임베딩 생성...", len(all_texts))
                 embeddings = embedder.encode_documents(all_texts, batch_size=64)
@@ -680,6 +732,112 @@ class ActiveApplicationCollector:
 
 
 # -----------------------------------------------------------------------------
+# SessionProcessor
+# -----------------------------------------------------------------------------
+class SessionProcessor:
+    """
+    Raw logs (collected_apps, collected_browser_history)를 분석하여
+    의미 있는 ActivitySession으로 그룹화하는 클래스
+    """
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        self.sqlite_meta = SQLiteMeta()
+        self.logger = logger.getChild(f"SessionProcessor[user={user_id}]")
+        self.session_timeout = 300  # 5분 (초 단위)
+
+    def process_sessions(self):
+        """미처리 로그를 확인하여 세션을 생성하거나 기존 세션에 연결"""
+        try:
+            # 1. 미처리 앱 로그 가져오기
+            unprocessed_apps = self.sqlite_meta.get_unprocessed_logs("collected_apps", self.user_id)
+            # 2. 미처리 브라우저 로그 가져오기
+            unprocessed_web = self.sqlite_meta.get_unprocessed_logs("collected_browser_history", self.user_id)
+            
+            all_logs = []
+            for log in unprocessed_apps:
+                all_logs.append({
+                    'type': 'app', 'data': log, 'time': log['recorded_at'], 'id': log['id']
+                })
+            for log in unprocessed_web:
+                all_logs.append({
+                    'type': 'web', 'data': log, 'time': log['recorded_at'], 'id': log['id']
+                })
+            
+            if not all_logs: return
+
+            # 시간순 정렬
+            all_logs.sort(key=lambda x: x['time'])
+
+            current_session_id = None
+            last_time = 0
+            
+            # 가장 최근 세션 확인 (이어붙이기 위해)
+            # (간소화를 위해 여기서는 항상 새로운 세션 로직을 타거나, 
+            #  메모리에 상태를 유지하지 않고 DB 기반으로 판단)
+            
+            # 간단한 로직:
+            # 로그를 순회하며 이전 로그와 5분 이상 차이나면 새 세션 시작
+            
+            pending_updates = {'app': [], 'web': []}
+            
+            for i, log in enumerate(all_logs):
+                log_time = log['time']
+                
+                if current_session_id is None:
+                    # 첫 로그 -> 새 세션 생성
+                    current_session_id = self._create_new_session(log)
+                    last_time = log_time
+                else:
+                    # 시간 차이 확인
+                    if log_time - last_time > self.session_timeout:
+                        # 세션 종료 및 새 세션 시작
+                        self._close_session(current_session_id, last_time)
+                        current_session_id = self._create_new_session(log)
+                    else:
+                        # 기존 세션 유지 (업데이트는 나중에 한 번에 하거나 필요시)
+                        pass
+                
+                last_time = log_time
+                
+                # 세션 ID 할당 대기열 추가
+                if log['type'] == 'app':
+                    pending_updates['app'].append(log['id'])
+                else:
+                    pending_updates['web'].append(log['id'])
+                
+                # 배치 업데이트 (또는 세션이 바뀌었을 때)
+                if i == len(all_logs) - 1 or (i < len(all_logs)-1 and all_logs[i+1]['time'] - log_time > self.session_timeout):
+                     self._flush_updates(current_session_id, pending_updates)
+                     self._close_session(current_session_id, last_time) # 마지막 로그 시간으로 세션 종료 업데이트
+                     pending_updates = {'app': [], 'web': []}
+                     current_session_id = None # 리셋
+
+        except Exception as e:
+            self.logger.error(f"세션 처리 중 오류: {e}", exc_info=True)
+
+    def _create_new_session(self, first_log) -> int:
+        """새 세션 생성"""
+        dominant_app = first_log['data'].get('app_name') if first_log['type'] == 'app' else "Browser"
+        return self.sqlite_meta.create_activity_session(
+            user_id=self.user_id,
+            start_time=first_log['time'],
+            dominant_app=dominant_app,
+            summary="New Activity Started" # 나중에 AI로 업데이트
+        )
+
+    def _close_session(self, session_id, end_time):
+        """세션 종료 시간 업데이트"""
+        self.sqlite_meta.update_activity_session(session_id, end_time=end_time)
+
+    def _flush_updates(self, session_id, updates):
+        """로그에 세션 ID 매핑"""
+        if updates['app']:
+            self.sqlite_meta.link_logs_to_session("collected_apps", updates['app'], session_id)
+        if updates['web']:
+            self.sqlite_meta.link_logs_to_session("collected_browser_history", updates['web'], session_id)
+
+
+# -----------------------------------------------------------------------------
 # DataCollectionManager
 # -----------------------------------------------------------------------------
 class DataCollectionManager:
@@ -689,6 +847,7 @@ class DataCollectionManager:
         self.file_collector = FileCollector(user_id)
         self.browser_collector = BrowserHistoryCollector(user_id)
         self.app_collector = ActiveApplicationCollector(user_id)
+        self.session_processor = SessionProcessor(user_id)  # Add SessionProcessor
         self.running, self.initial_collection_done = False, False
         self.progress, self.progress_message = 0.0, "초기화 중..."
         self.logger.info("RAG 시스템 핵심 컴포넌트 초기화 중...")
@@ -789,6 +948,10 @@ class DataCollectionManager:
             if current_time - last_run['file'] >= intervals['file']: self._collect_files(); last_run['file'] = current_time
             if current_time - last_run['browser'] >= intervals['browser']: self._collect_browser_history(); last_run['browser'] = current_time
             if current_time - last_run['app'] >= intervals['app']: self._collect_active_apps(); last_run['app'] = current_time
+            
+            # 세션 처리 (앱 수집 주기와 맞추거나 별도로 실행)
+            self.session_processor.process_sessions()
+            
             time.sleep(10)
 
     def _collect_files(self):
