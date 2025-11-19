@@ -1,14 +1,16 @@
 """
 Docling 기반 문서 파서
-다양한 문서 형식을 파싱하여 마크다운으로 변환
+다양한 문서 형식을 파싱하여 마크다운으로 변환하고,
+재귀적 문자 분할(Recursive Character Splitting)을 통해 문맥을 보존하며 청킹합니다.
 """
 
 import os
 import yaml
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
-from pathlib import Path
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 try:
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentParser:
-    """Docling 기반 문서 파서"""
+    """Docling 기반 문서 파서 및 스마트 청커"""
     
     def __init__(self, config_path: str = "configs.yaml"):
         absolute_config_path = PROJECT_ROOT / config_path
@@ -209,34 +211,108 @@ class DocumentParser:
     
     def chunk_text(self, text: str, chunk_size: int = None, chunk_overlap: int = None) -> List[str]:
         """
-        텍스트를 청크로 분할
+        [개선됨] 재귀적 분할 방식 (Recursive Character Splitting)
+        문단 -> 줄바꿈 -> 문장 -> 단어 순으로 의미 단위를 유지하며 분할합니다.
         
         Args:
             text: 분할할 텍스트
-            chunk_size: 청크 크기 (문자 수)
-            chunk_overlap: 청크 오버랩 (문자 수)
+            chunk_size: 청크 크기 (문자 수, 기본값: 설정파일 또는 1000)
+            chunk_overlap: 청크 오버랩 (문자 수, 기본값: 설정파일 또는 200)
         
         Returns:
             청크 리스트
         """
+        # 설정값이 없으면 기본값 사용
         if chunk_size is None:
             chunk_size = self.docling_config.get('chunking', {}).get('chunk_size', 1000)
         if chunk_overlap is None:
             chunk_overlap = self.docling_config.get('chunking', {}).get('chunk_overlap', 200)
         
-        chunks = []
-        start = 0
+        if not text:
+            return []
+
+        # 1. 구분자 우선순위 정의 (문단 > 줄바꿈 > 문장 > 단어 > 문자)
+        # "\n\n": 문단 구분
+        # "\n": 줄바꿈
+        # ". ": 문장 마침표 (뒤에 공백 포함)
+        # " ": 단어 공백
+        # "": 글자 단위 (최후의 수단)
+        separators = ["\n\n", "\n", ". ", " ", ""]
         
-        while start < len(text):
-            end = start + chunk_size
-            chunk = text[start:end]
-            
-            if chunk.strip():
-                chunks.append(chunk)
-            
-            start = end - chunk_overlap
+        return self._recursive_split(text, separators, chunk_size, chunk_overlap)
+
+    def _recursive_split(self, text: str, separators: List[str], chunk_size: int, chunk_overlap: int) -> List[str]:
+        """
+        재귀적으로 텍스트를 분할하고 병합하는 내부 로직
+        """
+        final_chunks = []
         
-        return chunks
+        # 현재 사용할 구분자 선택
+        separator = separators[-1]
+        new_separators = []
+        
+        for i, sep in enumerate(separators):
+            if sep == "": # 마지막 단계 (글자 단위)
+                separator = ""
+                break
+            if sep in text:
+                separator = sep
+                new_separators = separators[i + 1:]
+                break
+        
+        # 구분자로 텍스트 1차 분할
+        if separator:
+            splits = text.split(separator)
+        else:
+            splits = list(text) # 글자 단위 분리
+
+        # 병합을 위한 버퍼
+        current_chunk = []
+        current_length = 0
+        separator_len = len(separator)
+        
+        for split in splits:
+            split_len = len(split)
+            
+            # 현재 조각을 더했을 때 chunk_size를 초과하는지 확인
+            if current_length + split_len + (separator_len if current_chunk else 0) > chunk_size:
+                
+                # 1. 현재까지 모은 청크 저장
+                if current_chunk:
+                    doc = separator.join(current_chunk)
+                    if doc.strip():
+                        final_chunks.append(doc)
+                    
+                    # 2. 오버랩 처리: 뒤에서부터 overlap 크기 내에 들어오는 요소만 남기고 버림
+                    # (단순화를 위해, 오버랩 크기를 초과하는 앞부분을 제거)
+                    while current_length > chunk_overlap and current_chunk:
+                        removed = current_chunk.pop(0)
+                        current_length -= (len(removed) + separator_len)
+                        # 첫 요소 제거 시 separator 길이는 뺄 필요가 없을 수 있으나 근사치로 계산
+                        if current_length < 0: current_length = 0
+
+                # 3. 현재 조각이 chunk_size보다 크면 재귀적으로 더 잘게 쪼갬
+                if split_len > chunk_size and new_separators:
+                    sub_chunks = self._recursive_split(split, new_separators, chunk_size, chunk_overlap)
+                    final_chunks.extend(sub_chunks)
+                    # 재귀 분할된 조각들은 이미 처리되었으므로 현재 버퍼에 추가하지 않음
+                    # 단, 마지막 서브청크가 오버랩을 위해 일부 필요할 수도 있으나 복잡도 감소를 위해 생략
+                else:
+                    # chunk_size보다는 작거나 더 이상 쪼갤 수 없는 경우
+                    current_chunk.append(split)
+                    current_length += split_len + separator_len
+            else:
+                # 버퍼에 추가 가능
+                current_chunk.append(split)
+                current_length += split_len + (separator_len if current_chunk else 0)
+        
+        # 남은 버퍼 처리
+        if current_chunk:
+            doc = separator.join(current_chunk)
+            if doc.strip():
+                final_chunks.append(doc)
+                
+        return final_chunks
     
     def parse_and_chunk(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -254,7 +330,7 @@ class DocumentParser:
             if not content:
                 return []
             
-            # 청크 분할
+            # 청크 분할 (개선된 방식 사용)
             chunks = self.chunk_text(content)
             
             # 청크 정보 생성
@@ -272,4 +348,3 @@ class DocumentParser:
         except Exception as e:
             logger.error(f"파싱 및 청크 분할 오류 {file_path}: {e}")
             return []
-

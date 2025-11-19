@@ -58,7 +58,8 @@ def retrieve_local(question: str, repo: Repository, embedder: BGEM3Embedder,
                 'path': hit.path,
                 'url': hit.url,
                 'timestamp': hit.timestamp,
-                'snippet': hit.snippet
+                'snippet': hit.snippet,
+                'content': hit.content
             })
         
         # 4. 상위 k_final 반환
