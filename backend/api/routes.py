@@ -574,14 +574,14 @@ async def generate_recommendation(user_id: int = Depends(get_current_user_id)):
     """현재 사용자를 위해 수동으로 새로운 추천을 생성합니다."""
     try:
         db = SQLiteMeta()
-        
-        # 최근 1시간 내 수동 추천 횟수 확인
-        count = db.get_recent_manual_recommendation_count(user_id, hours=1)
-        if count >= 3:
-            raise HTTPException(
-                status_code=429, 
-                detail="최근 1시간 이내에 3번의 수동 추천을 모두 사용하셨습니다. 시간이 조금 지난 후에 다시 사용해주시기 바랍니다."
-            )
+        # PoT 단계에서는 수동 추천 횟수 제한을 임시로 비활성화합니다.
+        # 최근 1시간 내 수동 추천 횟수 확인 (추후 다시 활성화 예정)
+        # count = db.get_recent_manual_recommendation_count(user_id, hours=1)
+        # if count >= 3:
+        #     raise HTTPException(
+        #         status_code=429, 
+        #         detail="최근 1시간 이내에 3번의 수동 추천을 모두 사용하셨습니다. 시간이 조금 지난 후에 다시 사용해주시기 바랍니다."
+        #     )
             
         # 추천 에이전트 가져오기 및 분석 실행
         recommendation_agent = agent_registry.get_agent("recommendation")

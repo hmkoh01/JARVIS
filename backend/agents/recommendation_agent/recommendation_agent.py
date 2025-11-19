@@ -6,6 +6,7 @@ import logging
 
 from ..base_agent import BaseAgent, AgentResponse
 from database.sqlite_meta import SQLiteMeta  # 변경됨: SQLAlchemy 대신 SQLiteMeta 사용
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,9 @@ class RecommendationAgent(BaseAgent):
         logger.info(f"사용자 {user_id}에 대한 주기적 분석 시작 (타입: {recommendation_type})...")
         
         try:
+            # 0. 사용자 설문 데이터 미리 조회 (관심사 기반 가중치에 사용)
+            survey_data = self._get_user_survey_data(user_id)
+
             # 1. 지난 1주일 데이터 조회
             one_week_ago = int((datetime.now() - timedelta(days=7)).timestamp())
             files = self.sqlite_meta.get_collected_files_since(user_id, one_week_ago)
@@ -143,54 +147,74 @@ class RecommendationAgent(BaseAgent):
                 history = self.sqlite_meta.get_collected_browser_history(user_id)
                 data_source = "전체 활동"
 
-            # 2. 데이터에서 키워드/주제 추출
-            keywords = []
+            # 2. 추천에 사용할 "문서" 리스트 구성 (파일 + 브라우저 + 설문)
+            documents: List[str] = []
             
-            # 파일 이름 및 카테고리에서 키워드 추출
+            # 2-1. 파일 이름 / 카테고리 / 내용 프리뷰를 하나의 문서로 결합
             if files:
                 for f in files:
-                    keywords.extend(self._extract_keywords_from_text(f.get('file_name', '')))
-                    if f.get('file_category'):
-                        keywords.append(f['file_category'])
+                    parts = [
+                        f.get('file_name', ''),
+                        f.get('file_category', ''),
+                        f.get('content_preview', '')
+                    ]
+                    doc_text = " ".join(p for p in parts if p)
+                    if doc_text.strip():
+                        documents.append(doc_text)
 
-            # 브라우저 기록 제목에서 키워드 추출
+            # 2-2. 브라우저 기록 제목을 문서로 사용
             if history:
                 for h in history:
-                    keywords.extend(self._extract_keywords_from_text(h.get('title', '')))
+                    title = h.get('title', '')
+                    if title:
+                        documents.append(title)
 
-            # 2차 폴백: 설문 데이터 기반 키워드 추출
-            if not keywords:
+            # 2-3. 2차 폴백: 설문 데이터 기반 문서 구성 (활동 로그가 거의 없을 때)
+            if not documents:
                 logger.info(f"User {user_id}: 활동 데이터가 없어 설문 데이터로 추천을 생성합니다.")
-                survey_data = self._get_user_survey_data(user_id)
                 if survey_data:
                     data_source = "설문"
                     job_field = survey_data.get('job_field_other', '') or survey_data.get('job_field', '')
                     interests = survey_data.get('interests', [])
                     custom_keywords_str = survey_data.get('custom_keywords', '')
 
-                    if job_field: keywords.append(job_field)
-                    keywords.extend(interests)
-                    if custom_keywords_str: keywords.extend(self._extract_keywords_from_text(custom_keywords_str))
-
-            if not keywords:
+                    # 설문 기반 문서들 구성
+                    if job_field:
+                        documents.append(str(job_field))
+                    for it in interests or []:
+                        documents.append(str(it))
+                    if custom_keywords_str:
+                        documents.append(custom_keywords_str)
+            
+            if not documents:
                 msg = f"User {user_id}: 분석할 데이터가 전혀 없습니다."
                 logger.info(msg)
                 return False, "분석할 데이터가 부족하여 추천을 생성할 수 없습니다."
                 
-            # 3. 가장 흔한 키워드 찾기 (3글자 이상)
-            keyword_counts = Counter(k for k in keywords if k and len(k) > 2)
-            most_common = keyword_counts.most_common(3)
+            # 3. 설문 기반 관심사와의 유사도를 고려한 키워드 선택 (없으면 TF-IDF로 폴백)
+            top_keywords = self._select_keywords_by_interest_similarity(documents, survey_data, top_n=5)
 
-            if not most_common:
+            if not top_keywords:
                 msg = f"User {user_id}: 주요 활동 주제를 찾지 못했습니다."
                 logger.info(msg)
                 return False, "데이터에서 주요 활동 주제를 찾지 못했습니다."
 
-            top_keywords = [k[0] for k in most_common]
-            
-            # 4. 추천 생성 및 저장
+            # 4. LLM을 사용해 "추천 키워드" 1개 생성 (핵심 키워드 기반)
+            recommended_keyword = self._generate_llm_recommendation_keyword(top_keywords)
+
+            # 5. 추천 생성 및 저장
             title = "활동 요약 및 추천"
-            content = f"'{data_source}' 데이터를 분석한 결과, '{', '.join(top_keywords)}' 주제에 많은 관심을 보이셨습니다. 이와 관련하여 더 깊이 있는 정보를 찾아보거나 새로운 프로젝트를 시작해 보는 것은 어떠신가요?"
+            if recommended_keyword:
+                content = (
+                    f"'{data_source}' 데이터를 분석한 결과, '{', '.join(top_keywords)}' 주제에 많은 관심을 보이셨습니다. "
+                    f"이 중에서도 특히 '{recommended_keyword}' 주제를 중심으로 더 깊이 있는 정보를 찾아보거나 "
+                    f"새로운 프로젝트를 시작해 보는 것을 추천드립니다."
+                )
+            else:
+                content = (
+                    f"'{data_source}' 데이터를 분석한 결과, '{', '.join(top_keywords)}' 주제에 많은 관심을 보이셨습니다. "
+                    f"이와 관련하여 더 깊이 있는 정보를 찾아보거나 새로운 프로젝트를 시작해 보는 것은 어떠신가요?"
+                )
             
             # TODO: 중복 추천 방지 로직 추가
             
@@ -205,26 +229,364 @@ class RecommendationAgent(BaseAgent):
             return False, f"추천 생성 중 오류가 발생했습니다: {e}"
 
     def _extract_keywords_from_text(self, text: str) -> list:
-        """텍스트에서 간단한 키워드를 추출합니다. (개선된 버전)"""
+        """텍스트에서 의미 있는 키워드를 추출합니다. (불용어 처리 강화)"""
         if not text:
             return []
         
         import re
         
-        # 한글, 영어, 숫자만 남기고 나머지 제거
-        processed_text = re.sub(r'[^ \w가-힣]', '', text.lower())
+        # 1. 텍스트 전처리: 소문자 변환 및 특수문자 제거 (한글, 영문, 숫자, 공백만 유지)
+        # URL 제거
+        text = re.sub(r'http\S+', '', text)
+        processed_text = re.sub(r'[^ \w가-힣]', ' ', text.lower())
         words = processed_text.split()
         
-        # 불용어 리스트 (확장)
-        stopwords = [
-            'and', 'the', 'for', 'with', 'this', 'that', 'from', 'untitled',
-            'com', 'https', 'http', 'www', 'kr', 'ac', 'co',
-            '및', '위한', '통해', '관련', '대한', '입니다', '으로', '에서'
-        ]
+        # 2. 불용어 리스트 확장 (쓰레기 데이터 필터링)
+        stopwords = {
+            # 일반적인 영어 불용어
+            'and', 'the', 'for', 'with', 'this', 'that', 'from', 'to', 'in', 'on', 'at', 'by', 'of', 'is', 'are', 'was', 'were',
+            'it', 'its', 'as', 'be', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'could', 'will', 'would', 'should',
+            'about', 'which', 'what', 'when', 'where', 'who', 'how', 'why', 'not', 'no', 'yes', 'or', 'but', 'if', 'so',
+            
+            # 웹/브라우저 관련 쓰레기 데이터
+            'http', 'https', 'www', 'com', 'net', 'org', 'co', 'kr', 'ac', 'io', 'html', 'htm', 'php', 'jsp', 'asp',
+            'google', 'naver', 'daum', 'kakao', 'youtube', 'facebook', 'twitter', 'instagram', 'linkedin', 'github',
+            'login', 'signin', 'signup', 'logout', 'signout', 'account', 'password', 'id', 'user', 'profile',
+            'search', 'query', 'find', 'result', 'results', 'index', 'home', 'main', 'site', 'web', 'page',
+            'new', 'tab', 'window', 'untitled', 'loading', 'error', '404', '500', 'server', 'client', 'localhost',
+            'docs', 'drive', 'sheet', 'slide', 'document', 'file', 'folder', 'image', 'video', 'audio',
+            'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'csv', 'txt', 'hwp', 'zip', 'rar', 'tar', 'gz',
+            'receipt', 'success', 'final', 'draft', 'copy', 'sample',
+            
+            # 일반적인 한글 불용어 및 웹 관련
+            '및', '위한', '통해', '관련', '대한', '입니다', '으로', '에서', '하고', '있는', '하는', '되는',
+            '구글', '네이버', '다음', '카카오', '유튜브', '페이스북', '트위터', '인스타그램', '링크드인', '깃허브',
+            '로그인', '회원가입', '로그아웃', '계정', '비밀번호', '아이디', '사용자', '프로필', '내정보',
+            '검색', '통합검색', '결과', '메인', '홈', '사이트', '웹페이지', '페이지', '새탭', '무제',
+            '로딩중', '오류', '에러', '서버', '클라이언트', '파일', '폴더', '문서', '이미지', '동영상',
+            '저장', '열기', '닫기', '수정', '삭제', '취소', '확인', '완료', '설정', '관리', '보기', '더보기',
+            '성공', '인증', '결제', '영수증', '최종', '사본', '임시', '백업', '검토', '초안', '샘플'
+        }
         
-        # 2글자 이상이고 불용어가 아닌 단어만 추출
-        keywords = [word for word in words if len(word) > 1 and word not in stopwords]
+        # 파일 확장자/형식, 이메일, 무작위 문자열 제거를 위한 패턴
+        file_ext_pattern = re.compile(r'\.(pdf|docx?|pptx?|xlsx?|xls|csv|md|txt|jpg|jpeg|png|gif|zip|rar|hwp)$', re.IGNORECASE)
+        email_pattern = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+        random_string_pattern = re.compile(r'^[a-zA-Z0-9]{6,}$')
+        alpha_pattern = re.compile(r'^[a-zA-Z가-힣]{2,}$')
+
+        keywords = []
+        for word in words:
+            # 2글자 미만 제외
+            if len(word) < 2:
+                continue
+                
+            # 숫자만 있는 경우 제외
+            if word.isdigit():
+                continue
+                
+            # 불용어 제외
+            if word in stopwords:
+                continue
+                
+            # 한글 조사/어미 간단 제거 (끝글자 기반)
+            # 완벽하진 않지만 '데이터를' -> '데이터' 정도로 정제
+            if re.match(r'[가-힣]+', word):
+                original_word = word
+                # 흔한 조사들
+                josa_list = ['은', '는', '이', '가', '을', '를', '에', '의', '로', '으로', '과', '와', '도', '만', '서', '께']
+                for josa in josa_list:
+                    if word.endswith(josa) and len(word) > len(josa) + 1: # 조사 떼고도 2글자 이상일 때만
+                        word = word[:-len(josa)]
+                        break
+                
+                # 다시 한번 불용어 체크 (조사 떼고 나니 불용어일 수 있음)
+                if word in stopwords:
+                    continue
+            
+            # 파일 확장자/형식 제거
+            if file_ext_pattern.search(word):
+                continue
+
+            # 이메일 주소 제거
+            if email_pattern.match(word):
+                continue
+
+            # 무작위 문자열(영문/숫자 혼합 6자 이상) 제거
+            if random_string_pattern.match(word) and not alpha_pattern.match(word):
+                continue
+
+            keywords.append(word)
+            
         return list(set(keywords))
+
+    def _extract_keywords_tfidf(self, documents: List[str], top_n: int = 30) -> List[str]:
+        """
+        (폴백용) TF-IDF를 사용하여 문서 집합에서 상위 키워드를 추출합니다.
+        신규 로직에서는 `_compute_tfidf_term_scores`를 사용하고,
+        이 함수는 설문 데이터가 없거나 유사도 계산이 어려운 경우에만 사용합니다.
+        """
+        term_scores, _, _ = self._compute_tfidf_term_scores(documents)
+        if not term_scores:
+            return []
+        sorted_terms = sorted(term_scores.items(), key=lambda x: x[1], reverse=True)
+        return [t for t, _ in sorted_terms[:top_n]]
+    def _compute_tfidf_term_scores(self, documents: List[str]) -> (Dict[str, float], Optional["TfidfVectorizer"], Dict[str, int]):
+        """
+        전처리된 문서 리스트를 대상으로 TF-IDF를 계산하고,
+        각 단어(토큰)별 중요도 점수와 문서 빈도(Doc Frequency)를 반환합니다.
+        """
+        if not documents:
+            return {}, None, {}
+
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+        except ImportError:
+            logger.warning("scikit-learn이 설치되지 않아 TF-IDF 기반 점수 계산을 사용할 수 없습니다.")
+            # 간단한 빈도수 기반으로 대체
+            all_tokens: List[str] = []
+            for doc in documents:
+                all_tokens.extend(self._extract_keywords_from_text(doc))
+            counter = Counter(all_tokens)
+            scores = {k: float(v) for k, v in counter.items()}
+            doc_freqs = {k: len(documents) for k in counter.keys()}
+            return scores, None, doc_freqs
+
+        try:
+            # 1) 각 문서를 전처리하여 키워드 토큰 문자열로 변환
+            processed_docs: List[str] = []
+            for doc in documents:
+                tokens = self._extract_keywords_from_text(doc)
+                if tokens:
+                    processed_docs.append(" ".join(tokens))
+
+            if not processed_docs:
+                return {}, None, {}
+
+            # 2) TF-IDF 벡터화 (단어 단위)
+            vectorizer = TfidfVectorizer(
+                token_pattern=r"(?u)\b\w+\b",
+                max_features=2000,
+                norm="l2",
+            )
+            tfidf_matrix = vectorizer.fit_transform(processed_docs)
+            feature_names = vectorizer.get_feature_names_out()
+            doc_freq_arr = (tfidf_matrix > 0).sum(axis=0).A1
+
+            # 3) 각 단어의 전체 문서에서의 중요도 합산
+            scores_arr = tfidf_matrix.sum(axis=0).A1
+            term_scores = {term: float(score) for term, score in zip(feature_names, scores_arr)}
+            doc_freqs = {term: int(df) for term, df in zip(feature_names, doc_freq_arr)}
+
+            return term_scores, vectorizer, doc_freqs
+
+        except Exception as e:
+            logger.error(f"TF-IDF 기반 단어 점수 계산 중 오류: {e}", exc_info=True)
+            return {}, None, {}
+
+    def _select_keywords_by_interest_similarity(
+        self,
+        documents: List[str],
+        survey_data: Optional[Dict[str, Any]],
+        top_n: int = 5
+    ) -> List[str]:
+        """
+        (개선된 버전)
+        1) 문서 전체에 대한 TF-IDF 점수(term_scores)를 계산하고,
+        2) 설문에서 제공된 관심사 키워드와 각 단어의 코사인 유사도를 계산하여,
+        3) weighted_fit_score = 1 * tfidf_score_norm + 9 * cosine_similarity
+           를 기준으로 상위 N개 키워드를 선택합니다.
+        설문 데이터가 없거나 유사도를 계산할 수 없으면 TF-IDF 결과로 폴백합니다.
+        """
+        # 1. TF-IDF 기반 단어 중요도 계산
+        term_scores, vectorizer, doc_freqs = self._compute_tfidf_term_scores(documents)
+        if not term_scores:
+            return self._extract_keywords_tfidf(documents, top_n=top_n)
+
+        total_docs = max(len(documents), 1)
+
+        # TF-IDF 상위 일부만 후보로 사용 (너무 많은 단어는 노이즈이므로 제한)
+        sorted_terms = sorted(term_scores.items(), key=lambda x: x[1], reverse=True)
+        candidate_keywords = []
+        for term, _ in sorted_terms:
+            df_ratio = doc_freqs.get(term, 0) / total_docs
+            if df_ratio >= 0.4:  # 비정상적으로 자주 등장하는 단어 제거
+                continue
+            candidate_keywords.append(term)
+            if len(candidate_keywords) >= 200:
+                break
+
+        # 2. 설문 기반 관심사 키워드 추출
+        interest_terms: List[str] = []
+        if survey_data:
+            job_field = survey_data.get('job_field_other', '') or survey_data.get('job_field', '')
+            if job_field:
+                interest_terms.append(str(job_field))
+
+            interests = survey_data.get('interests', [])
+            if isinstance(interests, list):
+                for it in interests:
+                    if it:
+                        interest_terms.append(str(it))
+
+            custom_keywords_str = survey_data.get('custom_keywords', '')
+            if custom_keywords_str:
+                interest_terms.extend(self._extract_keywords_from_text(custom_keywords_str))
+
+        # 설문 정보가 전혀 없으면 TF-IDF로 폴백
+        interest_terms = list({t for t in interest_terms if t})
+        if not interest_terms:
+            return self._extract_keywords_tfidf(documents, top_n=top_n)
+
+        # vectorizer가 없다면(=빈도 기반 폴백) TF-IDF 순위만 사용
+        if vectorizer is None:
+            return self._extract_keywords_tfidf(documents, top_n=top_n)
+
+        try:
+            # 3. 설문 관심사를 하나의 텍스트로 합쳐 벡터화
+            interest_text = " ".join(interest_terms)
+            interest_vec = vectorizer.transform([interest_text])  # (1, D)
+            if interest_vec.nnz == 0:
+                return self._extract_keywords_tfidf(documents, top_n=top_n)
+
+            # TF-IDF 점수 정규화 (0~1 범위)
+            max_tfidf = max(term_scores.values()) if term_scores else 1.0
+            if max_tfidf == 0:
+                max_tfidf = 1.0
+
+            scored_candidates = []
+            for term in candidate_keywords:
+                base_score = term_scores.get(term, 0.0)
+                tfidf_norm = base_score / max_tfidf
+
+                term_vec = vectorizer.transform([term])
+                if term_vec.nnz == 0:
+                    cosine_sim = 0.0
+                else:
+                    # norm='l2' 이므로 dot product == cosine similarity
+                    cosine_sim = float(term_vec @ interest_vec.T)
+
+                weighted_fit_score = 1.0 * tfidf_norm + 9.0 * cosine_sim
+                scored_candidates.append((term, weighted_fit_score))
+
+            # 의미 없는(점수 너무 낮은) 후보 제거
+            scored_candidates = [item for item in scored_candidates if item[1] > 0.05]
+            if not scored_candidates:
+                return self._extract_keywords_tfidf(documents, top_n=top_n)
+
+            scored_candidates.sort(key=lambda x: x[1], reverse=True)
+            top = [w for w, _ in scored_candidates[:top_n]]
+            return top
+
+        except Exception as e:
+            logger.error(f"관심사 기반 가중치 키워드 선택 중 오류: {e}", exc_info=True)
+            return self._extract_keywords_tfidf(documents, top_n=top_n)
+
+
+    def _generate_llm_recommendation_keyword(self, base_keywords: List[str]) -> Optional[str]:
+        """
+        추출된 핵심 키워드들을 기반으로 LLM(Gemini)을 호출하여
+        사용자가 앞으로 더 탐색해 보면 좋을 만한 '추천 키워드' 1개를 생성합니다.
+        """
+        if not base_keywords:
+            return None
+
+        # Gemini API 키가 없으면 스킵
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            logger.warning("google-generativeai가 설치되지 않아 LLM 추천 키워드를 생성할 수 없습니다.")
+            return None
+
+        if not settings.GEMINI_API_KEY:
+            logger.warning("GEMINI_API_KEY가 설정되지 않아 LLM 추천 키워드를 생성할 수 없습니다.")
+            return None
+
+        try:
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            
+            # Safety Settings: 모든 차단 필터 해제
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+
+            model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                generation_config={
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "max_output_tokens": 32,
+                    "response_mime_type": "text/plain",
+                },
+                safety_settings=safety_settings,
+            )
+
+            keywords_str = ", ".join(base_keywords)
+            prompt = (
+                "당신은 사용자의 관심사를 분석하는 분석가입니다.\n"
+                f"다음은 사용자가 최근 관심을 보인 키워드 목록입니다: {keywords_str}\n\n"
+                "이 키워드들을 종합했을 때, 사용자가 추가로 탐색해보면 좋을 만한 '연관 주제'를 단 한 단어로 추천해 주세요.\n"
+                "규칙:\n"
+                "1. 반드시 한국어 단어 하나만 출력하세요.\n"
+                "2. 부가 설명, 기호, 공백 없이 오직 단어만 출력하세요.\n"
+                "3. 선정적이거나 위험한 단어는 제외하고, 학술적/실용적 주제를 우선하세요."
+            )
+
+            response = model.generate_content(prompt, request_options={"timeout": 10})
+
+            # Gemini 응답 안전 파싱
+            candidates = getattr(response, "candidates", None) or []
+            if not candidates:
+                # Safety Feedback 등 확인
+                feedback = getattr(response, "prompt_feedback", None)
+                logger.warning("LLM 추천 키워드 응답이 비어 있습니다. prompt_feedback=%s", feedback)
+                return None
+
+            candidate = candidates[0]
+            finish_reason = getattr(candidate, "finish_reason", None)
+            # 0: FINISH, 1: MAX_TOKENS, 2: SAFETY, 3: RECITATION, 4: OTHER
+            # SAFETY(2) 등으로 막혀도 혹시나 텍스트가 일부라도 있으면 가져오도록 시도할 수 있으나,
+            # 보통 막히면 parts가 아예 없음. 로그만 남기고 리턴.
+            if finish_reason not in (None, 0, 1):  # MAX_TOKENS까지는 허용
+                logger.warning("LLM 응답이 finish_reason=%s 로 종료되었습니다. (Safety Filter 등)", finish_reason)
+                # 강제 반환하지 않고 아래 파싱 로직 시도 (혹시 모를 텍스트 존재 가능성)
+            
+            content_parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+            extracted_chunks: List[str] = []
+            for part in content_parts:
+                text_chunk = getattr(part, "text", None)
+                if text_chunk:
+                    extracted_chunks.append(text_chunk)
+
+            if not extracted_chunks:
+                # fallback: response.text accessor (예외 방지)
+                try:
+                    fallback_text = (response.text or "").strip()
+                except Exception:
+                    fallback_text = ""
+                if fallback_text:
+                    extracted_chunks.append(fallback_text)
+
+            if not extracted_chunks:
+                return None
+
+            text = "\n".join(extracted_chunks).strip()
+            if not text:
+                return None
+
+            # 첫 줄만 사용하고, 양쪽 공백 및 따옴표 제거
+            keyword = text.splitlines()[0].strip().strip("\"'“”'‘’")
+            # 너무 길거나 이상한 경우는 무시
+            if not keyword or len(keyword) > 20:
+                return None
+            return keyword
+
+        except Exception as e:
+            logger.error(f"LLM 추천 키워드 생성 중 오류: {e}", exc_info=True)
+            return None
 
     def _get_interest_based_recommendations(self, interests: List[str]) -> str:
         """관심사에 따른 추천을 생성합니다."""
