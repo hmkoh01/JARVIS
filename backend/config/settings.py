@@ -1,9 +1,19 @@
+import logging
 import os
+from pathlib import Path
 from typing import Optional
-from pydantic_settings import BaseSettings
-from dotenv import load_dotenv
 
-load_dotenv()
+from dotenv import find_dotenv, load_dotenv
+from pydantic_settings import BaseSettings
+
+logger = logging.getLogger("config.settings")
+
+BASE_DIR = Path(__file__).resolve().parents[2]  # JARVIS 프로젝트 루트
+dotenv_path = find_dotenv(str(BASE_DIR / ".env"), raise_error_if_not_found=False)
+if dotenv_path:
+    load_dotenv(dotenv_path)
+else:
+    logger.warning("프로젝트 루트에서 .env 파일을 찾지 못했습니다. 환경 변수가 비어있을 수 있습니다.")
 
 class Settings(BaseSettings):
     # API 설정
@@ -11,7 +21,7 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     
     # 데이터베이스 설정
-    DATABASE_URL: str = "sqlite:///./jarvis.db"
+    DATABASE_URL: str = f"sqlite:///{(BASE_DIR / 'jarvis.db').as_posix()}"
 
     # Gemini API 설정
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
@@ -61,6 +71,9 @@ class Settings(BaseSettings):
     JWT_EXPIRATION_HOURS: int = 24
     
     class Config:
-        env_file = ".env"
+        env_file = BASE_DIR / ".env"
 
-settings = Settings() 
+settings = Settings()
+
+if not settings.GEMINI_API_KEY:
+    logger.warning("GEMINI_API_KEY가 설정되지 않았습니다. Gemini 기반 기능이 제한됩니다.")
