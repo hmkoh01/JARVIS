@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -132,15 +133,24 @@ async def lifespan(app: FastAPI):
         global_repository = None
     
     # 3. 스케줄러 작업 추가 및 시작
-    # 매일 새벽 3시에 실행
-    scheduler.add_job(trigger_recommendation_analysis, 'cron', hour=3, id='recommendation_analysis_job')
+    # 10분 간격으로 반복 실행 (실시간성 확보)
+    scheduler.add_job(
+        trigger_recommendation_analysis, 
+        'interval', 
+        minutes=10, 
+        id='recommendation_analysis_job'
+    )
     scheduler.start()
-    logger.info("📅 주기적 추천 분석 스케줄러 시작됨 (매일 새벽 3시)")
+    logger.info("📅 주기적 추천 분석 스케줄러 시작됨 (10분 간격)")
+    
+    # 4. 서버 시작 시 즉시 1회 실행 (개발/테스트 편의성)
+    asyncio.create_task(trigger_recommendation_analysis())
+    logger.info("🚀 서버 시작 시 추천 분석 즉시 실행 트리거됨")
 
     logger.info(f"📊 등록된 에이전트: {list(agent_registry.get_agent_descriptions().keys())}")
     logger.info("✅ 시스템이 준비되었습니다!")
     
-    # 4. app.state에 전역 인스턴스 저장 (라우터에서 접근 가능하도록)
+    # 5. app.state에 전역 인스턴스 저장 (라우터에서 접근 가능하도록)
     app.state.repository = global_repository
     app.state.embedder = global_embedder
     app.state.react_agent = global_react_agent

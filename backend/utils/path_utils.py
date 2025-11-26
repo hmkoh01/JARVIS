@@ -77,7 +77,7 @@ def get_data_dir() -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
-def get_db_path(db_filename: str = "meta.db") -> Path:
+def get_db_path(db_filename: str = "sqlite.db") -> Path:
     """
     데이터베이스 파일 경로 반환 (EXE 환경 호환)
     

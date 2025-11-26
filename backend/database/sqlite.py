@@ -1,9 +1,9 @@
 #sqlite.py
 """
-SQLite 데이터베이스 관리 모듈 (Refactored for Active Agent)
-- 불필요한 테이블 제거: web_history, apps, knowledge_entities, entity_relations, user_contexts
-- 테이블 이름 변경: collected_browser_history -> browser_logs, collected_apps -> app_logs
-- 새로운 스키마: recommendation_blacklist, 개선된 recommendations
+SQLite 데이터베이스 관리 모듈 (Refactored for Keyword-Centric Recommendation)
+- 불필요한 테이블 제거: app_logs
+- 간소화된 테이블: browser_logs (id, url, title, visit_time), files (doc_id, file_path, processed_at)
+- 새로운 핵심 테이블: content_keywords (KeyBERT 등 키워드 추출 결과 저장)
 """
 import sqlite3
 import os
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class SQLite:
-    """SQLite 데이터베이스 관리 클래스 (Active Agent 최적화)"""
+    """SQLite 데이터베이스 관리 클래스 (Keyword-Centric Architecture)"""
     
     def _sanitize_path(self, path: str) -> str:
         """경로에서 유효하지 않은 문자들을 '_'로 대체하여 안전하게 만듭니다."""
@@ -33,7 +33,7 @@ class SQLite:
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
             backend_dir = Path(__file__).resolve().parents[1]
-            db_path = backend_dir / "sqlite" / "meta.db"
+            db_path = backend_dir / "sqlite" / "sqlite.db"
         self.db_path = self._sanitize_path(str(db_path))
         self._ensure_db_dir()
         self._thread_local = threading.local()
@@ -112,54 +112,52 @@ class SQLite:
             """)
             
             # ============================================================
-            # 2. Data Logs (Optimized)
+            # 2. Data Logs (Simplified)
             # ============================================================
+            # browser_logs: 세션 분석용 최소 정보만 저장
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS browser_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
-                    visit_time DATETIME NOT NULL,
-                    title TEXT,
                     url TEXT,
-                    content_preview TEXT,
-                    is_processed_for_recommendation BOOLEAN DEFAULT 0,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS app_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    app_name TEXT,
-                    window_title TEXT,
-                    start_time DATETIME,
-                    duration_seconds INTEGER,
-                    is_processed_for_recommendation BOOLEAN DEFAULT 0,
+                    title TEXT,
+                    visit_time DATETIME NOT NULL,
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             """)
             
             # ============================================================
-            # 3. Files
+            # 3. Files (Simplified)
             # ============================================================
+            # files: 핵심 메타데이터만 저장 (키워드는 content_keywords에서 관리)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS files (
                     doc_id TEXT PRIMARY KEY,
                     user_id INTEGER NOT NULL,
                     file_path TEXT NOT NULL,
-                    file_name TEXT,
-                    file_type TEXT,
-                    file_size INTEGER,
-                    file_hash TEXT,
-                    indexed_in_qdrant BOOLEAN DEFAULT 0,
                     processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             """)
             
             # ============================================================
-            # 4. Recommendations (Active Agent Core)
+            # 4. Content Keywords (NEW - Core Table for Recommendations)
+            # ============================================================
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS content_keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    original_text TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                )
+            """)
+            
+            # ============================================================
+            # 5. Recommendations (Active Agent Core)
             # ============================================================
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS recommendation_blacklist (
@@ -195,10 +193,12 @@ class SQLite:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_user_interests_user_id ON user_interests(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_logs_user_id ON browser_logs(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_logs_visit_time ON browser_logs(visit_time)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_app_logs_user_id ON app_logs(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_app_logs_start_time ON app_logs(start_time)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_user_id_status ON recommendations(user_id, status)")
+            # content_keywords indexes
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_user_id ON content_keywords(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_created_at ON content_keywords(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_source ON content_keywords(source_type, source_id)")
             
             conn.commit()
 
@@ -442,27 +442,27 @@ class SQLite:
             return False
 
     # ============================================================
-    # Browser Logs Methods
+    # Browser Logs Methods (Simplified)
     # ============================================================
     
     def insert_browser_log(self, user_id: int, url: str, title: str = None, 
-                           visit_time: datetime = None, content_preview: str = None) -> bool:
-        """브라우저 로그 삽입"""
+                           visit_time: datetime = None) -> Optional[int]:
+        """브라우저 로그 삽입 (간소화: id, url, title, visit_time만 저장)"""
         try:
             if visit_time is None:
                 visit_time = datetime.now()
             
-            self.conn.execute("""
-                INSERT INTO browser_logs (user_id, visit_time, title, url, content_preview)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, visit_time, title, url, content_preview))
+            cursor = self.conn.execute("""
+                INSERT INTO browser_logs (user_id, url, title, visit_time)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, url, title, visit_time))
             self.conn.commit()
-            return True
+            return cursor.lastrowid
         except Exception as e:
             logger.error(f"브라우저 로그 삽입 오류: {e}")
             if self.conn:
                 self.conn.rollback()
-            return False
+            return None
     
     def get_browser_logs(self, user_id: int, limit: int = 100, 
                          since: datetime = None) -> List[Dict[str, Any]]:
@@ -486,37 +486,6 @@ class SQLite:
             logger.error(f"브라우저 로그 조회 오류: {e}")
             return []
     
-    def get_unprocessed_browser_logs(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-        """추천 처리되지 않은 브라우저 로그 조회"""
-        try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
-                SELECT * FROM browser_logs 
-                WHERE user_id = ? AND is_processed_for_recommendation = 0
-                ORDER BY visit_time DESC LIMIT ?
-            """, (user_id, limit))
-            return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"미처리 브라우저 로그 조회 오류: {e}")
-            return []
-    
-    def mark_browser_logs_processed(self, log_ids: List[int]) -> bool:
-        """브라우저 로그를 처리됨으로 표시"""
-        try:
-            if not log_ids:
-                return True
-            placeholders = ','.join(['?' for _ in log_ids])
-            self.conn.execute(f"""
-                UPDATE browser_logs 
-                SET is_processed_for_recommendation = 1 
-                WHERE id IN ({placeholders})
-            """, log_ids)
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"브라우저 로그 처리 표시 오류: {e}")
-            return False
-    
     def is_browser_log_duplicate(self, user_id: int, url: str, visit_time: datetime) -> bool:
         """브라우저 로그 중복 확인"""
         try:
@@ -531,101 +500,19 @@ class SQLite:
             return False
 
     # ============================================================
-    # App Logs Methods
+    # Files Methods (Simplified)
     # ============================================================
     
-    def insert_app_log(self, user_id: int, app_name: str, window_title: str = None,
-                       start_time: datetime = None, duration_seconds: int = 0) -> bool:
-        """앱 로그 삽입"""
-        try:
-            if start_time is None:
-                start_time = datetime.now()
-            
-            self.conn.execute("""
-                INSERT INTO app_logs (user_id, app_name, window_title, start_time, duration_seconds)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, app_name, window_title, start_time, duration_seconds))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"앱 로그 삽입 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
-            return False
-    
-    def get_app_logs(self, user_id: int, limit: int = 100, 
-                     since: datetime = None) -> List[Dict[str, Any]]:
-        """앱 로그 조회"""
-        try:
-            self.conn.row_factory = sqlite3.Row
-            if since:
-                cursor = self.conn.execute("""
-                    SELECT * FROM app_logs 
-                    WHERE user_id = ? AND start_time >= ?
-                    ORDER BY start_time DESC LIMIT ?
-                """, (user_id, since, limit))
-            else:
-                cursor = self.conn.execute("""
-                    SELECT * FROM app_logs 
-                    WHERE user_id = ?
-                    ORDER BY start_time DESC LIMIT ?
-                """, (user_id, limit))
-            return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"앱 로그 조회 오류: {e}")
-            return []
-    
-    def get_unprocessed_app_logs(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-        """추천 처리되지 않은 앱 로그 조회"""
-        try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
-                SELECT * FROM app_logs 
-                WHERE user_id = ? AND is_processed_for_recommendation = 0
-                ORDER BY start_time DESC LIMIT ?
-            """, (user_id, limit))
-            return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"미처리 앱 로그 조회 오류: {e}")
-            return []
-    
-    def mark_app_logs_processed(self, log_ids: List[int]) -> bool:
-        """앱 로그를 처리됨으로 표시"""
-        try:
-            if not log_ids:
-                return True
-            placeholders = ','.join(['?' for _ in log_ids])
-            self.conn.execute(f"""
-                UPDATE app_logs 
-                SET is_processed_for_recommendation = 1 
-                WHERE id IN ({placeholders})
-            """, log_ids)
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"앱 로그 처리 표시 오류: {e}")
-            return False
-
-    # ============================================================
-    # Files Methods
-    # ============================================================
-    
-    def upsert_file(self, doc_id: str, user_id: int, file_path: str, 
-                    file_name: str = None, file_type: str = None,
-                    file_size: int = None, file_hash: str = None) -> bool:
-        """파일 정보 업서트"""
+    def upsert_file(self, doc_id: str, user_id: int, file_path: str) -> bool:
+        """파일 정보 업서트 (간소화: doc_id, user_id, file_path, processed_at만 저장)"""
         try:
             self.conn.execute("""
-                INSERT INTO files (doc_id, user_id, file_path, file_name, file_type, file_size, file_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO files (doc_id, user_id, file_path, processed_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(doc_id) DO UPDATE SET
                     file_path = excluded.file_path,
-                    file_name = excluded.file_name,
-                    file_type = excluded.file_type,
-                    file_size = excluded.file_size,
-                    file_hash = excluded.file_hash,
                     processed_at = CURRENT_TIMESTAMP
-            """, (doc_id, user_id, file_path, file_name, file_type, file_size, file_hash))
+            """, (doc_id, user_id, file_path))
             self.conn.commit()
             return True
         except Exception as e:
@@ -657,33 +544,16 @@ class SQLite:
             logger.error(f"파일 경로 조회 오류: {e}")
             return None
     
-    def is_file_hash_exists(self, file_hash: str) -> bool:
-        """파일 해시가 이미 존재하고 Qdrant에 인덱싱된 경우에만 True 반환"""
+    def is_file_exists(self, doc_id: str) -> bool:
+        """파일이 이미 존재하는지 확인"""
         try:
             cursor = self.conn.execute(
-                "SELECT 1 FROM files WHERE file_hash = ? AND indexed_in_qdrant = 1 LIMIT 1",
-                (file_hash,)
+                "SELECT 1 FROM files WHERE doc_id = ? LIMIT 1",
+                (doc_id,)
             )
             return cursor.fetchone() is not None
         except Exception as e:
-            logger.error(f"파일 해시 중복 체크 오류: {e}")
-            return False
-    
-    def mark_files_indexed(self, file_hashes: List[str]) -> bool:
-        """파일 해시 목록에 대해 Qdrant 인덱싱 완료 표시"""
-        try:
-            if not file_hashes:
-                return True
-            placeholders = ','.join(['?' for _ in file_hashes])
-            self.conn.execute(f"""
-                UPDATE files SET indexed_in_qdrant = 1 WHERE file_hash IN ({placeholders})
-            """, file_hashes)
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"파일 인덱싱 표시 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            logger.error(f"파일 존재 확인 오류: {e}")
             return False
     
     def get_file_last_modified(self, file_path: str) -> Optional[datetime]:
@@ -700,6 +570,181 @@ class SQLite:
         except Exception as e:
             logger.error(f"파일 수정 시간 조회 오류: {e}")
             return None
+    
+    def get_user_files(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+        """사용자 파일 목록 조회"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM files 
+                WHERE user_id = ? 
+                ORDER BY processed_at DESC 
+                LIMIT ?
+            """, (user_id, limit))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"파일 조회 오류: {e}")
+            return []
+
+    # ============================================================
+    # Content Keywords Methods (NEW - Core for Recommendations)
+    # ============================================================
+    
+    def insert_content_keyword(self, user_id: int, source_type: str, source_id: str,
+                                keyword: str, original_text: str = None) -> Optional[int]:
+        """콘텐츠 키워드 삽입
+        
+        Args:
+            user_id: 사용자 ID
+            source_type: 'file', 'web', 'chat' 중 하나
+            source_id: files.doc_id, browser_logs.id, 또는 chat_session_id
+            keyword: 추출된 핵심 키워드
+            original_text: 문맥 파악을 위한 짧은 원문 조각 (선택)
+        
+        Returns:
+            삽입된 키워드의 ID, 실패 시 None
+        """
+        try:
+            cursor = self.conn.execute("""
+                INSERT INTO content_keywords (user_id, source_type, source_id, keyword, original_text)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, source_type, source_id, keyword, original_text))
+            self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"콘텐츠 키워드 삽입 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return None
+    
+    def insert_content_keywords_batch(self, keywords: List[Dict[str, Any]]) -> int:
+        """콘텐츠 키워드 일괄 삽입
+        
+        Args:
+            keywords: 키워드 딕셔너리 리스트
+                각 항목: {'user_id', 'source_type', 'source_id', 'keyword', 'original_text'(선택)}
+        
+        Returns:
+            삽입된 키워드 수
+        """
+        if not keywords:
+            return 0
+        
+        try:
+            inserted = 0
+            self.conn.execute("BEGIN TRANSACTION")
+            for kw in keywords:
+                self.conn.execute("""
+                    INSERT INTO content_keywords (user_id, source_type, source_id, keyword, original_text)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    kw['user_id'],
+                    kw['source_type'],
+                    kw['source_id'],
+                    kw['keyword'],
+                    kw.get('original_text')
+                ))
+                inserted += 1
+            self.conn.commit()
+            return inserted
+        except Exception as e:
+            logger.error(f"콘텐츠 키워드 일괄 삽입 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return 0
+    
+    def get_content_keywords(self, user_id: int, source_type: str = None,
+                              limit: int = 100, since: datetime = None) -> List[Dict[str, Any]]:
+        """콘텐츠 키워드 조회
+        
+        Args:
+            user_id: 사용자 ID
+            source_type: 필터링할 소스 타입 ('file', 'web', 'chat'), None이면 전체
+            limit: 최대 반환 개수
+            since: 이 시간 이후의 키워드만 조회
+        
+        Returns:
+            키워드 딕셔너리 리스트
+        """
+        try:
+            self.conn.row_factory = sqlite3.Row
+            query = "SELECT * FROM content_keywords WHERE user_id = ?"
+            params = [user_id]
+            
+            if source_type:
+                query += " AND source_type = ?"
+                params.append(source_type)
+            
+            if since:
+                query += " AND created_at >= ?"
+                params.append(since)
+            
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor = self.conn.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"콘텐츠 키워드 조회 오류: {e}")
+            return []
+    
+    def get_keywords_by_source(self, source_type: str, source_id: str) -> List[Dict[str, Any]]:
+        """특정 소스의 키워드 조회"""
+        try:
+            self.conn.row_factory = sqlite3.Row
+            cursor = self.conn.execute("""
+                SELECT * FROM content_keywords 
+                WHERE source_type = ? AND source_id = ?
+                ORDER BY created_at DESC
+            """, (source_type, source_id))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"소스별 키워드 조회 오류: {e}")
+            return []
+    
+    def get_keyword_frequency(self, user_id: int, limit: int = 50,
+                               since: datetime = None) -> List[Dict[str, Any]]:
+        """키워드 빈도 분석 (추천 시스템용)
+        
+        Returns:
+            [{'keyword': str, 'count': int, 'sources': int}, ...]
+        """
+        try:
+            query = """
+                SELECT keyword, COUNT(*) as count, COUNT(DISTINCT source_id) as sources
+                FROM content_keywords 
+                WHERE user_id = ?
+            """
+            params = [user_id]
+            
+            if since:
+                query += " AND created_at >= ?"
+                params.append(since)
+            
+            query += " GROUP BY keyword ORDER BY count DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor = self.conn.execute(query, params)
+            return [{'keyword': row[0], 'count': row[1], 'sources': row[2]} 
+                    for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"키워드 빈도 분석 오류: {e}")
+            return []
+    
+    def delete_keywords_by_source(self, source_type: str, source_id: str) -> bool:
+        """특정 소스의 키워드 삭제 (재처리 시 사용)"""
+        try:
+            self.conn.execute(
+                "DELETE FROM content_keywords WHERE source_type = ? AND source_id = ?",
+                (source_type, source_id)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"키워드 삭제 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
 
     # ============================================================
     # Recommendation Blacklist Methods
@@ -909,16 +954,16 @@ class SQLite:
                 )
                 stats['browser_logs'] = cursor.fetchone()[0]
                 cursor = self.conn.execute(
-                    "SELECT COUNT(*) FROM app_logs WHERE user_id = ?", (user_id,)
+                    "SELECT COUNT(*) FROM content_keywords WHERE user_id = ?", (user_id,)
                 )
-                stats['app_logs'] = cursor.fetchone()[0]
+                stats['content_keywords'] = cursor.fetchone()[0]
             else:
                 cursor = self.conn.execute("SELECT COUNT(*) FROM files")
                 stats['files'] = cursor.fetchone()[0]
                 cursor = self.conn.execute("SELECT COUNT(*) FROM browser_logs")
                 stats['browser_logs'] = cursor.fetchone()[0]
-                cursor = self.conn.execute("SELECT COUNT(*) FROM app_logs")
-                stats['app_logs'] = cursor.fetchone()[0]
+                cursor = self.conn.execute("SELECT COUNT(*) FROM content_keywords")
+                stats['content_keywords'] = cursor.fetchone()[0]
             return stats
         except Exception as e:
             logger.error(f"수집 통계 조회 오류: {e}")
@@ -933,7 +978,7 @@ class SQLite:
         try:
             tables = [
                 'recommendations', 'recommendation_blacklist', 
-                'browser_logs', 'app_logs', 'files',
+                'browser_logs', 'files', 'content_keywords',
                 'user_interests', 'user_survey_responses'
             ]
             for table in tables:
@@ -948,8 +993,7 @@ class SQLite:
                 self.conn.rollback()
             return False
 
-
-# ============================================================
+    # ============================================================
     # Legacy Compatibility Methods (for data_collector.py)
     # ============================================================
     
@@ -968,40 +1012,27 @@ class SQLite:
             return None
     
     def insert_collected_file(self, file_info: Dict[str, Any]) -> bool:
-        """수집된 파일 정보 저장 (Legacy 호환)"""
+        """수집된 파일 정보 저장 (Legacy 호환 - 간소화)"""
         try:
-            doc_id = f"file_{file_info.get('file_hash', '')[:16]}"
+            import hashlib
+            file_path = file_info['file_path']
+            doc_id = f"file_{hashlib.md5(file_path.encode()).hexdigest()}"
             return self.upsert_file(
                 doc_id=doc_id,
                 user_id=file_info['user_id'],
-                file_path=file_info['file_path'],
-                file_name=file_info.get('file_name'),
-                file_type=file_info.get('file_type'),
-                file_size=file_info.get('file_size'),
-                file_hash=file_info.get('file_hash')
+                file_path=file_path
             )
         except Exception as e:
             logger.error(f"수집된 파일 저장 오류: {e}")
             return False
     
-    def insert_collected_browser_history(self, history_info: Dict[str, Any]) -> bool:
-        """수집된 브라우저 히스토리 저장 (Legacy 호환)"""
+    def insert_collected_browser_history(self, history_info: Dict[str, Any]) -> Optional[int]:
+        """수집된 브라우저 히스토리 저장 (Legacy 호환 - 간소화)"""
         return self.insert_browser_log(
             user_id=history_info['user_id'],
             url=history_info.get('url', ''),
             title=history_info.get('title'),
-            visit_time=history_info.get('visit_time'),
-            content_preview=history_info.get('content_preview')
-        )
-    
-    def insert_collected_app(self, app_info: Dict[str, Any]) -> bool:
-        """수집된 앱 정보 저장 (Legacy 호환)"""
-        return self.insert_app_log(
-            user_id=app_info['user_id'],
-            app_name=app_info.get('app_name'),
-            window_title=app_info.get('window_title'),
-            start_time=app_info.get('start_time'),
-            duration_seconds=app_info.get('duration', 0)
+            visit_time=history_info.get('visit_time')
         )
     
     def get_user_survey_response(self, user_id: int) -> Optional[Dict[str, Any]]:
@@ -1041,19 +1072,8 @@ class SQLite:
         return self.get_recent_recommendation_count(user_id, trigger_type='manual', hours=hours)
     
     def get_collected_files(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-        """사용자 파일 목록 조회 (Legacy 호환 - files 테이블 사용)"""
-        try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
-                SELECT * FROM files 
-                WHERE user_id = ? 
-                ORDER BY processed_at DESC 
-                LIMIT ?
-            """, (user_id, limit))
-            return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"파일 조회 오류: {e}")
-            return []
+        """사용자 파일 목록 조회 (Legacy 호환)"""
+        return self.get_user_files(user_id, limit)
     
     def get_collected_files_since(self, user_id: int, since: datetime) -> List[Dict[str, Any]]:
         """특정 시간 이후의 사용자 파일 목록 조회 (Legacy 호환)"""
@@ -1070,18 +1090,13 @@ class SQLite:
             return []
     
     def get_collected_browser_history(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-        """사용자 브라우저 히스토리 조회 (Legacy 호환 - browser_logs 테이블 사용)"""
+        """사용자 브라우저 히스토리 조회 (Legacy 호환)"""
         return self.get_browser_logs(user_id, limit)
     
     def get_collected_browser_history_since(self, user_id: int, since: datetime) -> List[Dict[str, Any]]:
         """특정 시간 이후의 브라우저 히스토리 조회 (Legacy 호환)"""
         return self.get_browser_logs(user_id, since=since)
-    
-    def get_collected_apps(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-        """사용자 앱 로그 조회 (Legacy 호환 - app_logs 테이블 사용)"""
-        return self.get_app_logs(user_id, limit)
 
 
 # Backward compatibility alias
 SQLiteMeta = SQLite
-

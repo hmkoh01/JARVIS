@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Data Collector Module (Refactored for Active Agent)
-- 파일, 브라우저 히스토리, 앱 사용 데이터 수집
-- 새 스키마(browser_logs, app_logs, files)에 맞게 최적화
+Data Collector Module (Keyword-Centric Architecture)
+- 파일, 브라우저 히스토리 데이터 수집
+- KeyBERT 기반 키워드 추출 및 content_keywords 테이블 저장
+- 간소화된 스키마에 맞게 최적화
 """
 import os
 import sys
@@ -11,9 +12,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 import shutil
 import time
-import json
 import sqlite3
-import psutil
 import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
@@ -22,8 +21,6 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import asyncio
 import hashlib
-from PIL import ImageGrab
-import platform
 
 # 현재 스크립트의 상위 디렉토리(backend)를 Python 경로에 추가
 backend_dir = Path(__file__).parent.parent.absolute()
@@ -40,6 +37,26 @@ if TYPE_CHECKING:
     from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
 
 logger = logging.getLogger(__name__)
+
+# KeywordExtractor 싱글톤 (Lazy Loading)
+_keyword_extractor = None
+_keyword_extractor_lock = threading.Lock()
+
+def get_keyword_extractor():
+    """KeywordExtractor 싱글톤 인스턴스를 반환합니다."""
+    global _keyword_extractor
+    if _keyword_extractor is None:
+        with _keyword_extractor_lock:
+            if _keyword_extractor is None:
+                try:
+                    from utils.keyword_extractor import KeywordExtractor
+                    _keyword_extractor = KeywordExtractor.get_instance()
+                    logger.info("✅ KeywordExtractor 싱글톤 초기화 완료")
+                except Exception as e:
+                    logger.warning(f"⚠️ KeywordExtractor 초기화 실패: {e}")
+                    return None
+    return _keyword_extractor
+
 
 def init_worker_logging():
     """
@@ -59,6 +76,43 @@ def init_worker_logging():
     
     for logger_name in ['backend.config.logging_config', '__main__']:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+def extract_keywords_from_text(text: str, top_n: int = 10) -> List[Tuple[str, float]]:
+    """
+    텍스트에서 키워드를 추출합니다.
+    
+    Args:
+        text: 키워드를 추출할 텍스트
+        top_n: 추출할 키워드 개수
+    
+    Returns:
+        [(keyword, score), ...] 리스트
+    """
+    extractor = get_keyword_extractor()
+    if extractor is None:
+        return []
+    
+    try:
+        return extractor.extract(text, top_n=top_n)
+    except Exception as e:
+        logger.debug(f"키워드 추출 오류: {e}")
+        return []
+
+
+def create_snippet(text: str, max_length: int = 200) -> str:
+    """텍스트에서 스니펫을 생성합니다."""
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= max_length:
+        return text
+    truncated = text[:max_length]
+    last_space = truncated.rfind(' ')
+    if last_space > max_length * 0.7:
+        truncated = truncated[:last_space]
+    return truncated.rstrip() + "..."
+
 
 # -----------------------------------------------------------------------------
 # FileCollector
@@ -119,17 +173,18 @@ class FileCollector:
         skip_patterns = ['Windows', 'Program Files', '$Recycle.Bin', '.git', 'node_modules', '__pycache__', 'AppData']
         return any(part in Path(dir_path).parts for part in skip_patterns)
 
-    def calculate_file_hash(self, file_path: str) -> str:
-        try:
-            hash_md5 = hashlib.md5()
-            with open(file_path, "rb") as f:
-                hash_md5.update(f.read(1024 * 1024))
-            return hash_md5.hexdigest()
-        except: return f"error_{int(time.time())}"
+    def _generate_doc_id(self, file_path: str) -> str:
+        """파일 경로 기반 doc_id 생성"""
+        return f"file_{hashlib.md5(file_path.encode()).hexdigest()}"
 
     def is_file_modified(self, file_path: str, last_modified: datetime) -> bool:
         stored_modified = self.sqlite.get_file_last_modified(file_path)
         return stored_modified is None or last_modified > stored_modified
+
+    def is_file_already_indexed(self, file_path: str) -> bool:
+        """파일이 이미 인덱싱되었는지 확인"""
+        doc_id = self._generate_doc_id(file_path)
+        return self.sqlite.is_file_exists(doc_id)
 
     def get_user_folders(self, calculate_size: bool = True) -> List[Dict[str, Any]]:
         """사용자 홈 디렉토리의 모든 폴더를 스캔하고 크기를 계산하여 반환합니다."""
@@ -186,7 +241,7 @@ class FileCollector:
         collected_files = []
         total_scanned = 0
         skipped_by_extension = 0
-        skipped_by_hash = 0
+        skipped_by_duplicate = 0
         
         progress_start, progress_end = progress_bounds
         progress_range = max(progress_end - progress_start, 0.0)
@@ -221,24 +276,20 @@ class FileCollector:
                             
                             stat = os.stat(file_path)
                             modified_date = datetime.fromtimestamp(stat.st_mtime)
-                            if incremental and not self.is_file_modified(file_path, modified_date): continue
-                            file_hash = self.calculate_file_hash(file_path)
                             
-                            if self.sqlite.is_file_hash_exists(file_hash):
-                                skipped_by_hash += 1
+                            if incremental and not self.is_file_modified(file_path, modified_date):
+                                continue
+                            
+                            # 이미 인덱싱된 파일은 스킵
+                            if self.is_file_already_indexed(file_path):
+                                skipped_by_duplicate += 1
                                 continue
                             
                             collected_files.append({
                                 'user_id': self.user_id,
                                 'file_path': file_path,
-                                'file_name': file,
-                                'file_size': stat.st_size,
-                                'file_type': file_ext,
                                 'file_category': self.get_file_category(file_path),
-                                'file_hash': file_hash,
                                 'modified_date': modified_date,
-                                'created_date': datetime.fromtimestamp(stat.st_ctime),
-                                'accessed_date': datetime.fromtimestamp(stat.st_atime)
                             })
                         except (PermissionError, OSError, FileNotFoundError): continue
             except Exception as e: 
@@ -251,7 +302,7 @@ class FileCollector:
                 manager.progress = progress_start
         
         self.logger.info("📊 파일 수집 결과 - 총 스캔: %d, 확장자 제외: %d, 중복 제외: %d, 신규 파일: %d",
-                         total_scanned, skipped_by_extension, skipped_by_hash, len(collected_files))
+                         total_scanned, skipped_by_extension, skipped_by_duplicate, len(collected_files))
         
         if len(collected_files) == 0 and total_scanned > 0:
             self.logger.warning("⚠️ 지원되는 확장자 목록: %s", ', '.join(sorted(self.allowed_extensions)))
@@ -312,17 +363,18 @@ class FileCollector:
             try:
                 chunk_infos = parser.parse_and_chunk(file_info['file_path'])
             except RuntimeError as e:
-                return None, file_info['file_name'], f"Docling RuntimeError: {e}"
+                return None, file_info.get('file_name', Path(file_info['file_path']).name), f"Docling RuntimeError: {e}"
             except Exception as e:
-                return None, file_info['file_name'], f"Parsing Exception: {e}"
+                return None, file_info.get('file_name', Path(file_info['file_path']).name), f"Parsing Exception: {e}"
             if not chunk_infos:
-                return None, file_info['file_name'], "청크 없음"
+                return None, file_info.get('file_name', Path(file_info['file_path']).name), "청크 없음"
 
             doc_id = f"file_{hashlib.md5(file_info['file_path'].encode()).hexdigest()}"
-            file_hash = file_info.get('file_hash', '')
 
             texts = []
             metas = []
+            full_text_for_keywords = []  # 키워드 추출용 전체 텍스트
+            
             for chunk in chunk_infos:
                 texts.append(chunk['text'])
                 metas.append({
@@ -334,10 +386,56 @@ class FileCollector:
                     'snippet': chunk['snippet'],
                     'content': chunk['text']
                 })
+                full_text_for_keywords.append(chunk['text'])
 
-            return (texts, metas, file_hash, file_info['file_path'], len(chunk_infos)), file_info['file_name'], None
+            file_name = Path(file_info['file_path']).name
+            # 전체 텍스트를 결합하여 반환 (키워드 추출용)
+            combined_text = '\n'.join(full_text_for_keywords)
+            
+            return (texts, metas, file_info['file_path'], len(chunk_infos), doc_id, combined_text), file_name, None
         except BaseException as e:
-            return None, file_info['file_name'], f"Worker setup error: {e}"
+            return None, file_info.get('file_name', 'unknown'), f"Worker setup error: {e}"
+
+    def _extract_and_save_file_keywords(
+        self, 
+        doc_id: str, 
+        combined_text: str,
+        file_path: str
+    ):
+        """파일에서 키워드를 추출하고 content_keywords 테이블에 저장합니다."""
+        if not combined_text or len(combined_text.strip()) < 50:
+            return
+        
+        try:
+            # 키워드 추출 (top 10)
+            keywords = extract_keywords_from_text(combined_text, top_n=10)
+            
+            if not keywords:
+                self.logger.debug(f"키워드 추출 결과 없음: {file_path}")
+                return
+            
+            # 스니펫 생성
+            snippet = create_snippet(combined_text, max_length=200)
+            
+            # content_keywords 테이블에 저장할 데이터 준비
+            keyword_entries = []
+            for keyword, score in keywords:
+                keyword_entries.append({
+                    'user_id': self.user_id,
+                    'source_type': 'file',
+                    'source_id': doc_id,
+                    'keyword': keyword,
+                    'original_text': snippet
+                })
+            
+            # 일괄 삽입
+            if keyword_entries:
+                inserted = self.sqlite.insert_content_keywords_batch(keyword_entries)
+                if inserted > 0:
+                    self.logger.debug(f"🔑 파일 키워드 저장: {Path(file_path).name} - {inserted}개")
+                    
+        except Exception as e:
+            self.logger.warning(f"파일 키워드 추출/저장 오류 ({file_path}): {e}")
 
     def _process_and_upload_batch(
         self,
@@ -422,12 +520,14 @@ class FileCollector:
         total_chunk_count = 0
         parsed_count = 0
         failed_count = 0
-        file_hash_map: Dict[str, str] = {}
+        
+        # 키워드 추출용 데이터 수집
+        files_for_keywords: List[Tuple[str, str, str]] = []  # (doc_id, combined_text, file_path)
 
         max_workers = min(cpu_count, 8) if cpu_count > 0 else 1
         parser_ref = parser.__class__ if parser is not None else DocumentParser
 
-        self.logger.info("--- [1/2] 파일 파싱 시작 (병렬 처리) ---")
+        self.logger.info("--- [1/3] 파일 파싱 시작 (병렬 처리) ---")
         with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker_logging) as executor:
             futures = {
                 executor.submit(self._parse_single_file, file_info, parser_ref, self.user_id): file_info
@@ -442,15 +542,18 @@ class FileCollector:
                 completed_files += 1
                 
                 if result:
-                    texts, metas, file_hash, file_path, chunk_count = result
+                    texts, metas, file_path, chunk_count, doc_id, combined_text = result
 
                     all_texts.extend(texts)
                     all_metas.extend(metas)
 
                     total_chunk_count += len(texts)
-                    if file_hash:
-                        file_hash_map[file_path] = file_hash
                     parsed_count += 1
+                    
+                    # 키워드 추출용 데이터 저장
+                    if combined_text:
+                        files_for_keywords.append((doc_id, combined_text, file_path))
+                    
                     self.logger.info("   ✓ %s: %d개 청크 (파싱 완료)", file_name, chunk_count)
                 else:
                     failed_count += 1
@@ -470,7 +573,22 @@ class FileCollector:
             self.logger.warning("⚠️ 인덱싱할 텍스트 청크가 없습니다.")
             return
 
-        self.logger.info("--- [2/2] 임베딩 및 업로드 시작 (모드: %s) ---", "GPU" if is_gpu_available else "CPU")
+        # --- [2/3] 키워드 추출 및 저장 ---
+        self.logger.info("--- [2/3] 키워드 추출 및 저장 시작 ---")
+        if manager:
+            manager.progress_message = f"🔑 키워드 추출 중... (총 {len(files_for_keywords)}개 파일)"
+        
+        keyword_count = 0
+        for doc_id, combined_text, file_path in files_for_keywords:
+            self._extract_and_save_file_keywords(doc_id, combined_text, file_path)
+            keyword_count += 1
+            if manager and keyword_count % 10 == 0:
+                manager.progress_message = f"🔑 키워드 추출 중... ({keyword_count}/{len(files_for_keywords)})"
+        
+        self.logger.info("✅ 파일 키워드 추출 완료: %d개 파일", keyword_count)
+
+        # --- [3/3] 임베딩 및 업로드 ---
+        self.logger.info("--- [3/3] 임베딩 및 업로드 시작 (모드: %s) ---", "GPU" if is_gpu_available else "CPU")
         
         if manager:
             manager.progress_message = f"🧠 임베딩 생성 중... (총 {len(all_texts)}개 청크)"
@@ -510,17 +628,18 @@ class FileCollector:
                         embedding_batch_size
                     )
 
-        # SQLite 상태 업데이트
-        if file_hash_map:
-            indexed_hashes = list(file_hash_map.values())
-            if self.sqlite.mark_files_indexed(indexed_hashes):
-                self.logger.info("✅ %d개 파일 인덱싱 완료 표시", len(indexed_hashes))
-            else:
-                self.logger.warning("⚠️ 파일 인덱싱 표시 실패 (검색은 정상 작동)")
+        self.logger.info("✅ 파일 인덱싱 완료: %d개 파일", parsed_count)
+
 
 # -----------------------------------------------------------------------------
 # BrowserHistoryCollector
 # -----------------------------------------------------------------------------
+
+# 동시 요청 제한 (Rate Limiting) - DoS 오해 및 IP 차단 방지
+MAX_CONCURRENT_REQUESTS = 10
+REQUEST_DELAY_SECONDS = 0.1  # 요청 간 최소 딜레이
+
+
 class BrowserHistoryCollector:
     def __init__(self, user_id: int):
         self.user_id = user_id
@@ -528,9 +647,12 @@ class BrowserHistoryCollector:
         self.sqlite = SQLite()
         self.browser_paths = self._get_browser_paths()
         self.parser = DocumentParser()
+        # 세마포어: 동시에 MAX_CONCURRENT_REQUESTS개까지만 요청 허용
+        self._semaphore: Optional[asyncio.Semaphore] = None
 
     def _get_browser_paths(self) -> Dict[str, str]:
         """현재 운영체제에 맞는 브라우저 히스토리 DB 경로를 반환합니다."""
+        import platform
         system = platform.system()
         if system == 'Windows':
             return {
@@ -544,28 +666,217 @@ class BrowserHistoryCollector:
             }
         return {}
 
-    async def _crawl_and_extract_text(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
-        if not url.startswith(('http://', 'https://')): return None
+    def _fetch_web_content(self, url: str) -> Optional[str]:
+        """URL에서 메인 콘텐츠 텍스트를 추출합니다."""
         try:
-            async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'lxml')
-                    for s in soup(['script', 'style', 'nav', 'footer', 'aside']): s.decompose()
-                    return soup.get_text(separator='\n', strip=True)
-        except: return None
+            from utils.web_crawler import fetch_web_content
+            return fetch_web_content(url, timeout=3)
+        except ImportError:
+            self.logger.warning("web_crawler 모듈을 찾을 수 없습니다.")
+            return None
+        except Exception as e:
+            self.logger.debug(f"웹 콘텐츠 추출 실패 ({url}): {e}")
+            return None
+
+    def _extract_and_save_web_keywords(
+        self,
+        log_id: int,
+        url: str,
+        title: str,
+        content: str
+    ):
+        """웹 페이지에서 키워드를 추출하고 저장합니다."""
+        if not content or len(content.strip()) < 50:
+            return
+        
+        try:
+            # 키워드 추출 (top 10)
+            keywords = extract_keywords_from_text(content, top_n=10)
+            
+            if not keywords:
+                return
+            
+            # 스니펫 생성
+            snippet = create_snippet(content, max_length=200)
+            
+            # content_keywords 테이블에 저장할 데이터 준비
+            keyword_entries = []
+            for keyword, score in keywords:
+                keyword_entries.append({
+                    'user_id': self.user_id,
+                    'source_type': 'web',
+                    'source_id': str(log_id),
+                    'keyword': keyword,
+                    'original_text': snippet
+                })
+            
+            # 일괄 삽입
+            if keyword_entries:
+                inserted = self.sqlite.insert_content_keywords_batch(keyword_entries)
+                if inserted > 0:
+                    self.logger.debug(f"🔑 웹 키워드 저장: {title[:30]}... - {inserted}개")
+                    
+        except Exception as e:
+            self.logger.warning(f"웹 키워드 추출/저장 오류 ({url}): {e}")
+
+    async def _crawl_with_rate_limit(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
+        """
+        세마포어를 사용하여 동시 요청 수를 제한하면서 URL을 크롤링합니다.
+        DoS 공격으로 오해받거나 Rate Limit에 걸리는 것을 방지합니다.
+        """
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        
+        async with self._semaphore:
+            # 요청 간 최소 딜레이 (서버 부하 방지)
+            await asyncio.sleep(REQUEST_DELAY_SECONDS)
+            return await self._crawl_and_extract_text(session, url)
+    
+    async def _crawl_and_extract_text(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
+        """
+        비동기로 URL에서 텍스트를 추출합니다.
+        
+        SPA 사이트 및 동적 콘텐츠는 내용이 비어있거나 짧을 수 있으므로
+        100자 미만의 콘텐츠는 건너뜁니다.
+        """
+        if not url.startswith(('http://', 'https://')): 
+            return None
+        
+        url_lower = url.lower()
+        
+        # 스킵할 URL 패턴 (SPA, 소셜미디어, 인증 페이지 등)
+        skip_patterns = [
+            # 소셜미디어 (대부분 SPA)
+            'youtube.com', 'youtu.be', 'facebook.com', 'instagram.com', 
+            'twitter.com', 'x.com', 'tiktok.com', 'linkedin.com/feed',
+            'reddit.com', 'discord.com', 'slack.com', 'telegram.org',
+            # 검색 엔진
+            'google.com/search', 'bing.com/search', 'naver.com/search',
+            'duckduckgo.com', 'yahoo.com/search',
+            # 인증/로그인 페이지
+            'login', 'signin', 'signup', 'auth', 'oauth', 'sso',
+            # 파일 다운로드/스트리밍
+            '.pdf', '.doc', '.zip', '.mp4', '.mp3', '.avi',
+            'drive.google.com', 'dropbox.com', 'onedrive.live',
+            # 이메일
+            'mail.google.com', 'outlook.live', 'mail.naver',
+            # 기타 SPA 앱
+            'notion.so', 'figma.com', 'canva.com', 'trello.com',
+            'github.com/settings', 'gitlab.com/-/profile',
+        ]
+        if any(pattern in url_lower for pattern in skip_patterns):
+            return None
+        
+        # 파일 확장자 체크 (HTML이 아닌 리소스 스킵)
+        skip_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', 
+                          '.css', '.js', '.json', '.xml', '.rss', '.ico']
+        if any(url_lower.endswith(ext) for ext in skip_extensions):
+            return None
+        
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5), headers=headers) as response:
+                if response.status != 200:
+                    return None
+                
+                # Content-Type 확인 (HTML만 처리)
+                content_type = response.headers.get('Content-Type', '')
+                if 'text/html' not in content_type and 'application/xhtml' not in content_type:
+                    return None
+                
+                html = await response.text()
+                
+                # HTML이 너무 짧으면 SPA일 가능성 높음
+                if len(html) < 500:
+                    return None
+                
+                # trafilatura 사용 시도 (더 정확한 본문 추출)
+                try:
+                    import trafilatura
+                    extracted = trafilatura.extract(
+                        html, 
+                        include_comments=False, 
+                        include_tables=False,
+                        include_links=False,
+                        include_images=False,
+                        favor_recall=False  # 정확도 우선
+                    )
+                    if extracted and len(extracted.strip()) >= 100:  # 100자 이상만 유효
+                        return extracted
+                except ImportError:
+                    pass
+                
+                # BeautifulSoup 폴백
+                soup = BeautifulSoup(html, 'lxml')
+                
+                # 불필요한 태그 제거
+                for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 
+                                'header', 'noscript', 'iframe', 'form', 'button']): 
+                    tag.decompose()
+                
+                # 본문 추출 시도 (article, main, content 등 우선)
+                main_content = None
+                for selector in ['article', 'main', '[role="main"]', '.content', '#content', '.post', '.article']:
+                    main_content = soup.select_one(selector)
+                    if main_content:
+                        break
+                
+                if main_content:
+                    text = main_content.get_text(separator='\n', strip=True)
+                else:
+                    text = soup.get_text(separator='\n', strip=True)
+                
+                # 최소 100자 이상인 경우만 반환 (SPA 쓰레기 데이터 방지)
+                if len(text.strip()) >= 100:
+                    return text
+                    
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            pass
+        return None
 
     def _batch_index_web_pages(self, history_data: List[Dict[str, Any]], repo: Repository, embedder: 'BGEM3Embedder'):
+        """
+        웹 페이지를 일괄로 크롤링하고 인덱싱합니다.
+        
+        세마포어를 사용하여 동시 요청 수를 제한합니다 (Rate Limiting).
+        """
         async def main():
             all_texts, all_metas = [], []
-            connector = aiohttp.TCPConnector(limit=20)
+            crawled_items = []  # 키워드 추출용
+            
+            # 세마포어 초기화
+            self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+            
+            # TCP 연결 수도 제한
+            connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
             async with aiohttp.ClientSession(connector=connector) as session:
-                tasks = [self._crawl_and_extract_text(session, item['url']) for item in history_data]
-                crawled_contents = await asyncio.gather(*tasks)
-                self.logger.info("📄 총 %d개 URL 중 %d개 크롤링 성공",
-                                 len(history_data), len([c for c in crawled_contents if c]))
+                # 세마포어로 동시 요청 수 제한
+                tasks = [self._crawl_with_rate_limit(session, item['url']) for item in history_data]
+                crawled_contents = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # 예외 처리: 실패한 요청은 None으로 대체
+                crawled_contents = [
+                    None if isinstance(c, Exception) else c 
+                    for c in crawled_contents
+                ]
+                
+                success_count = len([c for c in crawled_contents if c])
+                self.logger.info("📄 총 %d개 URL 중 %d개 크롤링 성공", len(history_data), success_count)
+                
                 for item, content in zip(history_data, crawled_contents):
-                    if not content: continue
+                    if not content: 
+                        continue
+                    
+                    # 키워드 추출용 데이터 저장
+                    crawled_items.append({
+                        'item': item,
+                        'content': content
+                    })
+                    
                     chunks = self.parser.chunk_text(content)
                     doc_id = f"web_{hashlib.md5(item['url'].encode()).hexdigest()}"
                     for i, chunk in enumerate(chunks):
@@ -581,14 +892,34 @@ class BrowserHistoryCollector:
                             'snippet': chunk[:200],
                             'content': chunk
                         })
+            
+            # 키워드 추출 및 저장
+            if crawled_items:
+                self.logger.info("🔑 웹 페이지 키워드 추출 중... (%d개)", len(crawled_items))
+                for crawled in crawled_items:
+                    item = crawled['item']
+                    content = crawled['content']
+                    log_id = item.get('log_id', 0)
+                    if log_id:
+                        self._extract_and_save_web_keywords(
+                            log_id=log_id,
+                            url=item['url'],
+                            title=item.get('title', ''),
+                            content=content
+                        )
+                self.logger.info("✅ 웹 키워드 추출 완료")
+            
+            # Qdrant 인덱싱
             if all_texts:
                 self.logger.info("🧠 BGE-M3로 %d개 웹 청크 임베딩 생성...", len(all_texts))
                 embeddings = embedder.encode_documents(all_texts, batch_size=64)
-                dense_vectors, sparse_vectors = embeddings['dense_vecs'].tolist(), [embedder.convert_sparse_to_qdrant_format(lw) for lw in embeddings['lexical_weights']]
+                dense_vectors = embeddings['dense_vecs'].tolist()
+                sparse_vectors = [embedder.convert_sparse_to_qdrant_format(lw) for lw in embeddings['lexical_weights']]
                 if repo.qdrant.upsert_vectors(all_metas, dense_vectors, sparse_vectors):
                     self.logger.info("✅ Qdrant에 웹 청크 %d개 인덱싱 완료", len(dense_vectors))
                 else:
                     self.logger.error("❌ Qdrant 웹 청크 인덱싱 실패")
+        
         asyncio.run(main())
 
     def _get_browser_history(self, browser_name: str, incremental: bool) -> List[Dict[str, Any]]:
@@ -605,7 +936,13 @@ class BrowserHistoryCollector:
             for row in conn.cursor().execute(query, params).fetchall():
                 visit_time = datetime(1601, 1, 1) + timedelta(microseconds=row[2])
                 if not self.sqlite.is_browser_log_duplicate(self.user_id, row[0], visit_time):
-                    history_data.append({'user_id': self.user_id, 'browser_name': browser_name, 'url': row[0], 'title': row[1], 'visit_time': visit_time})
+                    history_data.append({
+                        'user_id': self.user_id, 
+                        'browser_name': browser_name, 
+                        'url': row[0], 
+                        'title': row[1], 
+                        'visit_time': visit_time
+                    })
             conn.close()
         except Exception as e:
             self.logger.error("%s 히스토리 수집 오류: %s", browser_name, e, exc_info=True)
@@ -617,60 +954,45 @@ class BrowserHistoryCollector:
         return self._get_browser_history('Chrome', incremental) + self._get_browser_history('Edge', incremental)
 
     def save_browser_history_to_db(self, history_data: List[Dict[str, Any]], repo: Repository, embedder: 'BGEM3Embedder') -> int:
-        if not history_data or not repo: return 0
+        if not history_data or not repo: 
+            return 0
+        
         saved_count = 0
+        saved_items = []  # 저장된 항목 (log_id 포함)
+        
         try:
             self.sqlite.conn.execute("BEGIN TRANSACTION")
             for item in history_data:
-                if self.sqlite.insert_collected_browser_history(item): saved_count += 1
+                log_id = self.sqlite.insert_collected_browser_history(item)
+                if log_id:
+                    saved_count += 1
+                    # log_id를 item에 추가
+                    item['log_id'] = log_id
+                    saved_items.append(item)
             self.sqlite.conn.commit()
             self.logger.info("✅ SQLite 브라우저 히스토리 저장: %d개", saved_count)
         except Exception as e:
             self.sqlite.conn.rollback()
             self.logger.error("❌ SQLite 히스토리 저장 실패: %s", e, exc_info=True)
             return 0
-        self._batch_index_web_pages(history_data, repo, embedder)
-        return saved_count
-
-# -----------------------------------------------------------------------------
-# ActiveApplicationCollector
-# -----------------------------------------------------------------------------
-class ActiveApplicationCollector:
-    def __init__(self, user_id: int):
-        self.user_id = user_id
-        self.sqlite = SQLite()
         
-    def collect_active_applications(self) -> List[Dict[str, Any]]:
-        active_apps = []
-        for proc in psutil.process_iter(['name', 'exe', 'create_time']):
-            try:
-                if proc.info['exe'] and os.path.exists(proc.info['exe']):
-                    active_apps.append({
-                        'user_id': self.user_id, 
-                        'app_name': proc.info['name'], 
-                        'app_path': proc.info['exe'], 
-                        'start_time': datetime.fromtimestamp(proc.info['create_time'])
-                    })
-            except (psutil.NoSuchProcess, psutil.AccessDenied): continue
-        return active_apps
-    
-    def save_active_apps_to_db(self, apps_data: List[Dict[str, Any]]) -> int:
-        saved = 0
-        for app in apps_data:
-            if self.sqlite.insert_collected_app(app): saved += 1
-        return saved
+        # 저장된 항목만 인덱싱 (log_id 포함)
+        if saved_items:
+            self._batch_index_web_pages(saved_items, repo, embedder)
+        
+        return saved_count
 
 
 # -----------------------------------------------------------------------------
 # DataCollectionManager
 # -----------------------------------------------------------------------------
 class DataCollectionManager:
+    """데이터 수집 관리자 (키워드 추출 포함)"""
     def __init__(self, user_id: int, repository: Repository, embedder: 'BGEM3Embedder'):
         self.user_id = user_id
         self.logger = logger.getChild(f"DataCollectionManager[user={user_id}]")
         self.file_collector = FileCollector(user_id)
         self.browser_collector = BrowserHistoryCollector(user_id)
-        self.app_collector = ActiveApplicationCollector(user_id)
         self.running, self.initial_collection_done = False, False
         self.progress, self.progress_message = 0.0, "초기화 중..."
         self.logger.info("RAG 시스템 핵심 컴포넌트 초기화 중...")
@@ -678,6 +1000,10 @@ class DataCollectionManager:
             self.repository = repository
             self.embedder = embedder
             self.document_parser = DocumentParser()
+            
+            # KeywordExtractor 사전 초기화 (Lazy Loading이지만 미리 준비)
+            get_keyword_extractor()
+            
             self.logger.info("✅ RAG 시스템 컴포넌트 초기화 완료.")
         except Exception as e:
             self.logger.error("❌ RAG 시스템 컴포넌트 초기화 실패: %s", e, exc_info=True)
@@ -730,11 +1056,11 @@ class DataCollectionManager:
             self.logger.debug("브라우저 히스토리 %d개 항목 수집 완료", len(history))
 
             self.progress = max(self.progress, progress_points["browser_history"])
-            self.progress_message = "💾 파일 임베딩 생성 및 저장 중..."
+            self.progress_message = "💾 파일 임베딩 및 키워드 추출 중..."
             self.file_collector.save_files_to_db(files, self.repository, self.embedder, self.document_parser, manager=self)
             
             self.progress = max(self.progress, progress_points["file_embedding"])
-            self.progress_message = "💾 웹 콘텐츠 임베딩 생성 및 저장 중..."
+            self.progress_message = "💾 웹 콘텐츠 임베딩 및 키워드 추출 중..."
             self.browser_collector.save_browser_history_to_db(history, self.repository, self.embedder)
 
             self.progress = max(self.progress, progress_points["browser_embedding"])
@@ -761,14 +1087,20 @@ class DataCollectionManager:
         self.logger.info("사용자 %d의 데이터 수집이 중지되었습니다.", self.user_id)
     
     def _collection_loop(self):
-        intervals = {'file': 3600, 'browser': 1800, 'app': 300}
+        """백그라운드 수집 루프 (파일 및 브라우저만)"""
+        intervals = {'file': 3600, 'browser': 1800}
         last_run = {key: 0 for key in intervals}
         while self.running:
-            if not self.repository: time.sleep(10); continue
+            if not self.repository: 
+                time.sleep(10)
+                continue
             current_time = time.time()
-            if current_time - last_run['file'] >= intervals['file']: self._collect_files(); last_run['file'] = current_time
-            if current_time - last_run['browser'] >= intervals['browser']: self._collect_browser_history(); last_run['browser'] = current_time
-            if current_time - last_run['app'] >= intervals['app']: self._collect_active_apps(); last_run['app'] = current_time
+            if current_time - last_run['file'] >= intervals['file']: 
+                self._collect_files()
+                last_run['file'] = current_time
+            if current_time - last_run['browser'] >= intervals['browser']: 
+                self._collect_browser_history()
+                last_run['browser'] = current_time
             time.sleep(10)
 
     def _collect_files(self):
@@ -778,10 +1110,7 @@ class DataCollectionManager:
     def _collect_browser_history(self):
         history = self.browser_collector.collect_all_browser_history(True)
         self.browser_collector.save_browser_history_to_db(history, self.repository, self.embedder)
-    
-    def _collect_active_apps(self):
-        apps = self.app_collector.collect_active_applications()
-        self.app_collector.save_active_apps_to_db(apps)
+
     
 # -----------------------------------------------------------------------------
 # 전역 관리 함수

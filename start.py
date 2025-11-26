@@ -807,12 +807,11 @@ def main():
         print("\n🛑 시스템을 종료합니다...")
         backend_process.terminate()
         frontend_process.terminate()
-        # Qdrant 서버도 중지할지 묻기
-        if check_docker():
-            choice = input("Qdrant 서버도 중지하시겠습니까? (y/n): ").strip().lower()
-            if choice == 'y':
-                stop_qdrant_server()
+        # Qdrant 서버는 그대로 실행 상태로 유지
+        # (다음 실행 시 재사용 가능, 데이터 보존)
         print("✅ 시스템이 종료되었습니다.")
+        print("💡 Qdrant 서버는 계속 실행 중입니다. 필요시 수동으로 중지하세요:")
+        print("   docker stop qdrant")
 
 
 if __name__ == "__main__":

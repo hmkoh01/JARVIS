@@ -471,22 +471,12 @@ class FloatingChatApp:
         rec_window.configure(bg='white')
         rec_window.attributes('-topmost', True)
 
-        # --- 상단 프레임: 버튼 및 제목 ---
+        # --- 상단 프레임: 제목 ---
         top_frame = tk.Frame(rec_window, bg='white')
         top_frame.pack(fill='x', padx=15, pady=10)
 
         title_label = tk.Label(top_frame, text="추천 히스토리", font=(self.default_font, 16, 'bold'), bg='white', fg='black')
         title_label.pack(side='left')
-
-        generate_button = tk.Button(
-            top_frame,
-            text="새로운 추천 생성하기 🚀",
-            font=self.button_font,
-            bg='#3b82f6', fg='white', relief='flat',
-            cursor='hand2',
-            command=lambda: self.generate_new_recommendation(rec_window) # window 참조 전달
-        )
-        generate_button.pack(side='right')
 
         # --- 추천 목록 표시 영역 ---
         history_text = scrolledtext.ScrolledText(
@@ -543,49 +533,6 @@ class FloatingChatApp:
 
         except requests.exceptions.RequestException as e:
             self.update_text_widget(text_widget, f"오류: 서버에 연결할 수 없습니다.\n{e}")
-
-    def generate_new_recommendation(self, window):
-        """백그라운드에서 새 추천 생성을 요청합니다."""
-        import tkinter.messagebox as messagebox
-        
-        # 사용자에게 대기 메시지 표시
-        messagebox.showinfo("알림", "새로운 추천 생성을 요청했습니다. 잠시 후 목록이 업데이트됩니다.", parent=window)
-
-        threading.Thread(target=self._request_new_recommendation, args=(window,), daemon=True).start()
-
-    def _request_new_recommendation(self, window):
-        """[백그라운드 스레드] 새 추천 생성 API를 호출합니다."""
-        import tkinter.messagebox as messagebox
-        try:
-            from login_view import get_stored_token
-            token = get_stored_token()
-            if not token:
-                messagebox.showerror("오류", "로그인이 필요합니다.", parent=window)
-                return
-
-            response = requests.post(
-                f"{self.API_BASE_URL}/api/v2/recommendations/generate",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("success"):
-                    messagebox.showinfo("성공", result.get("message", "새로운 추천이 생성되었습니다!"), parent=window)
-                    # UI 업데이트는 메인 스레드에서 실행
-                    self.root.after(0, self.refresh_recommendation_window, window)
-                else:
-                    messagebox.showinfo("알림", result.get("message", "추천을 생성하지 못했습니다."), parent=window)
-            elif response.status_code == 429: # Too Many Requests
-                error_msg = response.json().get("detail")
-                messagebox.showwarning("알림", error_msg, parent=window)
-            else:
-                error_msg = response.json().get("detail", "알 수 없는 오류")
-                messagebox.showerror("오류", f"추천 생성에 실패했습니다: {error_msg}", parent=window)
-
-        except requests.exceptions.RequestException as e:
-            messagebox.showerror("오류", f"서버 연결에 실패했습니다: {e}", parent=window)
 
     def refresh_recommendation_window(self, window):
         """추천 창의 내용을 새로고침합니다."""

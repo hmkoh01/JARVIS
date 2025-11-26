@@ -46,7 +46,7 @@ class QdrantManager:
                         'batch_size': 12
                     },
                     'sqlite': {
-                        'path': 'meta.db'
+                        'path': 'sqlite.db'
                     },
                     'retrieval': {
                         'k_candidates': 40,
@@ -70,7 +70,7 @@ class QdrantManager:
                     'batch_size': 12
                 },
                 'sqlite': {
-                    'path': 'meta.db'
+                    'path': 'sqlite.db'
                 },
                 'retrieval': {
                     'k_candidates': 40,

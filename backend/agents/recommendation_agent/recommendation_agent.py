@@ -144,10 +144,11 @@ class RecommendationAgent(BaseAgent):
         
         try:
             # Step 1: Data Preparation
-            browser_logs = self.sqlite.get_unprocessed_browser_logs(user_id)
-            app_logs = self.sqlite.get_unprocessed_app_logs(user_id)
+            # 최근 브라우저 로그와 콘텐츠 키워드 조회
+            browser_logs = self.sqlite.get_browser_logs(user_id, limit=50)
+            content_keywords = self.sqlite.get_content_keywords(user_id, limit=100)
             
-            if not browser_logs and not app_logs:
+            if not browser_logs and not content_keywords:
                 logger.info(f"User {user_id}: 분석할 새로운 로그가 없습니다.")
                 return False, "분석할 새로운 활동 데이터가 없습니다."
             
@@ -159,21 +160,11 @@ class RecommendationAgent(BaseAgent):
             # Step 2: LLM Analysis & Decision
             analysis_result = await self._analyze_with_llm(
                 browser_logs=browser_logs,
-                app_logs=app_logs,
+                content_keywords=content_keywords,
                 blacklist=blacklist,
                 user_interests=user_interests,
                 survey_data=survey_data
             )
-            
-            # Step 3: Process Results
-            browser_log_ids = [log['id'] for log in browser_logs]
-            app_log_ids = [log['id'] for log in app_logs]
-            
-            # 로그를 처리됨으로 표시 (추천 생성 여부와 관계없이)
-            if browser_log_ids:
-                self.sqlite.mark_browser_logs_processed(browser_log_ids)
-            if app_log_ids:
-                self.sqlite.mark_app_logs_processed(app_log_ids)
             
             if not analysis_result or not analysis_result.get('should_recommend'):
                 logger.info(f"User {user_id}: LLM이 추천할 만한 내용이 없다고 판단했습니다.")
@@ -213,7 +204,7 @@ class RecommendationAgent(BaseAgent):
     async def _analyze_with_llm(
         self,
         browser_logs: List[Dict[str, Any]],
-        app_logs: List[Dict[str, Any]],
+        content_keywords: List[Dict[str, Any]],
         blacklist: List[str],
         user_interests: List[Dict[str, Any]],
         survey_data: Optional[Dict[str, Any]]
@@ -225,7 +216,7 @@ class RecommendationAgent(BaseAgent):
             분석 결과 딕셔너리 또는 None
         """
         # 로그 요약 생성
-        log_summary = self._prepare_log_summary(browser_logs, app_logs)
+        log_summary = self._prepare_log_summary(browser_logs, content_keywords)
         
         # 기존 관심사 목록
         existing_interests = [item['keyword'] for item in user_interests]
@@ -308,7 +299,7 @@ class RecommendationAgent(BaseAgent):
     def _prepare_log_summary(
         self,
         browser_logs: List[Dict[str, Any]],
-        app_logs: List[Dict[str, Any]]
+        content_keywords: List[Dict[str, Any]]
     ) -> str:
         """로그 데이터를 LLM 프롬프트용 요약 텍스트로 변환합니다."""
         lines = []
@@ -322,16 +313,21 @@ class RecommendationAgent(BaseAgent):
                 domain = url.split('/')[2] if url.startswith('http') and len(url.split('/')) > 2 else url
                 lines.append(f"- {title} ({domain})")
         
-        if app_logs:
-            lines.append("\n### 앱 사용 기록")
-            for log in app_logs[:20]:  # 최대 20개
-                app_name = log.get('app_name', '알 수 없음')
-                window_title = log.get('window_title', '')
-                duration = log.get('duration_seconds', 0)
-                if window_title:
-                    lines.append(f"- {app_name}: {window_title} ({duration}초)")
-                else:
-                    lines.append(f"- {app_name} ({duration}초)")
+        if content_keywords:
+            lines.append("\n### 추출된 핵심 키워드")
+            # 소스별로 그룹화
+            keywords_by_source = {}
+            for kw in content_keywords[:50]:  # 최대 50개
+                source_type = kw.get('source_type', 'unknown')
+                keyword = kw.get('keyword', '')
+                if source_type not in keywords_by_source:
+                    keywords_by_source[source_type] = []
+                if keyword not in keywords_by_source[source_type]:
+                    keywords_by_source[source_type].append(keyword)
+            
+            for source_type, keywords in keywords_by_source.items():
+                source_label = {'file': '파일', 'web': '웹', 'chat': '채팅'}.get(source_type, source_type)
+                lines.append(f"- {source_label}: {', '.join(keywords[:15])}")  # 각 소스당 최대 15개
         
         return '\n'.join(lines) if lines else "활동 로그 없음"
     

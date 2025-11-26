@@ -387,27 +387,26 @@ async def get_data_collection_stats():
         stats = db.get_collection_stats()
         file_count = stats.get('files', 0)
         browser_count = stats.get('browser_logs', 0)
-        app_count = stats.get('app_logs', 0)
+        keyword_count = stats.get('content_keywords', 0)
         
-        # 최근 24시간 내 데이터 수
+        # 최근 24시간 내 데이터 수 (전체 데이터의 약 1/7을 최근 24시간으로 추정)
         from datetime import datetime, timedelta
         yesterday = datetime.utcnow() - timedelta(days=1)
         
-        # 전체 데이터의 약 1/7을 최근 24시간으로 추정
         recent_files = file_count // 7
         recent_browser = browser_count // 7
-        recent_apps = app_count // 7
+        recent_keywords = keyword_count // 7
         
         return {
             "total_records": {
                 "files": file_count,
                 "browser_history": browser_count,
-                "active_applications": app_count
+                "content_keywords": keyword_count
             },
             "last_24_hours": {
                 "files": recent_files,
                 "browser_history": recent_browser,
-                "active_applications": recent_apps
+                "content_keywords": recent_keywords
             },
             "active_collectors": len(data_collection_managers),
             "timestamp": datetime.utcnow().isoformat()
@@ -569,38 +568,6 @@ async def get_recommendation_history(user_id: int = Depends(get_current_user_id)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/recommendations/generate")
-async def generate_recommendation(user_id: int = Depends(get_current_user_id)):
-    """현재 사용자를 위해 수동으로 새로운 추천을 생성합니다."""
-    try:
-        db = SQLite()
-        # PoT 단계에서는 수동 추천 횟수 제한을 임시로 비활성화합니다.
-        # 최근 1시간 내 수동 추천 횟수 확인 (추후 다시 활성화 예정)
-        # count = db.get_recent_manual_recommendation_count(user_id, hours=1)
-        # if count >= 3:
-        #     raise HTTPException(
-        #         status_code=429, 
-        #         detail="최근 1시간 이내에 3번의 수동 추천을 모두 사용하셨습니다. 시간이 조금 지난 후에 다시 사용해주시기 바랍니다."
-        #     )
-            
-        # 추천 에이전트 가져오기 및 분석 실행
-        recommendation_agent = agent_registry.get_agent("recommendation")
-        if not recommendation_agent:
-            raise HTTPException(status_code=503, detail="추천 기능이 현재 사용 불가능합니다.")
-            
-        success, message = await recommendation_agent.run_periodic_analysis(user_id, recommendation_type='manual')
-        
-        return {
-            "success": success,
-            "message": message
-        }
-    except HTTPException:
-        raise  # HTTPException은 그대로 다시 발생시킴
-    except Exception as e:
-        logger.error(f"수동 추천 생성 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="추천 생성 중 오류가 발생했습니다.")
-
-
 @router.post("/recommendations/{recommendation_id}/read")
 async def mark_recommendation_read(
     recommendation_id: int,
@@ -742,8 +709,8 @@ async def update_folder(
             db.conn.execute("DELETE FROM files WHERE user_id = ?", (user_id,))
             # browser_logs 테이블 삭제
             db.conn.execute("DELETE FROM browser_logs WHERE user_id = ?", (user_id,))
-            # app_logs 테이블 삭제
-            db.conn.execute("DELETE FROM app_logs WHERE user_id = ?", (user_id,))
+            # content_keywords 테이블 삭제
+            db.conn.execute("DELETE FROM content_keywords WHERE user_id = ?", (user_id,))
             db.conn.commit()
             logger.info("SQLite 데이터 삭제 완료")
         except Exception as e:

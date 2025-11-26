@@ -34,7 +34,7 @@ class Repository:
         self.config = self._load_config(config_file_path)
         self.qdrant = QdrantManager(config_path)
         # EXE 환경 호환 DB 경로 사용
-        db_path = get_db_path(self.config.get('sqlite', {}).get('path', 'meta.db'))
+        db_path = get_db_path(self.config.get('sqlite', {}).get('path', 'sqlite.db'))
         self.sqlite = SQLite(str(db_path))
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -50,7 +50,7 @@ class Repository:
                         'collection_name': 'user_context'
                     },
                     'sqlite': {
-                        'path': 'meta.db'
+                        'path': 'sqlite.db'
                     },
                     'retrieval': {
                         'k_candidates': 40,
@@ -69,7 +69,7 @@ class Repository:
                     'collection_name': 'user_context'
                 },
                 'sqlite': {
-                    'path': 'meta.db'
+                    'path': 'sqlite.db'
                 },
                 'retrieval': {
                     'k_candidates': 40,
