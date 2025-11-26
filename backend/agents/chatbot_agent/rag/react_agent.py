@@ -193,9 +193,9 @@ class ReactAgent:
             user_profile = None
             if user_id:
                 try:
-                    from database.sqlite_meta import SQLiteMeta
-                    sqlite_meta = SQLiteMeta()
-                    user_profile = sqlite_meta.get_user_survey_response(user_id)
+                    from database.sqlite import SQLite
+                    db = SQLite()
+                    user_profile = db.get_user_survey_response(user_id)
                 except Exception as e:
                     logger.warning(f"프로필 로드 실패: {e}")
 
@@ -310,9 +310,9 @@ class ReactAgent:
             user_profile = None
             if user_id:
                 try:
-                    from database.sqlite_meta import SQLiteMeta
-                    sqlite_meta = SQLiteMeta()
-                    user_profile = sqlite_meta.get_user_survey_response(user_id)
+                    from database.sqlite import SQLite
+                    db = SQLite()
+                    user_profile = db.get_user_survey_response(user_id)
                 except Exception as e:
                     logger.warning(f"프로필 로드 실패: {e}")
 

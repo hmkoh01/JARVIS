@@ -14,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from api.routes import router
 from api.auth_routes import router as auth_router
 from core.agent_registry import agent_registry
-from database.sqlite_meta import SQLiteMeta
+from database.sqlite import SQLite
 from config.settings import settings
 from config.logging_config import setup_logging, get_logger
 
@@ -49,8 +49,8 @@ async def trigger_recommendation_analysis():
         recommendation_agent = agent_registry.get_agent("recommendation")
         if recommendation_agent and hasattr(recommendation_agent, 'run_periodic_analysis'):
             # 모든 사용자에 대해 분석 실행
-            sqlite_meta = SQLiteMeta()
-            all_users = sqlite_meta.get_all_users()
+        db = SQLite()
+        all_users = db.get_all_users()
             if not all_users:
                 logger.info("분석할 사용자가 없습니다.")
                 return
@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
     
     # 1. SQLite 데이터베이스 초기화
     try:
-        SQLiteMeta()
+        SQLite()
         logger.info("✅ SQLite 데이터베이스 초기화 완료")
     except Exception as e:
         logger.error(f"⚠️ 데이터베이스 초기화 오류: {e}")

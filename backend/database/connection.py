@@ -12,16 +12,16 @@ if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
 
 # Initialize variables
-SQLiteMeta = None
+SQLite = None
 QdrantManager = None
 
-# Try to import SQLiteMeta
+# Try to import SQLite
 try:
-    from sqlite_meta import SQLiteMeta
-    print("SQLiteMeta imported successfully")
+    from sqlite import SQLite
+    print("SQLite imported successfully")
 except ImportError as e:
-    print(f"Warning: Could not import SQLiteMeta: {e}")
-    SQLiteMeta = None
+    print(f"Warning: Could not import SQLite: {e}")
+    SQLite = None
 
 # Try to import QdrantManager (optional)
 try:
@@ -35,16 +35,16 @@ except ImportError as e:
 def create_tables():
     """Initialize database tables"""
     try:
-        # Initialize SQLite metadata database
-        if SQLiteMeta is not None:
+        # Initialize SQLite database
+        if SQLite is not None:
             try:
-                sqlite_meta = SQLiteMeta()
-                print("SQLite metadata tables initialized")
+                sqlite_db = SQLite()
+                print("SQLite tables initialized")
             except Exception as sqlite_error:
                 print(f"SQLite initialization failed: {sqlite_error}")
                 return False
         else:
-            print("SQLiteMeta not available")
+            print("SQLite not available")
             return False
         
         # Try to initialize Qdrant vector database (optional)
@@ -64,12 +64,12 @@ def create_tables():
         print(f"❌ Database initialization failed: {e}")
         return False
 
-def get_sqlite_meta():
-    """Get SQLite metadata instance"""
-    if SQLiteMeta is not None:
-        return SQLiteMeta()
+def get_sqlite():
+    """Get SQLite instance"""
+    if SQLite is not None:
+        return SQLite()
     else:
-        raise ImportError("SQLiteMeta not available")
+        raise ImportError("SQLite not available")
 
 def get_qdrant_manager():
     """Get Qdrant manager instance"""
@@ -77,6 +77,10 @@ def get_qdrant_manager():
         return QdrantManager()
     else:
         raise ImportError("QdrantManager not available")
+
+# Backward compatibility aliases
+get_sqlite_meta = get_sqlite
+SQLiteMeta = SQLite
 
 # If this file is run directly, initialize the database
 if __name__ == "__main__":

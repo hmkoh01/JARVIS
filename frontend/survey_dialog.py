@@ -17,10 +17,10 @@ if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
 try:
-    from backend.database.sqlite_meta import SQLiteMeta
+    from backend.database.sqlite import SQLite
 except ImportError:
-    print("Warning: Could not import SQLiteMeta. Survey responses will not be saved.")
-    SQLiteMeta = None
+    print("Warning: Could not import SQLite. Survey responses will not be saved.")
+    SQLite = None
 
 class SurveyDialog:
     def __init__(self, user_id=1):
@@ -351,13 +351,13 @@ class SurveyDialog:
     
     def save_survey_data(self, survey_data):
         """설문지 데이터를 데이터베이스에 저장하고 Qdrant에 인덱싱합니다."""
-        if SQLiteMeta is None:
-            print("Warning: SQLiteMeta not available. Survey data not saved.")
+        if SQLite is None:
+            print("Warning: SQLite not available. Survey data not saved.")
             return False
         
         try:
             # 1. SQLite에 저장
-            db = SQLiteMeta()
+            db = SQLite()
             success = db.insert_survey_response(self.user_id, survey_data)
             if success:
                 print("✅ 설문지 응답이 SQLite에 저장되었습니다.")
@@ -406,12 +406,12 @@ class SurveyDialog:
     
     def save_survey_data_to_sqlite(self, survey_data):
         """설문지 데이터를 SQLite에만 저장합니다 (빠른 저장)."""
-        if SQLiteMeta is None:
-            print("Warning: SQLiteMeta not available. Survey data not saved.")
+        if SQLite is None:
+            print("Warning: SQLite not available. Survey data not saved.")
             return False
         
         try:
-            db = SQLiteMeta()
+            db = SQLite()
             success = db.insert_survey_response(self.user_id, survey_data)
             if success:
                 print("✅ 설문지 응답이 SQLite에 저장되었습니다.")
@@ -431,10 +431,10 @@ class SurveyDialog:
         def background_indexing(uid):
             try:
                 import requests
-                from backend.database.sqlite_meta import SQLiteMeta
+                from backend.database.sqlite import SQLite
                 
                 # SQLite에서 설문 데이터 가져오기
-                db = SQLiteMeta()
+                db = SQLite()
                 survey_data = db.get_user_survey_response(uid)
                 
                 if survey_data:

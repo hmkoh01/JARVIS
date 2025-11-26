@@ -5,7 +5,7 @@ from collections import Counter
 import logging
 
 from ..base_agent import BaseAgent, AgentResponse
-from database.sqlite_meta import SQLiteMeta  # 변경됨: SQLAlchemy 대신 SQLiteMeta 사용
+from database.sqlite import SQLite
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ class RecommendationAgent(BaseAgent):
             agent_type="recommendation",
             description="추천, 제안, 추천해줘 등의 요청을 처리합니다."
         )
-        self.sqlite_meta = SQLiteMeta()  # SQLite 메타데이터 접근
+        self.sqlite = SQLite()
     
     def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """상태를 받아서 처리하고 수정된 상태를 반환합니다."""
@@ -61,7 +61,7 @@ class RecommendationAgent(BaseAgent):
             return None
         
         try:
-            return self.sqlite_meta.get_user_survey_response(user_id)
+            return self.sqlite.get_user_survey_response(user_id)
         except Exception as e:
             print(f"설문지 데이터 조회 오류: {e}")
             return None
@@ -136,15 +136,15 @@ class RecommendationAgent(BaseAgent):
 
             # 1. 지난 1주일 데이터 조회
             one_week_ago = int((datetime.now() - timedelta(days=7)).timestamp())
-            files = self.sqlite_meta.get_collected_files_since(user_id, one_week_ago)
-            history = self.sqlite_meta.get_collected_browser_history_since(user_id, one_week_ago)
+            files = self.sqlite.get_collected_files_since(user_id, one_week_ago)
+            history = self.sqlite.get_collected_browser_history_since(user_id, one_week_ago)
             data_source = "최근 활동"
 
             # 1차 폴백: 전체 기간 데이터 조회
             if not files and not history:
                 logger.info(f"User {user_id}: 지난 1주일간 데이터가 없어 전체 데이터를 조회합니다.")
-                files = self.sqlite_meta.get_collected_files(user_id)
-                history = self.sqlite_meta.get_collected_browser_history(user_id)
+                files = self.sqlite.get_collected_files(user_id)
+                history = self.sqlite.get_collected_browser_history(user_id)
                 data_source = "전체 활동"
 
             # 2. 추천에 사용할 "문서" 리스트 구성 (파일 + 브라우저 + 설문)
@@ -218,7 +218,7 @@ class RecommendationAgent(BaseAgent):
             
             # TODO: 중복 추천 방지 로직 추가
             
-            if self.sqlite_meta.insert_recommendation(user_id, title, content, recommendation_type=recommendation_type):
+            if self.sqlite.insert_recommendation(user_id, title, content, recommendation_type=recommendation_type):
                 logger.info(f"✅ User {user_id}: 새로운 주간 추천을 생성했습니다: {top_keywords}")
                 return True, "새로운 추천을 성공적으로 생성했습니다."
             else:
@@ -669,9 +669,9 @@ class RecommendationAgent(BaseAgent):
         """지식 기반 추천을 생성합니다."""
         try:
             # SQLite에서 사용자 데이터 조회
-            collected_files = self.sqlite_meta.get_collected_files(user_id)
-            collected_browser = self.sqlite_meta.get_collected_browser_history(user_id)
-            collected_apps = self.sqlite_meta.get_collected_apps(user_id)
+            collected_files = self.sqlite.get_collected_files(user_id)
+            collected_browser = self.sqlite.get_collected_browser_history(user_id)
+            collected_apps = self.sqlite.get_collected_apps(user_id)
             
             # 사용자 관심사 추출 (간단한 방법)
             interests = self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
@@ -821,9 +821,9 @@ class RecommendationAgent(BaseAgent):
         """사용자 관심사를 가져옵니다."""
         try:
             # SQLite에서 사용자 데이터 조회
-            collected_files = self.sqlite_meta.get_collected_files(user_id)
-            collected_browser = self.sqlite_meta.get_collected_browser_history(user_id)
-            collected_apps = self.sqlite_meta.get_collected_apps(user_id)
+            collected_files = self.sqlite.get_collected_files(user_id)
+            collected_browser = self.sqlite.get_collected_browser_history(user_id)
+            collected_apps = self.sqlite.get_collected_apps(user_id)
             
             return self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
         except Exception as e:
@@ -889,9 +889,9 @@ class RecommendationAgent(BaseAgent):
         """사용자 프로필을 분석합니다."""
         try:
             # SQLite에서 사용자 데이터 조회
-            collected_files = self.sqlite_meta.get_collected_files(user_id)
-            collected_browser = self.sqlite_meta.get_collected_browser_history(user_id)
-            collected_apps = self.sqlite_meta.get_collected_apps(user_id)
+            collected_files = self.sqlite.get_collected_files(user_id)
+            collected_browser = self.sqlite.get_collected_browser_history(user_id)
+            collected_apps = self.sqlite.get_collected_apps(user_id)
             
             # 관심사 추출
             interests = self._extract_interests_from_data(collected_files, collected_browser, collected_apps)

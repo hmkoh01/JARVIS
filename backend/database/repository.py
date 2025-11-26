@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import logging
 from .qdrant_client import QdrantManager
-from .sqlite_meta import SQLiteMeta
+from .sqlite import SQLite
 from pathlib import Path
 from utils.path_utils import get_config_path, get_db_path
 
@@ -35,7 +35,7 @@ class Repository:
         self.qdrant = QdrantManager(config_path)
         # EXE 환경 호환 DB 경로 사용
         db_path = get_db_path(self.config.get('sqlite', {}).get('path', 'meta.db'))
-        self.sqlite = SQLiteMeta(str(db_path))
+        self.sqlite = SQLite(str(db_path))
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """설정 파일 로드"""
@@ -132,7 +132,7 @@ class Repository:
                     path=payload.get('path'),
                     url=payload.get('url'),
                     timestamp=payload.get('timestamp'),
-                    snippet=payload.get('snippet') or payload.get('content', ''),  # content도 fallback으로 사용
+                    snippet=payload.get('snippet') or payload.get('content', ''),
                     content=payload.get('content')
                 )
                 hits.append(hit)
@@ -149,10 +149,9 @@ class Repository:
             if hit.source == 'file':
                 file_info = self.sqlite.get_file(hit.doc_id)
                 if file_info:
-                    hit.path = file_info.get('path', hit.path)
-                    hit.timestamp = file_info.get('updated_at', hit.timestamp)
+                    hit.path = file_info.get('file_path', hit.path)
                     if not hit.snippet:
-                        hit.snippet = file_info.get('preview', '')[:200]
+                        hit.snippet = ''
             
             elif hit.source == 'web':
                 # 웹 히스토리 정보 조회 (필요시)
@@ -169,31 +168,17 @@ class Repository:
             return hit
     
     # SQLite 메타데이터 메서드들 (위임)
-    def upsert_file(self, doc_id: str, path: str, **kwargs) -> bool:
-        return self.sqlite.upsert_file(doc_id, path, **kwargs)
+    def upsert_file(self, doc_id: str, user_id: int, file_path: str, **kwargs) -> bool:
+        return self.sqlite.upsert_file(doc_id, user_id, file_path, **kwargs)
     
-    def insert_web_history(self, url: str, **kwargs) -> bool:
-        return self.sqlite.insert_web_history(url, **kwargs)
-    
-    def insert_app(self, name: str, **kwargs) -> bool:
-        return self.sqlite.insert_app(name, **kwargs)
-    
-    
-    def upsert_interest(self, user_id: str, topic: str, score: float = 1.0) -> bool:
-        return self.sqlite.upsert_interest(user_id, topic, score)
+    def upsert_interest(self, user_id: int, keyword: str, score: float = 0.5, source: str = 'manual') -> bool:
+        return self.sqlite.upsert_interest(user_id, keyword, score, source)
     
     def get_file(self, doc_id: str):
         return self.sqlite.get_file(doc_id)
     
-    def recent_web_history(self, limit: int = 100, since_ts: int = None):
-        return self.sqlite.recent_web_history(limit, since_ts)
-    
-    def recent_apps(self, limit: int = 100, since_ts: int = None):
-        return self.sqlite.recent_apps(limit, since_ts)
-    
-    
-    def top_interests(self, user_id: str, limit: int = 10):
-        return self.sqlite.top_interests(user_id, limit)
+    def get_user_interests(self, user_id: int, limit: int = 20):
+        return self.sqlite.get_user_interests(user_id, limit)
     
     def find_file_by_path(self, path: str):
         return self.sqlite.find_file_by_path(path)

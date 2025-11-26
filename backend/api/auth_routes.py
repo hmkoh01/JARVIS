@@ -24,7 +24,7 @@ from jose import JWTError, jwt
 import httpx
 
 from config.settings import settings
-from database.sqlite_meta import SQLiteMeta
+from database.sqlite import SQLite
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -41,8 +41,8 @@ google_oauth_client = AsyncOAuth2Client(
     userinfo_endpoint="https://openidconnect.googleapis.com/v1/userinfo"
 )
 
-# SQLite 메타데이터 인스턴스
-db = SQLiteMeta()
+# SQLite 인스턴스
+db = SQLite()
 
 
 # ============================================================================

@@ -470,11 +470,11 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
             if cached_profile_str is None:
                 try:
                     from database.user_profile_indexer import get_global_profile_indexer
-                    from database.sqlite_meta import SQLiteMeta
+                    from database.sqlite import SQLite
                     indexer = get_global_profile_indexer()
-                    sqlite_meta = SQLiteMeta()
+                    db = SQLite()
                     # dict 형태로 설문 데이터 가져오기
-                    user_profile = sqlite_meta.get_user_survey_response(user_id)
+                    user_profile = db.get_user_survey_response(user_id)
                     if user_profile:
                         # 문자열 형태로도 캐시에 저장 (하위 호환성)
                         profile_str = indexer.get_profile_as_context(user_id)
@@ -490,9 +490,9 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
             else:
                 # 캐시에서 문자열을 가져왔지만, dict 형태가 필요하므로 다시 조회
                 try:
-                    from database.sqlite_meta import SQLiteMeta
-                    sqlite_meta = SQLiteMeta()
-                    user_profile = sqlite_meta.get_user_survey_response(user_id)
+                    from database.sqlite import SQLite
+                    db = SQLite()
+                    user_profile = db.get_user_survey_response(user_id)
                     logger.debug(f"사용자 {user_id} 프로필을 캐시에서 조회")
                 except Exception as e:
                     logger.warning(f"프로필 dict 조회 실패: {e}")

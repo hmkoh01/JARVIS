@@ -26,7 +26,7 @@ from core.agent_registry import agent_registry
 from database.data_collector import get_manager, data_collection_managers
 from database.repository import Repository
 from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
-from database.sqlite_meta import SQLiteMeta
+from database.sqlite import SQLite
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 
@@ -379,15 +379,15 @@ async def get_data_collection_status(user_id: int, request: Request):
 async def get_data_collection_stats():
     """데이터 수집 통계를 확인합니다."""
     try:
-        from database.sqlite_meta import SQLiteMeta
+        from database.sqlite import SQLite
         
-        sqlite_meta = SQLiteMeta()
+        db = SQLite()
         
         # 각 테이블의 레코드 수 조회
-        stats = sqlite_meta.get_collection_stats()
-        file_count = stats['collected_files']
-        browser_count = stats['collected_browser_history']
-        app_count = stats['collected_apps']
+        stats = db.get_collection_stats()
+        file_count = stats.get('files', 0)
+        browser_count = stats.get('browser_logs', 0)
+        app_count = stats.get('app_logs', 0)
         
         # 최근 24시간 내 데이터 수
         from datetime import datetime, timedelta
@@ -419,7 +419,7 @@ async def get_data_collection_stats():
 async def get_user_survey(user_id: int):
     """사용자 설문지 응답을 조회합니다."""
     try:
-        db = SQLiteMeta()
+        db = SQLite()
         survey_data = db.get_user_survey_response(user_id)
         
         if survey_data:
@@ -441,7 +441,7 @@ async def get_user_survey(user_id: int):
 async def check_survey_completed(user_id: int):
     """사용자가 설문지를 완료했는지 확인합니다."""
     try:
-        db = SQLiteMeta()
+        db = SQLite()
         completed = db.has_user_completed_survey(user_id)
         
         return {
@@ -485,7 +485,7 @@ async def update_user_profile(user_id: int, survey_data: dict, request: Request)
         from database.user_profile_indexer import UserProfileIndexer
         
         # SQLite에 설문조사 업데이트
-        db = SQLiteMeta()
+        db = SQLite()
         success = db.insert_survey_response(user_id, survey_data)
         
         if not success:
@@ -543,7 +543,7 @@ async def get_user_profile_context(user_id: int, request: Request):
 async def get_recommendations(user_id: int = Depends(get_current_user_id)):
     """현재 사용자의 읽지 않은 추천 목록을 조회합니다."""
     try:
-        db = SQLiteMeta()
+        db = SQLite()
         recommendations = db.get_unread_recommendations(user_id)
         return {
             "success": True,
@@ -558,7 +558,7 @@ async def get_recommendations(user_id: int = Depends(get_current_user_id)):
 async def get_recommendation_history(user_id: int = Depends(get_current_user_id)):
     """현재 사용자의 모든 추천 내역을 조회합니다."""
     try:
-        db = SQLiteMeta()
+        db = SQLite()
         recommendations = db.get_all_recommendations(user_id)
         return {
             "success": True,
@@ -573,7 +573,7 @@ async def get_recommendation_history(user_id: int = Depends(get_current_user_id)
 async def generate_recommendation(user_id: int = Depends(get_current_user_id)):
     """현재 사용자를 위해 수동으로 새로운 추천을 생성합니다."""
     try:
-        db = SQLiteMeta()
+        db = SQLite()
         # PoT 단계에서는 수동 추천 횟수 제한을 임시로 비활성화합니다.
         # 최근 1시간 내 수동 추천 횟수 확인 (추후 다시 활성화 예정)
         # count = db.get_recent_manual_recommendation_count(user_id, hours=1)
@@ -608,7 +608,7 @@ async def mark_recommendation_read(
 ):
     """추천을 읽음으로 표시합니다."""
     try:
-        db = SQLiteMeta()
+        db = SQLite()
         # TODO: A better check to ensure user owns the recommendation
         success = db.mark_recommendation_as_read(recommendation_id)
         if success:
@@ -630,7 +630,7 @@ async def initial_setup(
 ):
     """초기 설정 완료 - 폴더 경로 저장 및 설정 완료 상태 업데이트"""
     try:
-        db = SQLiteMeta()
+        db = SQLite()
         folder_path = request.get("folder_path", "")
         
         # 폴더 경로 업데이트
@@ -671,7 +671,7 @@ async def update_folder(
         import sys
         from pathlib import Path
         
-        db = SQLiteMeta()
+        db = SQLite()
         new_folder_path = request.get("new_folder_path", "")
         
         logger.info(f"사용자 {user_id}의 데이터 폴더 변경 시작...")
@@ -693,10 +693,10 @@ async def update_folder(
         try:
             # files 테이블 삭제
             db.conn.execute("DELETE FROM files WHERE user_id = ?", (user_id,))
-            # web_history 테이블 삭제
-            db.conn.execute("DELETE FROM web_history WHERE user_id = ?", (user_id,))
-            # apps 테이블 삭제
-            db.conn.execute("DELETE FROM apps WHERE user_id = ?", (user_id,))
+            # browser_logs 테이블 삭제
+            db.conn.execute("DELETE FROM browser_logs WHERE user_id = ?", (user_id,))
+            # app_logs 테이블 삭제
+            db.conn.execute("DELETE FROM app_logs WHERE user_id = ?", (user_id,))
             db.conn.commit()
             logger.info("SQLite 데이터 삭제 완료")
         except Exception as e:

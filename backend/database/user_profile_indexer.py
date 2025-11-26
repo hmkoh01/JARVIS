@@ -13,7 +13,7 @@ backend_path = os.path.join(os.path.dirname(__file__), '..')
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
-from database.sqlite_meta import SQLiteMeta
+from database.sqlite import SQLite
 from database.repository import Repository
 from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
 
@@ -39,7 +39,7 @@ class UserProfileIndexer:
         싱글톤 패턴으로 관리되는 UserProfileIndexer.
         Repository와 BGEM3Embedder를 주입받아 사용합니다.
         """
-        self.sqlite_meta = SQLiteMeta()
+        self.sqlite = SQLite()
         self.repository = repository  # 주입받은 싱글톤 인스턴스 사용
         self.embedder = embedder      # 주입받은 싱글톤 인스턴스 사용
     
@@ -111,7 +111,7 @@ class UserProfileIndexer:
                 return True
             
             # 설문 데이터 조회
-            survey_data = self.sqlite_meta.get_user_survey_response(user_id)
+            survey_data = self.sqlite.get_user_survey_response(user_id)
             if not survey_data:
                 print(f"사용자 {user_id}의 설문 데이터를 찾을 수 없습니다.")
                 return False
@@ -165,7 +165,7 @@ class UserProfileIndexer:
             import json
             
             # 설문 데이터 조회
-            survey_data = self.sqlite_meta.get_user_survey_response(user_id)
+            survey_data = self.sqlite.get_user_survey_response(user_id)
             if not survey_data:
                 print(f"사용자 {user_id}의 설문 데이터를 찾을 수 없습니다.")
                 return False
@@ -210,7 +210,7 @@ class UserProfileIndexer:
     def get_profile_as_context(self, user_id: int) -> Optional[str]:
         """사용자 프로필을 컨텍스트 형태로 반환합니다."""
         try:
-            survey_data = self.sqlite_meta.get_user_survey_response(user_id)
+            survey_data = self.sqlite.get_user_survey_response(user_id)
             if not survey_data:
                 return None
             
