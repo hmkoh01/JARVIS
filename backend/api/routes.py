@@ -619,6 +619,53 @@ async def mark_recommendation_read(
         logger.error(f"추천 읽음 처리 실패: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/recommendations/{recommendation_id}/respond")
+async def respond_to_recommendation(
+    recommendation_id: int,
+    request_data: dict,
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    추천에 대한 사용자 응답(수락/거절)을 처리합니다.
+    
+    - action='accept': 추천 수락 → 리포트 생성 후 반환
+    - action='reject': 추천 거절 → 키워드 블랙리스트 추가
+    """
+    try:
+        action = request_data.get("action")
+        if action not in ["accept", "reject"]:
+            raise HTTPException(status_code=400, detail="action must be 'accept' or 'reject'")
+        
+        # 추천 에이전트 가져오기
+        recommendation_agent = agent_registry.get_agent("recommendation")
+        if not recommendation_agent:
+            raise HTTPException(status_code=503, detail="추천 기능이 현재 사용 불가능합니다.")
+        
+        # 추천 소유권 확인
+        db = SQLite()
+        recommendation = db.get_recommendation(recommendation_id)
+        if not recommendation:
+            raise HTTPException(status_code=404, detail="추천을 찾을 수 없습니다.")
+        if recommendation.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="해당 추천에 대한 권한이 없습니다.")
+        
+        # handle_response 호출 (비동기)
+        success, result_message = await recommendation_agent.handle_response(recommendation_id, action)
+        
+        return {
+            "success": success,
+            "action": action,
+            "message": result_message if action == "reject" else None,
+            "report_content": result_message if action == "accept" and success else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"추천 응답 처리 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"추천 응답 처리 중 오류가 발생했습니다: {str(e)}")
+
 # ============================================================================
 # 사용자 설정 관련 엔드포인트
 # ============================================================================

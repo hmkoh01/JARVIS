@@ -47,10 +47,10 @@ async def trigger_recommendation_analysis():
     try:
         # agent_registry에서 recommendation 에이전트를 가져옵니다.
         recommendation_agent = agent_registry.get_agent("recommendation")
-        if recommendation_agent and hasattr(recommendation_agent, 'run_periodic_analysis'):
+        if recommendation_agent and hasattr(recommendation_agent, 'run_active_analysis'):
             # 모든 사용자에 대해 분석 실행
-        db = SQLite()
-        all_users = db.get_all_users()
+            db = SQLite()
+            all_users = db.get_all_users()
             if not all_users:
                 logger.info("분석할 사용자가 없습니다.")
                 return
@@ -58,7 +58,7 @@ async def trigger_recommendation_analysis():
             logger.info(f"{len(all_users)}명의 사용자에 대한 분석을 시작합니다.")
             for user in all_users:
                 user_id = user['user_id']
-                await recommendation_agent.run_periodic_analysis(user_id)
+                await recommendation_agent.run_active_analysis(user_id)
         else:
             logger.warning("Recommendation agent 또는 분석 메서드를 찾을 수 없습니다.")
 

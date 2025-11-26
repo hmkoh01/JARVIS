@@ -1,8 +1,15 @@
-import numpy as np
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
-from collections import Counter
+"""
+RecommendationAgent - 능동형 추천 에이전트 (Active Agent)
+
+LLM(Gemini)이 사용자의 로그와 관심사(Survey)를 분석하여 적절한 타이밍에
+"말풍선 메시지"를 제안하는 방식으로 동작합니다.
+"""
+
+import json
 import logging
+from typing import List, Dict, Any, Optional, Tuple
+
+import google.generativeai as genai
 
 from ..base_agent import BaseAgent, AgentResponse
 from database.sqlite import SQLite
@@ -10,15 +17,52 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
 class RecommendationAgent(BaseAgent):
-    """추천 및 제안 관련 작업을 처리하는 에이전트"""
+    """능동형 추천 에이전트 - LLM 기반 분석 및 말풍선 메시지 생성"""
     
     def __init__(self):
         super().__init__(
             agent_type="recommendation",
-            description="추천, 제안, 추천해줘 등의 요청을 처리합니다."
+            description="사용자 활동을 분석하여 맞춤형 추천을 제공합니다."
         )
         self.sqlite = SQLite()
+        self._init_llm()
+    
+    def _init_llm(self):
+        """Gemini LLM 클라이언트 초기화"""
+        self.llm_available = False
+        if not settings.GEMINI_API_KEY:
+            logger.warning("GEMINI_API_KEY가 설정되지 않아 LLM 기능을 사용할 수 없습니다.")
+            return
+        
+        try:
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            self.safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+            self.llm_model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                generation_config={
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "top_k": 40,
+                    "max_output_tokens": 1024,
+                    "response_mime_type": "application/json",
+                },
+                safety_settings=self.safety_settings,
+            )
+            self.llm_available = True
+            logger.info("Gemini LLM 클라이언트 초기화 완료")
+        except Exception as e:
+            logger.error(f"Gemini LLM 초기화 오류: {e}")
+    
+    # ============================================================
+    # BaseAgent Interface Implementation
+    # ============================================================
     
     def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """상태를 받아서 처리하고 수정된 상태를 반환합니다."""
@@ -29,11 +73,16 @@ class RecommendationAgent(BaseAgent):
             return {**state, "answer": "질문이 제공되지 않았습니다.", "evidence": []}
         
         try:
-            # 사용자 설문지 데이터 가져오기
-            survey_data = self._get_user_survey_data(user_id)
+            # 사용자에게 대기 중인 추천이 있는지 확인
+            pending = self.get_pending_recommendations(user_id) if user_id else []
             
-            # 설문지 데이터를 기반으로 개인화된 추천 생성
-            response_content = self._generate_personalized_recommendation(question, survey_data)
+            if pending:
+                response_content = (
+                    f"현재 {len(pending)}개의 추천이 대기 중입니다.\n"
+                    f"첫 번째 추천: {pending[0].get('bubble_message', '새로운 추천이 있어요!')}"
+                )
+            else:
+                response_content = "현재 대기 중인 추천이 없습니다. 활동을 계속하시면 맞춤형 추천을 준비해 드릴게요!"
             
             return {
                 **state,
@@ -43,8 +92,7 @@ class RecommendationAgent(BaseAgent):
                 "metadata": {
                     "query": question,
                     "user_id": user_id,
-                    "agent_type": "recommendation",
-                    "survey_data_used": survey_data is not None
+                    "pending_count": len(pending)
                 }
             }
         except Exception as e:
@@ -55,943 +103,462 @@ class RecommendationAgent(BaseAgent):
                 "agent_type": "recommendation"
             }
     
-    def _get_user_survey_data(self, user_id: Optional[int]) -> Optional[Dict[str, Any]]:
-        """사용자의 설문지 데이터를 가져옵니다."""
-        if not user_id:
-            return None
-        
+    async def process_async(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
+        """사용자 입력을 비동기로 처리합니다."""
         try:
-            return self.sqlite.get_user_survey_response(user_id)
-        except Exception as e:
-            print(f"설문지 데이터 조회 오류: {e}")
-            return None
-    
-    def _generate_personalized_recommendation(self, question: str, survey_data: Optional[Dict[str, Any]]) -> str:
-        """설문지 데이터를 기반으로 개인화된 추천을 생성합니다."""
-        if not survey_data:
-            return f"추천 에이전트가 '{question}' 요청을 처리했습니다. 개인화된 추천을 위해 초기 설문지를 완료해주세요."
-        
-        # 설문지 데이터에서 정보 추출
-        job_field = survey_data.get('job_field', '')
-        job_field_other = survey_data.get('job_field_other', '')
-        interests = survey_data.get('interests', [])
-        help_preferences = survey_data.get('help_preferences', [])
-        custom_keywords = survey_data.get('custom_keywords', '')
-        
-        # 직업 분야에 따른 맞춤형 추천
-        job_recommendations = self._get_job_based_recommendations(job_field, job_field_other)
-        
-        # 관심사에 따른 추천
-        interest_recommendations = self._get_interest_based_recommendations(interests)
-        
-        # 도움 받고 싶은 영역에 따른 추천
-        help_recommendations = self._get_help_based_recommendations(help_preferences)
-        
-        # 사용자 정의 키워드 활용
-        keyword_recommendations = self._get_keyword_based_recommendations(custom_keywords)
-        
-        # 모든 추천을 종합하여 응답 생성
-        response_parts = []
-        
-        if job_recommendations:
-            response_parts.append(f"📋 {job_field} 분야 관련: {job_recommendations}")
-        
-        if interest_recommendations:
-            response_parts.append(f"🎯 관심사 기반: {interest_recommendations}")
-        
-        if help_recommendations:
-            response_parts.append(f"💡 도움 영역: {help_recommendations}")
-        
-        if keyword_recommendations:
-            response_parts.append(f"🔍 맞춤 키워드: {keyword_recommendations}")
-        
-        if not response_parts:
-            return f"'{question}'에 대한 개인화된 추천을 준비했습니다. 설문지 정보를 바탕으로 맞춤형 제안을 드릴 수 있습니다."
-        
-        return f"'{question}'에 대한 개인화된 추천입니다:\n\n" + "\n\n".join(response_parts)
-    
-    def _get_job_based_recommendations(self, job_field: str, job_field_other: str) -> str:
-        """직업 분야에 따른 추천을 생성합니다."""
-        job_recommendations = {
-            "student": "학습 자료, 연구 논문, 학술 자료를 추천드릴 수 있습니다.",
-            "developer": "최신 기술 트렌드, 개발 도구, 프로그래밍 자료를 추천드릴 수 있습니다.",
-            "designer": "디자인 트렌드, 창작 영감, 디자인 도구를 추천드릴 수 있습니다.",
-            "planner": "비즈니스 전략, 마케팅 자료, 기획 도구를 추천드릴 수 있습니다.",
-            "researcher": "연구 자료, 학술 논문, 실험 데이터를 추천드릴 수 있습니다.",
-            "other": f"'{job_field_other}' 분야에 특화된 자료를 추천드릴 수 있습니다."
-        }
-        
-        return job_recommendations.get(job_field, "전문 분야에 맞는 자료를 추천드릴 수 있습니다.")
-    
-    async def run_periodic_analysis(self, user_id: int, recommendation_type: str = 'scheduled') -> (bool, str):
-        """
-        지난 1주일간의 사용자 데이터를 분석하여 추천을 생성합니다.
-        :return: (성공 여부, 메시지) 튜플
-        """
-        logger.info(f"사용자 {user_id}에 대한 주기적 분석 시작 (타입: {recommendation_type})...")
-        
-        try:
-            # 0. 사용자 설문 데이터 미리 조회 (관심사 기반 가중치에 사용)
-            survey_data = self._get_user_survey_data(user_id)
-
-            # 1. 지난 1주일 데이터 조회
-            one_week_ago = int((datetime.now() - timedelta(days=7)).timestamp())
-            files = self.sqlite.get_collected_files_since(user_id, one_week_ago)
-            history = self.sqlite.get_collected_browser_history_since(user_id, one_week_ago)
-            data_source = "최근 활동"
-
-            # 1차 폴백: 전체 기간 데이터 조회
-            if not files and not history:
-                logger.info(f"User {user_id}: 지난 1주일간 데이터가 없어 전체 데이터를 조회합니다.")
-                files = self.sqlite.get_collected_files(user_id)
-                history = self.sqlite.get_collected_browser_history(user_id)
-                data_source = "전체 활동"
-
-            # 2. 추천에 사용할 "문서" 리스트 구성 (파일 + 브라우저 + 설문)
-            documents: List[str] = []
+            pending = self.get_pending_recommendations(user_id) if user_id else []
             
-            # 2-1. 파일 이름 / 카테고리 / 내용 프리뷰를 하나의 문서로 결합
-            if files:
-                for f in files:
-                    parts = [
-                        f.get('file_name', ''),
-                        f.get('file_category', ''),
-                        f.get('content_preview', '')
-                    ]
-                    doc_text = " ".join(p for p in parts if p)
-                    if doc_text.strip():
-                        documents.append(doc_text)
-
-            # 2-2. 브라우저 기록 제목을 문서로 사용
-            if history:
-                for h in history:
-                    title = h.get('title', '')
-                    if title:
-                        documents.append(title)
-
-            # 2-3. 2차 폴백: 설문 데이터 기반 문서 구성 (활동 로그가 거의 없을 때)
-            if not documents:
-                logger.info(f"User {user_id}: 활동 데이터가 없어 설문 데이터로 추천을 생성합니다.")
-                if survey_data:
-                    data_source = "설문"
-                    job_field = survey_data.get('job_field_other', '') or survey_data.get('job_field', '')
-                    interests = survey_data.get('interests', [])
-                    custom_keywords_str = survey_data.get('custom_keywords', '')
-
-                    # 설문 기반 문서들 구성
-                    if job_field:
-                        documents.append(str(job_field))
-                    for it in interests or []:
-                        documents.append(str(it))
-                    if custom_keywords_str:
-                        documents.append(custom_keywords_str)
-            
-            if not documents:
-                msg = f"User {user_id}: 분석할 데이터가 전혀 없습니다."
-                logger.info(msg)
-                return False, "분석할 데이터가 부족하여 추천을 생성할 수 없습니다."
-                
-            # 3. 설문 기반 관심사와의 유사도를 고려한 키워드 선택 (없으면 TF-IDF로 폴백)
-            top_keywords = self._select_keywords_by_interest_similarity(documents, survey_data, top_n=5)
-
-            if not top_keywords:
-                msg = f"User {user_id}: 주요 활동 주제를 찾지 못했습니다."
-                logger.info(msg)
-                return False, "데이터에서 주요 활동 주제를 찾지 못했습니다."
-
-            # 4. LLM을 사용해 "추천 키워드" 1개 생성 (핵심 키워드 기반)
-            recommended_keyword = self._generate_llm_recommendation_keyword(top_keywords)
-
-            # 5. 추천 생성 및 저장
-            title = "활동 요약 및 추천"
-            if recommended_keyword:
-                content = (
-                    f"'{data_source}' 데이터를 분석한 결과, '{', '.join(top_keywords)}' 주제에 많은 관심을 보이셨습니다. "
-                    f"이 중에서도 특히 '{recommended_keyword}' 주제를 중심으로 더 깊이 있는 정보를 찾아보거나 "
-                    f"새로운 프로젝트를 시작해 보는 것을 추천드립니다."
-                )
+            if pending:
+                content = f"대기 중인 추천이 {len(pending)}개 있습니다."
             else:
-                content = (
-                    f"'{data_source}' 데이터를 분석한 결과, '{', '.join(top_keywords)}' 주제에 많은 관심을 보이셨습니다. "
-                    f"이와 관련하여 더 깊이 있는 정보를 찾아보거나 새로운 프로젝트를 시작해 보는 것은 어떠신가요?"
-                )
+                content = "현재 대기 중인 추천이 없습니다."
             
-            # TODO: 중복 추천 방지 로직 추가
-            
-            if self.sqlite.insert_recommendation(user_id, title, content, recommendation_type=recommendation_type):
-                logger.info(f"✅ User {user_id}: 새로운 주간 추천을 생성했습니다: {top_keywords}")
-                return True, "새로운 추천을 성공적으로 생성했습니다."
-            else:
-                logger.error(f"❌ User {user_id}: 추천 저장에 실패했습니다.")
-                return False, "데이터베이스에 추천을 저장하는 데 실패했습니다."
-        except Exception as e:
-            logger.error(f"User {user_id} 분석 중 오류: {e}", exc_info=True)
-            return False, f"추천 생성 중 오류가 발생했습니다: {e}"
-
-    def _extract_keywords_from_text(self, text: str) -> list:
-        """텍스트에서 의미 있는 키워드를 추출합니다. (불용어 처리 강화)"""
-        if not text:
-            return []
-        
-        import re
-        
-        # 1. 텍스트 전처리: 소문자 변환 및 특수문자 제거 (한글, 영문, 숫자, 공백만 유지)
-        # URL 제거
-        text = re.sub(r'http\S+', '', text)
-        processed_text = re.sub(r'[^ \w가-힣]', ' ', text.lower())
-        words = processed_text.split()
-        
-        # 2. 불용어 리스트 확장 (쓰레기 데이터 필터링)
-        stopwords = {
-            # 일반적인 영어 불용어
-            'and', 'the', 'for', 'with', 'this', 'that', 'from', 'to', 'in', 'on', 'at', 'by', 'of', 'is', 'are', 'was', 'were',
-            'it', 'its', 'as', 'be', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'could', 'will', 'would', 'should',
-            'about', 'which', 'what', 'when', 'where', 'who', 'how', 'why', 'not', 'no', 'yes', 'or', 'but', 'if', 'so',
-            
-            # 웹/브라우저 관련 쓰레기 데이터
-            'http', 'https', 'www', 'com', 'net', 'org', 'co', 'kr', 'ac', 'io', 'html', 'htm', 'php', 'jsp', 'asp',
-            'google', 'naver', 'daum', 'kakao', 'youtube', 'facebook', 'twitter', 'instagram', 'linkedin', 'github',
-            'login', 'signin', 'signup', 'logout', 'signout', 'account', 'password', 'id', 'user', 'profile',
-            'search', 'query', 'find', 'result', 'results', 'index', 'home', 'main', 'site', 'web', 'page',
-            'new', 'tab', 'window', 'untitled', 'loading', 'error', '404', '500', 'server', 'client', 'localhost',
-            'docs', 'drive', 'sheet', 'slide', 'document', 'file', 'folder', 'image', 'video', 'audio',
-            'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'csv', 'txt', 'hwp', 'zip', 'rar', 'tar', 'gz',
-            'receipt', 'success', 'final', 'draft', 'copy', 'sample',
-            
-            # 일반적인 한글 불용어 및 웹 관련
-            '및', '위한', '통해', '관련', '대한', '입니다', '으로', '에서', '하고', '있는', '하는', '되는',
-            '구글', '네이버', '다음', '카카오', '유튜브', '페이스북', '트위터', '인스타그램', '링크드인', '깃허브',
-            '로그인', '회원가입', '로그아웃', '계정', '비밀번호', '아이디', '사용자', '프로필', '내정보',
-            '검색', '통합검색', '결과', '메인', '홈', '사이트', '웹페이지', '페이지', '새탭', '무제',
-            '로딩중', '오류', '에러', '서버', '클라이언트', '파일', '폴더', '문서', '이미지', '동영상',
-            '저장', '열기', '닫기', '수정', '삭제', '취소', '확인', '완료', '설정', '관리', '보기', '더보기',
-            '성공', '인증', '결제', '영수증', '최종', '사본', '임시', '백업', '검토', '초안', '샘플'
-        }
-        
-        # 파일 확장자/형식, 이메일, 무작위 문자열 제거를 위한 패턴
-        file_ext_pattern = re.compile(r'\.(pdf|docx?|pptx?|xlsx?|xls|csv|md|txt|jpg|jpeg|png|gif|zip|rar|hwp)$', re.IGNORECASE)
-        email_pattern = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
-        random_string_pattern = re.compile(r'^[a-zA-Z0-9]{6,}$')
-        alpha_pattern = re.compile(r'^[a-zA-Z가-힣]{2,}$')
-
-        keywords = []
-        for word in words:
-            # 2글자 미만 제외
-            if len(word) < 2:
-                continue
-                
-            # 숫자만 있는 경우 제외
-            if word.isdigit():
-                continue
-                
-            # 불용어 제외
-            if word in stopwords:
-                continue
-                
-            # 한글 조사/어미 간단 제거 (끝글자 기반)
-            # 완벽하진 않지만 '데이터를' -> '데이터' 정도로 정제
-            if re.match(r'[가-힣]+', word):
-                original_word = word
-                # 흔한 조사들
-                josa_list = ['은', '는', '이', '가', '을', '를', '에', '의', '로', '으로', '과', '와', '도', '만', '서', '께']
-                for josa in josa_list:
-                    if word.endswith(josa) and len(word) > len(josa) + 1: # 조사 떼고도 2글자 이상일 때만
-                        word = word[:-len(josa)]
-                        break
-                
-                # 다시 한번 불용어 체크 (조사 떼고 나니 불용어일 수 있음)
-                if word in stopwords:
-                    continue
-            
-            # 파일 확장자/형식 제거
-            if file_ext_pattern.search(word):
-                continue
-
-            # 이메일 주소 제거
-            if email_pattern.match(word):
-                continue
-
-            # 무작위 문자열(영문/숫자 혼합 6자 이상) 제거
-            if random_string_pattern.match(word) and not alpha_pattern.match(word):
-                continue
-
-            keywords.append(word)
-            
-        return list(set(keywords))
-
-    def _extract_keywords_tfidf(self, documents: List[str], top_n: int = 30) -> List[str]:
-        """
-        (폴백용) TF-IDF를 사용하여 문서 집합에서 상위 키워드를 추출합니다.
-        신규 로직에서는 `_compute_tfidf_term_scores`를 사용하고,
-        이 함수는 설문 데이터가 없거나 유사도 계산이 어려운 경우에만 사용합니다.
-        """
-        term_scores, _, _ = self._compute_tfidf_term_scores(documents)
-        if not term_scores:
-            return []
-        sorted_terms = sorted(term_scores.items(), key=lambda x: x[1], reverse=True)
-        return [t for t, _ in sorted_terms[:top_n]]
-    def _compute_tfidf_term_scores(self, documents: List[str]) -> (Dict[str, float], Optional["TfidfVectorizer"], Dict[str, int]):
-        """
-        전처리된 문서 리스트를 대상으로 TF-IDF를 계산하고,
-        각 단어(토큰)별 중요도 점수와 문서 빈도(Doc Frequency)를 반환합니다.
-        """
-        if not documents:
-            return {}, None, {}
-
-        try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
-        except ImportError:
-            logger.warning("scikit-learn이 설치되지 않아 TF-IDF 기반 점수 계산을 사용할 수 없습니다.")
-            # 간단한 빈도수 기반으로 대체
-            all_tokens: List[str] = []
-            for doc in documents:
-                all_tokens.extend(self._extract_keywords_from_text(doc))
-            counter = Counter(all_tokens)
-            scores = {k: float(v) for k, v in counter.items()}
-            doc_freqs = {k: len(documents) for k in counter.keys()}
-            return scores, None, doc_freqs
-
-        try:
-            # 1) 각 문서를 전처리하여 키워드 토큰 문자열로 변환
-            processed_docs: List[str] = []
-            for doc in documents:
-                tokens = self._extract_keywords_from_text(doc)
-                if tokens:
-                    processed_docs.append(" ".join(tokens))
-
-            if not processed_docs:
-                return {}, None, {}
-
-            # 2) TF-IDF 벡터화 (단어 단위)
-            vectorizer = TfidfVectorizer(
-                token_pattern=r"(?u)\b\w+\b",
-                max_features=2000,
-                norm="l2",
+            return AgentResponse(
+                success=True,
+                content=content,
+                agent_type=self.agent_type,
+                metadata={"user_id": user_id, "pending_count": len(pending)}
             )
-            tfidf_matrix = vectorizer.fit_transform(processed_docs)
-            feature_names = vectorizer.get_feature_names_out()
-            doc_freq_arr = (tfidf_matrix > 0).sum(axis=0).A1
-
-            # 3) 각 단어의 전체 문서에서의 중요도 합산
-            scores_arr = tfidf_matrix.sum(axis=0).A1
-            term_scores = {term: float(score) for term, score in zip(feature_names, scores_arr)}
-            doc_freqs = {term: int(df) for term, df in zip(feature_names, doc_freq_arr)}
-
-            return term_scores, vectorizer, doc_freqs
-
         except Exception as e:
-            logger.error(f"TF-IDF 기반 단어 점수 계산 중 오류: {e}", exc_info=True)
-            return {}, None, {}
-
-    def _select_keywords_by_interest_similarity(
+            return AgentResponse(
+                success=False,
+                content=f"추천 에이전트 처리 중 오류: {str(e)}",
+                agent_type=self.agent_type
+            )
+    
+    # ============================================================
+    # Core Active Analysis Methods
+    # ============================================================
+    
+    async def run_active_analysis(self, user_id: int) -> Tuple[bool, str]:
+        """
+        능동형 분석 실행 - 주기적으로 호출되어 추천을 생성합니다.
+        
+        Returns:
+            Tuple[bool, str]: (성공 여부, 메시지)
+        """
+        logger.info(f"사용자 {user_id}에 대한 능동형 분석 시작...")
+        
+        if not self.llm_available:
+            return False, "LLM 서비스를 사용할 수 없습니다."
+        
+        try:
+            # Step 1: Data Preparation
+            browser_logs = self.sqlite.get_unprocessed_browser_logs(user_id)
+            app_logs = self.sqlite.get_unprocessed_app_logs(user_id)
+            
+            if not browser_logs and not app_logs:
+                logger.info(f"User {user_id}: 분석할 새로운 로그가 없습니다.")
+                return False, "분석할 새로운 활동 데이터가 없습니다."
+            
+            # 참조 데이터 조회
+            blacklist = self.sqlite.get_blacklist(user_id)
+            user_interests = self.sqlite.get_user_interests(user_id)
+            survey_data = self.sqlite.get_survey_response(user_id)
+            
+            # Step 2: LLM Analysis & Decision
+            analysis_result = await self._analyze_with_llm(
+                browser_logs=browser_logs,
+                app_logs=app_logs,
+                blacklist=blacklist,
+                user_interests=user_interests,
+                survey_data=survey_data
+            )
+            
+            # Step 3: Process Results
+            browser_log_ids = [log['id'] for log in browser_logs]
+            app_log_ids = [log['id'] for log in app_logs]
+            
+            # 로그를 처리됨으로 표시 (추천 생성 여부와 관계없이)
+            if browser_log_ids:
+                self.sqlite.mark_browser_logs_processed(browser_log_ids)
+            if app_log_ids:
+                self.sqlite.mark_app_logs_processed(app_log_ids)
+            
+            if not analysis_result or not analysis_result.get('should_recommend'):
+                logger.info(f"User {user_id}: LLM이 추천할 만한 내용이 없다고 판단했습니다.")
+                return False, "현재 추천할 만한 특별한 활동이 감지되지 않았습니다."
+            
+            # 추천 생성
+            rec_id = self.sqlite.create_recommendation(
+                user_id=user_id,
+                trigger_type=analysis_result.get('trigger_type', 'new_interest'),
+                keyword=analysis_result.get('keyword', ''),
+                bubble_message=analysis_result.get('bubble_message', ''),
+                related_keywords=analysis_result.get('related_keywords', [])
+            )
+            
+            if rec_id <= 0:
+                logger.error(f"User {user_id}: 추천 저장에 실패했습니다.")
+                return False, "추천 저장에 실패했습니다."
+            
+            # 새로운 관심사라면 등록
+            if analysis_result.get('trigger_type') == 'new_interest':
+                keyword = analysis_result.get('keyword')
+                if keyword:
+                    self.sqlite.upsert_interest(
+                        user_id=user_id,
+                        keyword=keyword,
+                        score=0.6,
+                        source='active_analysis'
+                    )
+            
+            logger.info(f"✅ User {user_id}: 새로운 추천 생성 완료 (ID: {rec_id})")
+            return True, f"새로운 추천이 생성되었습니다: {analysis_result.get('keyword')}"
+            
+        except Exception as e:
+            logger.error(f"User {user_id} 능동형 분석 중 오류: {e}", exc_info=True)
+            return False, f"분석 중 오류가 발생했습니다: {e}"
+    
+    async def _analyze_with_llm(
         self,
-        documents: List[str],
-        survey_data: Optional[Dict[str, Any]],
-        top_n: int = 5
-    ) -> List[str]:
+        browser_logs: List[Dict[str, Any]],
+        app_logs: List[Dict[str, Any]],
+        blacklist: List[str],
+        user_interests: List[Dict[str, Any]],
+        survey_data: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
         """
-        (개선된 버전)
-        1) 문서 전체에 대한 TF-IDF 점수(term_scores)를 계산하고,
-        2) 설문에서 제공된 관심사 키워드와 각 단어의 코사인 유사도를 계산하여,
-        3) weighted_fit_score = 1 * tfidf_score_norm + 9 * cosine_similarity
-           를 기준으로 상위 N개 키워드를 선택합니다.
-        설문 데이터가 없거나 유사도를 계산할 수 없으면 TF-IDF 결과로 폴백합니다.
+        LLM을 사용하여 로그를 분석하고 추천 여부를 결정합니다.
+        
+        Returns:
+            분석 결과 딕셔너리 또는 None
         """
-        # 1. TF-IDF 기반 단어 중요도 계산
-        term_scores, vectorizer, doc_freqs = self._compute_tfidf_term_scores(documents)
-        if not term_scores:
-            return self._extract_keywords_tfidf(documents, top_n=top_n)
-
-        total_docs = max(len(documents), 1)
-
-        # TF-IDF 상위 일부만 후보로 사용 (너무 많은 단어는 노이즈이므로 제한)
-        sorted_terms = sorted(term_scores.items(), key=lambda x: x[1], reverse=True)
-        candidate_keywords = []
-        for term, _ in sorted_terms:
-            df_ratio = doc_freqs.get(term, 0) / total_docs
-            if df_ratio >= 0.4:  # 비정상적으로 자주 등장하는 단어 제거
-                continue
-            candidate_keywords.append(term)
-            if len(candidate_keywords) >= 200:
-                break
-
-        # 2. 설문 기반 관심사 키워드 추출
-        interest_terms: List[str] = []
+        # 로그 요약 생성
+        log_summary = self._prepare_log_summary(browser_logs, app_logs)
+        
+        # 기존 관심사 목록
+        existing_interests = [item['keyword'] for item in user_interests]
+        
+        # Survey 정보 추출
+        survey_info = ""
         if survey_data:
-            job_field = survey_data.get('job_field_other', '') or survey_data.get('job_field', '')
-            if job_field:
-                interest_terms.append(str(job_field))
-
+            job_field = survey_data.get('job_field_other') or survey_data.get('job_field', '')
             interests = survey_data.get('interests', [])
-            if isinstance(interests, list):
-                for it in interests:
-                    if it:
-                        interest_terms.append(str(it))
+            custom_keywords = survey_data.get('custom_keywords', '')
+            survey_info = f"""
+설문지 정보:
+- 직업/분야: {job_field}
+- 관심 분야: {', '.join(interests) if interests else '없음'}
+- 커스텀 키워드: {custom_keywords if custom_keywords else '없음'}
+"""
+        
+        prompt = f"""당신은 사용자의 활동을 분석하여 맞춤형 추천을 제안하는 AI 어시스턴트입니다.
 
-            custom_keywords_str = survey_data.get('custom_keywords', '')
-            if custom_keywords_str:
-                interest_terms.extend(self._extract_keywords_from_text(custom_keywords_str))
+## 사용자 활동 로그
+{log_summary}
 
-        # 설문 정보가 전혀 없으면 TF-IDF로 폴백
-        interest_terms = list({t for t in interest_terms if t})
-        if not interest_terms:
-            return self._extract_keywords_tfidf(documents, top_n=top_n)
+## 기존 관심사
+{', '.join(existing_interests) if existing_interests else '등록된 관심사 없음'}
 
-        # vectorizer가 없다면(=빈도 기반 폴백) TF-IDF 순위만 사용
-        if vectorizer is None:
-            return self._extract_keywords_tfidf(documents, top_n=top_n)
+{survey_info}
 
-        try:
-            # 3. 설문 관심사를 하나의 텍스트로 합쳐 벡터화
-            interest_text = " ".join(interest_terms)
-            interest_vec = vectorizer.transform([interest_text])  # (1, D)
-            if interest_vec.nnz == 0:
-                return self._extract_keywords_tfidf(documents, top_n=top_n)
+## 블랙리스트 (추천 제외 키워드)
+{', '.join(blacklist) if blacklist else '없음'}
 
-            # TF-IDF 점수 정규화 (0~1 범위)
-            max_tfidf = max(term_scores.values()) if term_scores else 1.0
-            if max_tfidf == 0:
-                max_tfidf = 1.0
+## 분석 지시사항
+1. 로그에서 의미 있는 키워드와 주제를 추출하세요.
+2. 블랙리스트에 있는 키워드는 절대 추천하지 마세요.
+3. 다음 두 가지 케이스 중 하나를 판단하세요:
+   - **Case A (new_interest)**: 기존 관심사에 없던 새로운 주제가 발견된 경우
+   - **Case B (periodic_expansion)**: 기존 관심사를 더 깊게 탐구하는 활동이 감지된 경우
+4. 추천할 만한 내용이 없다면 should_recommend를 false로 설정하세요.
+5. 추천 시, 사용자에게 건넬 **친근한 한국어 말풍선 메시지**를 작성하세요.
+   - 예시: "요즘 Python에 관심이 많으시네요! 관련 자료를 찾아볼까요? 🐍"
 
-            scored_candidates = []
-            for term in candidate_keywords:
-                base_score = term_scores.get(term, 0.0)
-                tfidf_norm = base_score / max_tfidf
+## 출력 형식 (JSON)
+{{
+    "should_recommend": true/false,
+    "trigger_type": "new_interest" 또는 "periodic_expansion",
+    "keyword": "핵심 키워드 (한 단어 또는 짧은 구문)",
+    "related_keywords": ["관련", "키워드", "목록"],
+    "bubble_message": "친근한 한국어 말풍선 메시지",
+    "reasoning": "판단 근거 (내부용)"
+}}
 
-                term_vec = vectorizer.transform([term])
-                if term_vec.nnz == 0:
-                    cosine_sim = 0.0
-                else:
-                    # norm='l2' 이므로 dot product == cosine similarity
-                    cosine_sim = float(term_vec @ interest_vec.T)
-
-                weighted_fit_score = 1.0 * tfidf_norm + 9.0 * cosine_sim
-                scored_candidates.append((term, weighted_fit_score))
-
-            # 의미 없는(점수 너무 낮은) 후보 제거
-            scored_candidates = [item for item in scored_candidates if item[1] > 0.05]
-            if not scored_candidates:
-                return self._extract_keywords_tfidf(documents, top_n=top_n)
-
-            scored_candidates.sort(key=lambda x: x[1], reverse=True)
-            top = [w for w, _ in scored_candidates[:top_n]]
-            return top
-
-        except Exception as e:
-            logger.error(f"관심사 기반 가중치 키워드 선택 중 오류: {e}", exc_info=True)
-            return self._extract_keywords_tfidf(documents, top_n=top_n)
-
-
-    def _generate_llm_recommendation_keyword(self, base_keywords: List[str]) -> Optional[str]:
-        """
-        추출된 핵심 키워드들을 기반으로 LLM(Gemini)을 호출하여
-        사용자가 앞으로 더 탐색해 보면 좋을 만한 '추천 키워드' 1개를 생성합니다.
-        """
-        if not base_keywords:
-            return None
-
-        # Gemini API 키가 없으면 스킵
-        try:
-            import google.generativeai as genai
-        except ImportError:
-            logger.warning("google-generativeai가 설치되지 않아 LLM 추천 키워드를 생성할 수 없습니다.")
-            return None
-
-        if not settings.GEMINI_API_KEY:
-            logger.warning("GEMINI_API_KEY가 설정되지 않아 LLM 추천 키워드를 생성할 수 없습니다.")
-            return None
+만약 추천할 내용이 없다면:
+{{
+    "should_recommend": false,
+    "reasoning": "추천하지 않는 이유"
+}}
+"""
 
         try:
-            genai.configure(api_key=settings.GEMINI_API_KEY)
+            response = self.llm_model.generate_content(
+                prompt,
+                request_options={"timeout": 30}
+            )
             
-            # Safety Settings: 모든 차단 필터 해제
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
-
-            model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
-                generation_config={
-                    "temperature": 0.7,
-                    "top_p": 0.8,
-                    "top_k": 40,
-                    "max_output_tokens": 32,
-                    "response_mime_type": "text/plain",
-                },
-                safety_settings=safety_settings,
-            )
-
-            keywords_str = ", ".join(base_keywords)
-            prompt = (
-                "당신은 사용자의 관심사를 분석하는 분석가입니다.\n"
-                f"다음은 사용자가 최근 관심을 보인 키워드 목록입니다: {keywords_str}\n\n"
-                "이 키워드들을 종합했을 때, 사용자가 추가로 탐색해보면 좋을 만한 '연관 주제'를 단 한 단어로 추천해 주세요.\n"
-                "규칙:\n"
-                "1. 반드시 한국어 단어 하나만 출력하세요.\n"
-                "2. 부가 설명, 기호, 공백 없이 오직 단어만 출력하세요.\n"
-                "3. 선정적이거나 위험한 단어는 제외하고, 학술적/실용적 주제를 우선하세요."
-            )
-
-            response = model.generate_content(prompt, request_options={"timeout": 10})
-
-            # Gemini 응답 안전 파싱
+            # 응답 파싱
+            result_text = self._extract_llm_response_text(response)
+            if not result_text:
+                return None
+            
+            # JSON 파싱
+            result = json.loads(result_text)
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"LLM 응답 JSON 파싱 오류: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"LLM 분석 중 오류: {e}", exc_info=True)
+            return None
+    
+    def _prepare_log_summary(
+        self,
+        browser_logs: List[Dict[str, Any]],
+        app_logs: List[Dict[str, Any]]
+    ) -> str:
+        """로그 데이터를 LLM 프롬프트용 요약 텍스트로 변환합니다."""
+        lines = []
+        
+        if browser_logs:
+            lines.append("### 브라우저 방문 기록")
+            for log in browser_logs[:30]:  # 최대 30개
+                title = log.get('title', '제목 없음')
+                url = log.get('url', '')
+                # URL에서 도메인 추출
+                domain = url.split('/')[2] if url.startswith('http') and len(url.split('/')) > 2 else url
+                lines.append(f"- {title} ({domain})")
+        
+        if app_logs:
+            lines.append("\n### 앱 사용 기록")
+            for log in app_logs[:20]:  # 최대 20개
+                app_name = log.get('app_name', '알 수 없음')
+                window_title = log.get('window_title', '')
+                duration = log.get('duration_seconds', 0)
+                if window_title:
+                    lines.append(f"- {app_name}: {window_title} ({duration}초)")
+                else:
+                    lines.append(f"- {app_name} ({duration}초)")
+        
+        return '\n'.join(lines) if lines else "활동 로그 없음"
+    
+    def _extract_llm_response_text(self, response) -> Optional[str]:
+        """Gemini 응답에서 텍스트를 안전하게 추출합니다."""
+        try:
             candidates = getattr(response, "candidates", None) or []
             if not candidates:
-                # Safety Feedback 등 확인
-                feedback = getattr(response, "prompt_feedback", None)
-                logger.warning("LLM 추천 키워드 응답이 비어 있습니다. prompt_feedback=%s", feedback)
                 return None
-
-            candidate = candidates[0]
-            finish_reason = getattr(candidate, "finish_reason", None)
-            # 0: FINISH, 1: MAX_TOKENS, 2: SAFETY, 3: RECITATION, 4: OTHER
-            # SAFETY(2) 등으로 막혀도 혹시나 텍스트가 일부라도 있으면 가져오도록 시도할 수 있으나,
-            # 보통 막히면 parts가 아예 없음. 로그만 남기고 리턴.
-            if finish_reason not in (None, 0, 1):  # MAX_TOKENS까지는 허용
-                logger.warning("LLM 응답이 finish_reason=%s 로 종료되었습니다. (Safety Filter 등)", finish_reason)
-                # 강제 반환하지 않고 아래 파싱 로직 시도 (혹시 모를 텍스트 존재 가능성)
             
+            candidate = candidates[0]
             content_parts = getattr(getattr(candidate, "content", None), "parts", None) or []
-            extracted_chunks: List[str] = []
+            
+            extracted_chunks = []
             for part in content_parts:
                 text_chunk = getattr(part, "text", None)
                 if text_chunk:
                     extracted_chunks.append(text_chunk)
-
+            
             if not extracted_chunks:
-                # fallback: response.text accessor (예외 방지)
+                # Fallback: response.text
                 try:
-                    fallback_text = (response.text or "").strip()
+                    return (response.text or "").strip()
                 except Exception:
-                    fallback_text = ""
-                if fallback_text:
-                    extracted_chunks.append(fallback_text)
-
-            if not extracted_chunks:
-                return None
-
-            text = "\n".join(extracted_chunks).strip()
-            if not text:
-                return None
-
-            # 첫 줄만 사용하고, 양쪽 공백 및 따옴표 제거
-            keyword = text.splitlines()[0].strip().strip("\"'“”'‘’")
-            # 너무 길거나 이상한 경우는 무시
-            if not keyword or len(keyword) > 20:
-                return None
-            return keyword
-
+                    return None
+            
+            return "\n".join(extracted_chunks).strip()
+            
         except Exception as e:
-            logger.error(f"LLM 추천 키워드 생성 중 오류: {e}", exc_info=True)
+            logger.error(f"LLM 응답 추출 오류: {e}")
             return None
-
-    def _get_interest_based_recommendations(self, interests: List[str]) -> str:
-        """관심사에 따른 추천을 생성합니다."""
-        if not interests:
-            return ""
-        
-        interest_mapping = {
-            "tech": "최신 IT 기술, 프로그래밍, 소프트웨어 개발",
-            "finance": "경제 동향, 투자 정보, 금융 뉴스",
-            "ai": "인공지능 연구, 머신러닝, 데이터 사이언스",
-            "design": "디자인 트렌드, 창작 영감, 예술 작품",
-            "marketing": "마케팅 전략, 브랜딩, 광고 캠페인",
-            "productivity": "생산성 도구, 시간 관리, 자기계발",
-            "health": "건강 정보, 운동 루틴, 웰빙 팁",
-            "travel": "여행 정보, 문화 체험, 관광지"
-        }
-        
-        recommendations = [interest_mapping.get(interest, interest) for interest in interests]
-        return f"관심 주제 '{', '.join(recommendations)}'에 관련된 자료를 추천드릴 수 있습니다."
     
-    def _get_help_based_recommendations(self, help_preferences: List[str]) -> str:
-        """도움 받고 싶은 영역에 따른 추천을 생성합니다."""
-        if not help_preferences:
-            return ""
-        
-        help_mapping = {
-            "work_search": "업무 관련 정보 검색 및 요약 도구",
-            "inspiration": "창의적 아이디어와 영감을 주는 자료",
-            "writing": "글쓰기 보조 도구와 템플릿",
-            "learning": "개인 학습을 위한 교육 자료와 강의"
-        }
-        
-        recommendations = [help_mapping.get(pref, pref) for pref in help_preferences]
-        return f"'{', '.join(recommendations)}' 영역에서 도움을 드릴 수 있습니다."
+    # ============================================================
+    # Interaction Handling
+    # ============================================================
     
-    def _get_keyword_based_recommendations(self, custom_keywords: str) -> str:
-        """사용자 정의 키워드에 따른 추천을 생성합니다."""
-        if not custom_keywords:
-            return ""
+    async def handle_response(self, recommendation_id: int, action: str) -> Tuple[bool, str]:
+        """
+        UI에서 사용자가 추천에 응답했을 때 처리합니다.
         
-        return f"'{custom_keywords}'와 관련된 맞춤형 자료를 추천드릴 수 있습니다."
-    
-    async def process_async(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
-        """사용자 입력을 처리합니다. (기존 호환성을 위한 메서드)"""
-        try:
-            # 간단한 추천 관련 응답
-            response_content = f"추천 에이전트가 '{user_input}' 요청을 처리했습니다. 현재는 기본 응답만 제공합니다."
-            
-            return AgentResponse(
-                success=True,
-                content=response_content,
-                agent_type=self.agent_type,
-                metadata={
-                    "query": user_input,
-                    "user_id": user_id,
-                    "agent_type": "recommendation"
-                }
-            )
-        except Exception as e:
-            return AgentResponse(
-                success=False,
-                content=f"추천 에이전트 처리 중 오류가 발생했습니다: {str(e)}",
-                agent_type=self.agent_type
-            )
-    
-    def _analyze_recommendation_type(self, user_input: str) -> str:
-        """추천 타입을 분석합니다."""
-        input_lower = user_input.lower()
+        Args:
+            recommendation_id: 추천 ID
+            action: 'accept' 또는 'reject'
         
-        if any(word in input_lower for word in ["지식", "knowledge", "정보"]):
-            return "knowledge"
-        elif any(word in input_lower for word in ["콘텐츠", "content", "자료"]):
-            return "content"
-        elif any(word in input_lower for word in ["학습", "learning", "경로", "path"]):
-            return "learning_path"
+        Returns:
+            Tuple[bool, str]: (성공 여부, 결과 메시지 또는 리포트)
+        """
+        logger.info(f"추천 {recommendation_id}에 대한 응답 처리: {action}")
+        
+        # 추천 정보 조회
+        recommendation = self.sqlite.get_recommendation(recommendation_id)
+        if not recommendation:
+            return False, "추천을 찾을 수 없습니다."
+        
+        if action == 'accept':
+            return await self._handle_accept(recommendation)
+        elif action == 'reject':
+            return await self._handle_reject(recommendation)
         else:
-            return "knowledge"
+            return False, f"알 수 없는 액션: {action}"
     
-    async def _recommend_knowledge(self, user_id: int, user_input: str) -> AgentResponse:
-        """지식 기반 추천을 생성합니다."""
-        try:
-            # SQLite에서 사용자 데이터 조회
-            collected_files = self.sqlite.get_collected_files(user_id)
-            collected_browser = self.sqlite.get_collected_browser_history(user_id)
-            collected_apps = self.sqlite.get_collected_apps(user_id)
-            
-            # 사용자 관심사 추출 (간단한 방법)
-            interests = self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
-            
-            # 기본 추천 로직
-            recommendations = self._generate_basic_recommendations(interests, user_input)
-            
-            return AgentResponse(
-                success=True,
-                content=f"추천 결과: {recommendations}",
-                agent_type=self.agent_type,
-                metadata={"user_id": user_id, "interests": interests}
+    async def _handle_accept(self, recommendation: Dict[str, Any]) -> Tuple[bool, str]:
+        """추천 수락 처리 - 리포트 생성"""
+        rec_id = recommendation['id']
+        user_id = recommendation['user_id']
+        keyword = recommendation.get('keyword', '')
+        related_keywords = recommendation.get('related_keywords', [])
+        
+        # 상태 업데이트
+        self.sqlite.update_recommendation_status(rec_id, 'accepted')
+        
+        # LLM으로 요약 리포트 생성
+        if self.llm_available:
+            report_content = await self._generate_report(
+                keyword=keyword,
+                related_keywords=related_keywords,
+                user_id=user_id
             )
-            
-        except Exception as e:
-            return AgentResponse(
-                success=False,
-                content=f"지식 추천 중 오류: {str(e)}",
-                agent_type=self.agent_type
+        else:
+            report_content = f"## {keyword} 관련 정보\n\n관심 키워드: {keyword}\n관련 키워드: {', '.join(related_keywords)}\n\n*LLM 서비스를 사용할 수 없어 상세 리포트를 생성하지 못했습니다.*"
+        
+        # 리포트 저장
+        self.sqlite.update_recommendation_report(rec_id, report_content)
+        
+        # 관심사 점수 상향 조정
+        if keyword:
+            self.sqlite.upsert_interest(
+                user_id=user_id,
+                keyword=keyword,
+                score=0.8,
+                source='user_accepted'
             )
+        
+        logger.info(f"✅ 추천 {rec_id} 수락 처리 완료")
+        return True, report_content
     
-    async def _recommend_content(self, user_id: int, user_input: str) -> AgentResponse:
-        """콘텐츠 추천을 생성합니다."""
+    async def _handle_reject(self, recommendation: Dict[str, Any]) -> Tuple[bool, str]:
+        """추천 거절 처리 - 블랙리스트 추가"""
+        rec_id = recommendation['id']
+        user_id = recommendation['user_id']
+        keyword = recommendation.get('keyword', '')
+        
+        # 상태 업데이트
+        self.sqlite.update_recommendation_status(rec_id, 'rejected')
+        
+        # 키워드 블랙리스트에 추가
+        if keyword:
+            self.sqlite.add_to_blacklist(user_id, keyword)
+            logger.info(f"키워드 '{keyword}'가 사용자 {user_id}의 블랙리스트에 추가되었습니다.")
+        
+        logger.info(f"❌ 추천 {rec_id} 거절 처리 완료")
+        return True, "추천이 거절되었습니다. 해당 키워드는 더 이상 추천되지 않습니다."
+    
+    async def _generate_report(
+        self,
+        keyword: str,
+        related_keywords: List[str],
+        user_id: int
+    ) -> str:
+        """LLM을 사용하여 요약 리포트를 생성합니다."""
+        # 사용자 관심사와 설문 정보 조회
+        survey_data = self.sqlite.get_survey_response(user_id)
+        
+        context = ""
+        if survey_data:
+            job_field = survey_data.get('job_field_other') or survey_data.get('job_field', '')
+            if job_field:
+                context = f"사용자 직업/분야: {job_field}"
+        
+        prompt = f"""당신은 사용자에게 맞춤형 정보를 제공하는 AI 어시스턴트입니다.
+
+## 키워드 정보
+- 핵심 키워드: {keyword}
+- 관련 키워드: {', '.join(related_keywords) if related_keywords else '없음'}
+{f'- {context}' if context else ''}
+
+## 요청
+위 키워드에 대해 사용자가 알면 좋을 **핵심 정보를 3~5줄로 요약**해서 Markdown 형식으로 작성해 주세요.
+
+## 작성 가이드라인
+1. 친근하고 이해하기 쉬운 한국어로 작성
+2. 핵심 개념이나 최신 트렌드 위주로 설명
+3. 이모지를 적절히 활용하여 가독성 향상
+4. 필요하다면 간단한 팁이나 추천 리소스 포함
+
+## 출력 형식
+Markdown 형식의 요약 리포트 (3~5줄)
+"""
+
         try:
-            # 사용자 관심사 기반으로 웹 검색
-            interests = await self._get_user_interests(user_id)
-            
-            if not interests:
-                return AgentResponse(
-                    success=True,
-                    content="사용자 관심사를 파악할 수 없어 추천을 생성할 수 없습니다.",
-                    agent_type=self.agent_type
-                )
-            
-            # 관심사별로 웹 검색
-            recommendations = []
-            for interest in interests[:3]:  # 상위 3개 관심사만 사용
-                search_result = await self.execute_tool(
-                    "web_search_tool",
-                    query=f"{interest} 관련 최신 정보",
-                    max_results=2
-                )
-                
-                if search_result.success:
-                    for item in search_result.data:
-                        recommendations.append({
-                            "title": item.get("title", ""),
-                            "url": item.get("url", ""),
-                            "snippet": item.get("snippet", ""),
-                            "interest": interest,
-                            "type": "web_content"
-                        })
-            
-            return AgentResponse(
-                success=True,
-                content={
-                    "recommendations": recommendations[:10],  # 최대 10개
-                    "user_interests": interests
+            # 리포트 생성용 모델 설정 (일반 텍스트 출력)
+            report_model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                generation_config={
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "max_output_tokens": 512,
+                    "response_mime_type": "text/plain",
                 },
-                agent_type=self.agent_type,
-                tools_used=["web_search_tool"],
-                metadata={"recommendation_type": "content"}
+                safety_settings=self.safety_settings,
             )
             
-        except Exception as e:
-            return AgentResponse(
-                success=False,
-                content=f"콘텐츠 추천 생성 중 오류: {str(e)}",
-                agent_type=self.agent_type
+            response = report_model.generate_content(
+                prompt,
+                request_options={"timeout": 20}
             )
+            
+            report_text = self._extract_llm_response_text(response)
+            if report_text:
+                return report_text
+            
+        except Exception as e:
+            logger.error(f"리포트 생성 중 오류: {e}", exc_info=True)
+        
+        # Fallback 리포트
+        return f"""## {keyword} 📌
+
+**{keyword}**에 대해 관심을 가지고 계시네요!
+
+관련 키워드: {', '.join(related_keywords) if related_keywords else '없음'}
+
+더 자세한 정보가 필요하시면 채팅으로 질문해 주세요! 🔍
+"""
     
-    async def _recommend_learning_path(self, user_id: int, user_input: str) -> AgentResponse:
-        """학습 경로 추천을 생성합니다."""
+    # ============================================================
+    # UI Support Methods
+    # ============================================================
+    
+    def get_pending_recommendations(self, user_id: int) -> List[Dict[str, Any]]:
+        """
+        대기 중인 추천 목록을 반환합니다.
+        
+        Args:
+            user_id: 사용자 ID
+        
+        Returns:
+            status='pending'인 추천 목록
+        """
         try:
-            # 사용자 현재 수준과 목표 분석
-            user_profile = await self._analyze_user_profile(user_id)
-            
-            # 학습 경로 생성
-            learning_path = self._generate_learning_path(user_profile, user_input)
-            
-            return AgentResponse(
-                success=True,
-                content={
-                    "learning_path": learning_path,
-                    "user_profile": user_profile
-                },
-                agent_type=self.agent_type,
-                metadata={"recommendation_type": "learning_path"}
-            )
-            
+            return self.sqlite.get_pending_recommendations(user_id)
         except Exception as e:
-            return AgentResponse(
-                success=False,
-                content=f"학습 경로 추천 생성 중 오류: {str(e)}",
-                agent_type=self.agent_type
-            )
-    
-    def _extract_interests_from_data(self, collected_files: List[Dict[str, Any]], 
-                                   collected_browser: List[Dict[str, Any]], 
-                                   collected_apps: List[Dict[str, Any]]) -> List[str]:
-        """수집된 데이터에서 사용자 관심사를 추출합니다."""
-        interests = []
-        
-        # 파일명에서 관심사 추출
-        for file_info in collected_files:
-            file_name = file_info.get('file_name', '').lower()
-            file_path = file_info.get('file_path', '').lower()
-            
-            # 일반적인 관심사 키워드
-            interest_keywords = [
-                "python", "javascript", "java", "c++", "machine learning", "ai", "data science",
-                "web development", "mobile development", "database", "cloud", "devops",
-                "프로그래밍", "코딩", "개발", "학습", "프로젝트", "알고리즘", "자료구조"
-            ]
-            
-            for keyword in interest_keywords:
-                if keyword in file_name or keyword in file_path:
-                    interests.append(keyword)
-        
-        # 브라우저 히스토리에서 관심사 추출
-        for browser_info in collected_browser:
-            url = browser_info.get('url', '').lower()
-            title = browser_info.get('title', '').lower()
-            
-            for keyword in interest_keywords:
-                if keyword in url or keyword in title:
-                    interests.append(keyword)
-        
-        # 앱 사용에서 관심사 추출
-        for app_info in collected_apps:
-            app_name = app_info.get('app_name', '').lower()
-            window_title = app_info.get('window_title', '').lower()
-            
-            for keyword in interest_keywords:
-                if keyword in app_name or keyword in window_title:
-                    interests.append(keyword)
-        
-        # 중복 제거 및 빈도순 정렬
-        interest_counts = {}
-        for interest in interests:
-            interest_counts[interest] = interest_counts.get(interest, 0) + 1
-        
-        sorted_interests = sorted(interest_counts.items(), key=lambda x: x[1], reverse=True)
-        return [interest for interest, count in sorted_interests[:10]]  # 상위 10개
-    
-    async def _get_user_interests(self, user_id: int) -> List[str]:
-        """사용자 관심사를 가져옵니다."""
-        try:
-            # SQLite에서 사용자 데이터 조회
-            collected_files = self.sqlite.get_collected_files(user_id)
-            collected_browser = self.sqlite.get_collected_browser_history(user_id)
-            collected_apps = self.sqlite.get_collected_apps(user_id)
-            
-            return self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
-        except Exception as e:
-            print(f"사용자 관심사 추출 오류: {e}")
+            logger.error(f"대기 중 추천 조회 오류: {e}")
             return []
     
-    def _calculate_relevance_score(self, item: Dict[str, Any], interests: List[str], user_input: str) -> float:
-        """지식 항목의 관련성 점수를 계산합니다."""
-        score = 0.0
-        
-        # 사용자 관심사와의 매칭
-        item_content_lower = item.get('content', '').lower()
-        item_title_lower = item.get('title', '').lower()
-        
-        for interest in interests:
-            if interest.lower() in item_content_lower:
-                score += 2.0
-            if interest.lower() in item_title_lower:
-                score += 3.0
-        
-        # 사용자 입력과의 매칭
-        user_input_lower = user_input.lower()
-        if user_input_lower in item_content_lower:
-            score += 1.5
-        if user_input_lower in item_title_lower:
-            score += 2.0
-        
-        # 태그 매칭
-        tags = item.get('tags', [])
-        for tag in tags:
-            if tag.lower() in user_input_lower:
-                score += 1.0
-        
-        return score
-    
-    def _generate_basic_recommendations(self, interests: List[str], user_input: str) -> List[Dict[str, Any]]:
-        """기본 추천을 생성합니다."""
-        recommendations = []
-        
-        # 관심사 기반 추천
-        for interest in interests[:5]:  # 상위 5개 관심사
-            recommendations.append({
-                "type": "interest_based",
-                "title": f"{interest} 관련 학습 자료",
-                "description": f"{interest}에 대한 학습 자료를 추천합니다.",
-                "interest": interest,
-                "priority": "high"
-            })
-        
-        # 사용자 입력 기반 추천
-        if user_input:
-            recommendations.append({
-                "type": "query_based",
-                "title": f"'{user_input}' 관련 추천",
-                "description": f"사용자 질문 '{user_input}'에 대한 관련 자료를 추천합니다.",
-                "query": user_input,
-                "priority": "high"
-            })
-        
-        return recommendations
-    
-    async def _analyze_user_profile(self, user_id: int) -> Dict[str, Any]:
-        """사용자 프로필을 분석합니다."""
+    def get_recommendation(self, recommendation_id: int) -> Optional[Dict[str, Any]]:
+        """추천 상세 정보를 조회합니다."""
         try:
-            # SQLite에서 사용자 데이터 조회
-            collected_files = self.sqlite.get_collected_files(user_id)
-            collected_browser = self.sqlite.get_collected_browser_history(user_id)
-            collected_apps = self.sqlite.get_collected_apps(user_id)
-            
-            # 관심사 추출
-            interests = self._extract_interests_from_data(collected_files, collected_browser, collected_apps)
-            
-            # 간단한 사용자 프로필 생성
-            total_interactions = len(collected_files) + len(collected_browser) + len(collected_apps)
-            experience_level = self._estimate_experience_level_simple(total_interactions)
-            
-            return {
-                "user_id": user_id,
-                "username": f"User_{user_id}",
-                "total_interactions": total_interactions,
-                "agent_usage": {"general": total_interactions},
-                "interests": interests,
-                "experience_level": experience_level
-            }
+            return self.sqlite.get_recommendation(recommendation_id)
         except Exception as e:
-            return {
-                "user_id": user_id,
-                "username": "Unknown",
-                "total_interactions": 0,
-                "agent_usage": {},
-                "interests": [],
-                "experience_level": "beginner"
-            }
+            logger.error(f"추천 조회 오류: {e}")
+            return None
     
-    def _estimate_experience_level_simple(self, total_interactions: int) -> str:
-        """사용자의 경험 수준을 추정합니다."""
-        if total_interactions < 10:
-            return "beginner"
-        elif total_interactions < 50:
-            return "intermediate"
-        else:
-            return "advanced"
+    def get_all_recommendations(self, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """사용자의 모든 추천 내역을 조회합니다."""
+        try:
+            return self.sqlite.get_all_recommendations(user_id, limit)
+        except Exception as e:
+            logger.error(f"모든 추천 조회 오류: {e}")
+            return []
     
-    def _generate_learning_path(self, user_profile: Dict[str, Any], user_input: str) -> List[Dict[str, Any]]:
-        """학습 경로를 생성합니다."""
-        experience_level = user_profile.get("experience_level", "beginner")
-        interests = user_profile.get("interests", [])
-        
-        # 기본 학습 경로 템플릿
-        learning_paths = {
-            "beginner": [
-                {
-                    "step": 1,
-                    "title": "기초 개념 학습",
-                    "description": "프로그래밍의 기본 개념을 이해합니다.",
-                    "estimated_time": "2-3주",
-                    "resources": ["온라인 튜토리얼", "기초 교재"]
-                },
-                {
-                    "step": 2,
-                    "title": "실습 프로젝트",
-                    "description": "간단한 프로젝트를 통해 실습합니다.",
-                    "estimated_time": "1-2주",
-                    "resources": ["미니 프로젝트", "코딩 연습"]
-                }
-            ],
-            "intermediate": [
-                {
-                    "step": 1,
-                    "title": "심화 개념 학습",
-                    "description": "고급 프로그래밍 개념을 학습합니다.",
-                    "estimated_time": "3-4주",
-                    "resources": ["고급 교재", "온라인 강의"]
-                },
-                {
-                    "step": 2,
-                    "title": "실무 프로젝트",
-                    "description": "실무 수준의 프로젝트를 진행합니다.",
-                    "estimated_time": "4-6주",
-                    "resources": ["오픈소스 프로젝트", "팀 프로젝트"]
-                }
-            ],
-            "advanced": [
-                {
-                    "step": 1,
-                    "title": "전문 분야 심화",
-                    "description": "특정 분야의 전문 지식을 습득합니다.",
-                    "estimated_time": "6-8주",
-                    "resources": ["전문 서적", "컨퍼런스 참석"]
-                },
-                {
-                    "step": 2,
-                    "title": "리더십 및 멘토링",
-                    "description": "다른 개발자를 가르치고 리드합니다.",
-                    "estimated_time": "지속적",
-                    "resources": ["멘토링 프로그램", "기술 블로그 운영"]
-                }
-            ]
-        }
-        
-        base_path = learning_paths.get(experience_level, learning_paths["beginner"])
-        
-        # 관심사에 맞게 커스터마이징
-        customized_path = []
-        for step in base_path:
-            customized_step = step.copy()
-            if interests:
-                customized_step["description"] += f" (관심 분야: {', '.join(interests[:3])})"
-            customized_path.append(customized_step)
-        
-        return customized_path 
+    # ============================================================
+    # Legacy Compatibility (run_periodic_analysis wrapper)
+    # ============================================================
+    
+    async def run_periodic_analysis(self, user_id: int, recommendation_type: str = 'scheduled') -> Tuple[bool, str]:
+        """
+        기존 run_periodic_analysis 메서드와의 호환성을 위한 래퍼.
+        내부적으로 run_active_analysis를 호출합니다.
+        """
+        return await self.run_active_analysis(user_id)

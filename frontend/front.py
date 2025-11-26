@@ -52,11 +52,17 @@ class FloatingChatApp:
         # 큐 처리 시작
         self.process_message_queue()
 
-        # 추천 알림을 위한 변수
+        # 추천 말풍선을 위한 변수
+        self.recommendation_bubble = None
+        self.recommendation_bubble_visible = False
+        self.current_recommendation = None
+        self.bubble_auto_close_id = None
+        
+        # 기존 알림 변수 (호환성 유지)
         self.recommendation_notification_visible = False
 
-        # 추천 알림 확인 시작
-        self.check_for_recommendations()
+        # 추천 폴링 시작 (30초마다)
+        self.poll_recommendations()
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
@@ -1534,16 +1540,20 @@ class FloatingChatApp:
         if hasattr(self, 'streaming_text_buffer'):
             delattr(self, 'streaming_text_buffer')
         
-    def check_for_recommendations(self):
-        """주기적으로 서버에 새로운 추천이 있는지 확인합니다."""
+    # ============================================================
+    # Recommendation Bubble UI (Active Agent Integration)
+    # ============================================================
+    
+    def poll_recommendations(self):
+        """30초마다 백엔드에서 pending 추천을 확인합니다."""
         # 백그라운드 스레드에서 API 호출
-        threading.Thread(target=self._fetch_recommendations, daemon=True).start()
+        threading.Thread(target=self._fetch_pending_recommendations, daemon=True).start()
         
-        # 5분 후에 다시 확인
-        self.root.after(300000, self.check_for_recommendations)
-
-    def _fetch_recommendations(self):
-        """[백그라운드 스레드] 추천 API를 호출합니다."""
+        # 30초 후에 다시 확인
+        self.root.after(30000, self.poll_recommendations)
+    
+    def _fetch_pending_recommendations(self):
+        """[백그라운드 스레드] pending 추천 API를 호출합니다."""
         try:
             from login_view import get_stored_token
             token = get_stored_token()
@@ -1558,50 +1568,329 @@ class FloatingChatApp:
             if response.status_code == 200:
                 result = response.json()
                 if result.get("success") and result.get("recommendations"):
-                    # UI 스레드에서 알림을 표시하도록 큐에 넣음
-                    self.message_queue.put({
-                        'type': 'show_recommendation',
-                        'recommendations': result["recommendations"]
-                    })
+                    recommendations = result["recommendations"]
+                    # pending 상태인 것만 필터링
+                    pending_recs = [r for r in recommendations if r.get('status') == 'pending']
+                    if pending_recs:
+                        # UI 스레드에서 말풍선 표시
+                        self.message_queue.put({
+                            'type': 'show_recommendation',
+                            'recommendations': pending_recs
+                        })
         except requests.exceptions.RequestException as e:
-            print(f"추천 확인 중 오류: {e}")
-
+            print(f"추천 폴링 중 오류: {e}")
+    
     def show_recommendation_notification(self, recommendations):
-        """새로운 추천 알림을 채팅창 헤더에 표시합니다."""
-        if self.recommendation_notification_visible or not recommendations:
+        """새로운 추천이 있으면 말풍선을 표시합니다."""
+        if not recommendations:
             return
-
-        # 첫 번째 추천을 대표로 사용
-        latest_rec = recommendations[0]
-
-        self.notification_frame = tk.Frame(self.chat_window, bg='#10b981', height=40)
-        self.notification_frame.pack(fill='x', side='top', before=self.messages_frame)
-        self.notification_frame.pack_propagate(False)
-
-        notification_label = tk.Label(
-            self.notification_frame,
-            text=f"💡 새로운 추천: {latest_rec['title']}",
-            font=(self.default_font, 11),
-            bg='#10b981',
-            fg='white'
-        )
-        notification_label.pack(side='left', padx=15, pady=5)
         
-        close_button = tk.Button(
-            self.notification_frame,
+        # 이미 말풍선이 떠있으면 닫고 새로 띄움
+        if self.recommendation_bubble_visible:
+            self.close_recommendation_bubble()
+        
+        # 첫 번째 pending 추천 사용
+        self.current_recommendation = recommendations[0]
+        self.create_recommendation_bubble(self.current_recommendation)
+    
+    def create_recommendation_bubble(self, recommendation):
+        """플로팅 버튼 위에 말풍선 UI를 생성합니다."""
+        if self.recommendation_bubble_visible:
+            return
+        
+        # 말풍선 Toplevel 윈도우 생성
+        self.recommendation_bubble = tk.Toplevel(self.root)
+        self.recommendation_bubble.wm_overrideredirect(True)
+        self.recommendation_bubble.attributes('-topmost', True)
+        self.recommendation_bubble.configure(bg='white')
+        
+        # 메시지 내용
+        bubble_message = recommendation.get('bubble_message', '새로운 추천이 있어요!')
+        keyword = recommendation.get('keyword', '')
+        rec_id = recommendation.get('id')
+        
+        # 메인 프레임 (둥근 모서리 효과를 위한 패딩)
+        main_frame = tk.Frame(self.recommendation_bubble, bg='white', padx=2, pady=2)
+        main_frame.pack(fill='both', expand=True)
+        
+        # 내부 컨테이너
+        inner_frame = tk.Frame(main_frame, bg='#f8fafc', padx=15, pady=12)
+        inner_frame.pack(fill='both', expand=True)
+        
+        # 상단: 아이콘과 닫기 버튼
+        header_frame = tk.Frame(inner_frame, bg='#f8fafc')
+        header_frame.pack(fill='x', pady=(0, 8))
+        
+        # 💡 아이콘
+        icon_label = tk.Label(
+            header_frame,
+            text="💡",
+            font=('Arial', 16),
+            bg='#f8fafc'
+        )
+        icon_label.pack(side='left')
+        
+        # 키워드 라벨
+        if keyword:
+            keyword_label = tk.Label(
+                header_frame,
+                text=keyword,
+                font=(self.default_font, 10, 'bold'),
+                bg='#f8fafc',
+                fg='#4f46e5'
+            )
+            keyword_label.pack(side='left', padx=(8, 0))
+        
+        # 닫기 버튼
+        close_btn = tk.Button(
+            header_frame,
             text="✕",
-            font=(self.default_font, 11, 'bold'),
-            bg='#10b981',
+            font=(self.default_font, 10),
+            bg='#f8fafc',
+            fg='#9ca3af',
+            relief='flat',
+            cursor='hand2',
+            command=self.close_recommendation_bubble,
+            activebackground='#f1f5f9'
+        )
+        close_btn.pack(side='right')
+        
+        # 메시지 라벨 (Word wrap 적용)
+        message_label = tk.Label(
+            inner_frame,
+            text=bubble_message,
+            font=(self.default_font, 11),
+            bg='#f8fafc',
+            fg='#1f2937',
+            wraplength=250,
+            justify='left'
+        )
+        message_label.pack(fill='x', pady=(0, 12))
+        
+        # 버튼 프레임
+        button_frame = tk.Frame(inner_frame, bg='#f8fafc')
+        button_frame.pack(fill='x')
+        
+        # [네, 궁금해요] 버튼
+        accept_btn = tk.Button(
+            button_frame,
+            text="네, 궁금해요 👀",
+            font=(self.default_font, 10, 'bold'),
+            bg='#4f46e5',
             fg='white',
             relief='flat',
-            command=self.dismiss_recommendation_notification
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=lambda: self.handle_recommendation_accept(rec_id),
+            activebackground='#4338ca',
+            activeforeground='white'
         )
-        close_button.pack(side='right', padx=10)
+        accept_btn.pack(side='left', padx=(0, 8))
+        
+        # [관심 없음] 버튼
+        reject_btn = tk.Button(
+            button_frame,
+            text="관심 없음",
+            font=(self.default_font, 10),
+            bg='#e5e7eb',
+            fg='#4b5563',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=lambda: self.handle_recommendation_reject(rec_id),
+            activebackground='#d1d5db'
+        )
+        reject_btn.pack(side='left')
+        
+        # 말풍선 꼬리 (삼각형) - Canvas로 구현
+        tail_canvas = tk.Canvas(
+            self.recommendation_bubble,
+            width=20,
+            height=10,
+            bg='white',
+            highlightthickness=0
+        )
+        tail_canvas.pack(side='bottom')
+        tail_canvas.create_polygon(
+            0, 0,
+            10, 10,
+            20, 0,
+            fill='#f8fafc',
+            outline='#f8fafc'
+        )
+        
+        # 그림자 효과 (테두리로 대체)
+        self.recommendation_bubble.configure(
+            highlightbackground='#e5e7eb',
+            highlightthickness=1
+        )
+        
+        # 위치 계산: 플로팅 버튼 바로 위
+        self.recommendation_bubble.update_idletasks()
+        bubble_width = self.recommendation_bubble.winfo_reqwidth()
+        bubble_height = self.recommendation_bubble.winfo_reqheight()
+        
+        button_x = self.root.winfo_x()
+        button_y = self.root.winfo_y()
+        
+        # 버튼 중앙 위에 배치
+        x = button_x + 35 - (bubble_width // 2)
+        y = button_y - bubble_height - 10
+        
+        # 화면 경계 확인
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        if x < 10:
+            x = 10
+        if x + bubble_width > screen_width - 10:
+            x = screen_width - bubble_width - 10
+        if y < 10:
+            # 버튼 아래쪽에 표시
+            y = button_y + 80
+        
+        self.recommendation_bubble.geometry(f"+{x}+{y}")
+        
+        self.recommendation_bubble_visible = True
+        
+        # 15초 후 자동 닫기
+        self.bubble_auto_close_id = self.root.after(15000, self.close_recommendation_bubble)
+    
+    def close_recommendation_bubble(self):
+        """말풍선을 닫습니다."""
+        # 자동 닫기 타이머 취소
+        if self.bubble_auto_close_id:
+            self.root.after_cancel(self.bubble_auto_close_id)
+            self.bubble_auto_close_id = None
+        
+        # 말풍선 파괴
+        if self.recommendation_bubble and self.recommendation_bubble.winfo_exists():
+            self.recommendation_bubble.destroy()
+        
+        self.recommendation_bubble = None
+        self.recommendation_bubble_visible = False
+        self.current_recommendation = None
+    
+    def handle_recommendation_accept(self, recommendation_id):
+        """[네, 궁금해요] 클릭 처리"""
+        print(f"[UI] 추천 {recommendation_id} 수락")
+        
+        # 말풍선 닫기
+        self.close_recommendation_bubble()
+        
+        # 채팅창 열기
+        if self.chat_window.state() == 'withdrawn':
+            self.toggle_chat_window()
+        
+        # 로딩 메시지 표시
+        loading_widget = self.show_loading_message()
+        self.update_loading_message(loading_widget, "리포트를 생성하고 있습니다...")
+        
+        # 백그라운드에서 API 호출
+        threading.Thread(
+            target=self._call_recommendation_respond_api,
+            args=(recommendation_id, 'accept', loading_widget),
+            daemon=True
+        ).start()
+    
+    def handle_recommendation_reject(self, recommendation_id):
+        """[관심 없음] 클릭 처리"""
+        print(f"[UI] 추천 {recommendation_id} 거절")
+        
+        # 말풍선 닫기
+        self.close_recommendation_bubble()
+        
+        # 백그라운드에서 API 호출
+        threading.Thread(
+            target=self._call_recommendation_respond_api,
+            args=(recommendation_id, 'reject', None),
+            daemon=True
+        ).start()
+    
+    def _call_recommendation_respond_api(self, recommendation_id, action, loading_widget):
+        """[백그라운드 스레드] 추천 응답 API를 호출합니다."""
+        try:
+            from login_view import get_stored_token
+            token = get_stored_token()
+            if not token:
+                if loading_widget:
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': "오류: 로그인이 필요합니다.",
+                        'loading_widget': loading_widget
+                    })
+                return
 
-        self.recommendation_notification_visible = True
+            response = requests.post(
+                f"{self.API_BASE_URL}/api/v2/recommendations/{recommendation_id}/respond",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"action": action},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                if action == 'accept' and result.get('success'):
+                    # 리포트 내용을 채팅창에 표시
+                    report_content = result.get('report_content', '리포트를 불러올 수 없습니다.')
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': report_content,
+                        'loading_widget': loading_widget
+                    })
+                elif action == 'reject':
+                    print(f"[UI] 추천 거절 완료: {result.get('message')}")
+                else:
+                    if loading_widget:
+                        self.message_queue.put({
+                            'type': 'bot_response',
+                            'response': result.get('message', '처리 중 오류가 발생했습니다.'),
+                            'loading_widget': loading_widget
+                        })
+            else:
+                error_msg = f"오류: 서버 응답 {response.status_code}"
+                try:
+                    error_detail = response.json().get('detail', '')
+                    if error_detail:
+                        error_msg = f"오류: {error_detail}"
+                except:
+                    pass
+                
+                if loading_widget:
+                    self.message_queue.put({
+                        'type': 'bot_response',
+                        'response': error_msg,
+                        'loading_widget': loading_widget
+                    })
+                    
+        except requests.exceptions.RequestException as e:
+            print(f"추천 응답 API 호출 오류: {e}")
+            if loading_widget:
+                self.message_queue.put({
+                    'type': 'bot_response',
+                    'response': f"서버 연결 오류: {str(e)}",
+                    'loading_widget': loading_widget
+                })
+    
+    # ============================================================
+    # Legacy Recommendation Notification (Backward Compatibility)
+    # ============================================================
+    
+    def check_for_recommendations(self):
+        """(Legacy) 주기적으로 서버에 새로운 추천이 있는지 확인합니다."""
+        # poll_recommendations로 대체되었으므로 아무것도 하지 않음
+        pass
+
+    def _fetch_recommendations(self):
+        """(Legacy) 추천 API를 호출합니다."""
+        # poll_recommendations로 대체됨
+        pass
 
     def dismiss_recommendation_notification(self):
-        """추천 알림을 닫습니다."""
+        """(Legacy) 추천 알림을 닫습니다."""
         if hasattr(self, 'notification_frame') and self.notification_frame.winfo_exists():
             self.notification_frame.destroy()
         self.recommendation_notification_visible = False
