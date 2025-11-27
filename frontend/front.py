@@ -47,8 +47,12 @@ class FloatingChatApp:
         # ESC 키로 채팅창 닫기
         self.root.bind('<Escape>', self.close_chat_window)
         
-        # Ctrl+C로 복사 기능 (채팅창에서)
-        self.root.bind('<Control-c>', self.copy_selected_text)
+        # 복사 기능 (채팅창에서) - 플랫폼별 단축키
+        system = platform.system()
+        if system == "Darwin":  # macOS
+            self.root.bind('<Command-c>', self.copy_selected_text)
+        else:  # Windows/Linux
+            self.root.bind('<Control-c>', self.copy_selected_text)
         
         # 큐 처리 시작
         self.process_message_queue()
@@ -72,16 +76,28 @@ class FloatingChatApp:
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
-        # Windows에서 사용 가능한 한글 폰트들
-        korean_fonts = [
-            'Malgun Gothic',  # 맑은 고딕 (Windows 기본)
-            'Nanum Gothic',   # 나눔고딕
-            'Nanum Barun Gothic',  # 나눔바른고딕
-            'Dotum',          # 돋움
-            'Gulim',          # 굴림
-            'Batang',         # 바탕
-            'Arial Unicode MS'  # Arial Unicode MS
-        ]
+        # 플랫폼별 한글 폰트 설정
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            korean_fonts = [
+                'Apple SD Gothic Neo',  # macOS 기본 한글 폰트
+                'AppleGothic',          # macOS 기본 고딕
+                'Nanum Gothic',         # 나눔고딕 (설치된 경우)
+                'Helvetica Neue',       # macOS 기본 영문 폰트
+                'Lucida Grande',        # macOS 시스템 폰트
+                'Arial Unicode MS'      # Unicode 폰트
+            ]
+        else:  # Windows/Linux
+            korean_fonts = [
+                'Malgun Gothic',        # 맑은 고딕 (Windows 기본)
+                'Nanum Gothic',         # 나눔고딕
+                'Nanum Barun Gothic',   # 나눔바른고딕
+                'Dotum',                # 돋움
+                'Gulim',                # 굴림
+                'Batang',               # 바탕
+                'Arial Unicode MS'      # Arial Unicode MS
+            ]
         
         # 사용 가능한 폰트 찾기
         self.default_font = 'Arial'  # 기본값
@@ -612,11 +628,17 @@ class FloatingChatApp:
     
     def _on_mousewheel(self, event):
         """마우스 휠 스크롤 처리"""
-        # Windows와 macOS에서 delta 값이 다름
-        if event.delta:
-            delta = -1 * (event.delta / 120)  # Windows
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            # macOS는 delta가 매우 작은 값 (보통 -1 ~ 1)
+            delta = -1 * event.delta
+        elif event.delta:
+            # Windows는 delta가 120 단위
+            delta = -1 * (event.delta / 120)
         else:
-            delta = -1 if event.num == 4 else 1  # Linux
+            # Linux는 Button-4/5 사용
+            delta = -1 if event.num == 4 else 1
         
         # 스크롤 실행
         self.messages_canvas.yview_scroll(int(delta), "units")
@@ -754,10 +776,15 @@ class FloatingChatApp:
     
     def _on_popup_mousewheel(self, event, text_widget):
         """팝업 텍스트 위젯용 스크롤 처리"""
-        if event.delta:
-            delta = -1 * (event.delta / 120)
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            delta = -1 * event.delta
+        elif event.delta:
+            delta = -1 * (event.delta / 120)  # Windows
         else:
-            delta = -1 if event.num == 4 else 1
+            delta = -1 if event.num == 4 else 1  # Linux
+        
         text_widget.yview_scroll(int(delta), "units")
         return "break"
     

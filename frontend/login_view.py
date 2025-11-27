@@ -320,7 +320,26 @@ class LoginWindow:
     
     def setup_fonts(self):
         """폰트 설정"""
-        korean_fonts = ['Malgun Gothic', 'Nanum Gothic', 'Arial Unicode MS', 'Arial']
+        import platform
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            korean_fonts = [
+                'Apple SD Gothic Neo',  # macOS 기본 한글 폰트
+                'AppleGothic',          # macOS 기본 고딕
+                'Nanum Gothic',         # 나눔고딕 (설치된 경우)
+                'Helvetica Neue',       # macOS 기본 영문 폰트
+                'Arial Unicode MS',     # Unicode 폰트
+                'Arial'
+            ]
+        else:  # Windows/Linux
+            korean_fonts = [
+                'Malgun Gothic',        # 맑은 고딕 (Windows 기본)
+                'Nanum Gothic',         # 나눔고딕
+                'Arial Unicode MS',     # Unicode 폰트
+                'Arial'
+            ]
+        
         self.default_font = 'Arial'
         for font in korean_fonts:
             try:

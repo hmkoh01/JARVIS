@@ -83,11 +83,27 @@ class FolderSelector:
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
-        # 이 부분은 사용자의 기존 코드와 동일합니다.
-        korean_fonts = [
-            'Malgun Gothic', 'Nanum Gothic', 'Nanum Barun Gothic',
-            'Dotum', 'Gulim', 'Batang', 'Arial Unicode MS'
-        ]
+        # 플랫폼별 한글 폰트 설정
+        if self.platform == "Darwin":  # macOS
+            korean_fonts = [
+                'Apple SD Gothic Neo',  # macOS 기본 한글 폰트
+                'AppleGothic',          # macOS 기본 고딕
+                'Nanum Gothic',         # 나눔고딕 (설치된 경우)
+                'Helvetica Neue',       # macOS 기본 영문 폰트
+                'Lucida Grande',        # macOS 시스템 폰트
+                'Arial Unicode MS'      # Unicode 폰트
+            ]
+        else:  # Windows/Linux
+            korean_fonts = [
+                'Malgun Gothic',        # 맑은 고딕 (Windows 기본)
+                'Nanum Gothic',         # 나눔고딕
+                'Nanum Barun Gothic',   # 나눔바른고딕
+                'Dotum',                # 돋움
+                'Gulim',                # 굴림
+                'Batang',               # 바탕
+                'Arial Unicode MS'      # Unicode 폰트
+            ]
+        
         self.default_font = 'Arial'
         for font in korean_fonts:
             try:
@@ -123,25 +139,25 @@ class FolderSelector:
         icon_label.pack(side='left', padx=(0, 15))
         text_frame = tk.Frame(title_frame, bg='white')
         text_frame.pack(side='left', fill='x', expand=True)
-        title_label = tk.Label(text_frame, text="JARVIS 파일 수집", font=('Malgun Gothic', 24, 'bold'), bg='white', fg='#1f2937')
+        title_label = tk.Label(text_frame, text="JARVIS 파일 수집", font=(self.default_font, 24, 'bold'), bg='white', fg='#1f2937')
         title_label.pack(anchor='w')
-        subtitle_label = tk.Label(text_frame, text="폴더 선택", font=('Malgun Gothic', 16), bg='white', fg='#6b7280')
+        subtitle_label = tk.Label(text_frame, text="폴더 선택", font=(self.default_font, 16), bg='white', fg='#6b7280')
         subtitle_label.pack(anchor='w')
         desc_frame = tk.Frame(main_frame, bg='white')
         desc_frame.pack(fill='x', padx=30, pady=(0, 25))
-        desc_label = tk.Label(main_frame, text="파일 수집할 폴더를 선택하세요.\n사용자 폴더 내의 주요 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=('Malgun Gothic', 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
+        desc_label = tk.Label(main_frame, text="파일 수집할 폴더를 선택하세요.\n사용자 폴더 내의 주요 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=(self.default_font, 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
         desc_label.pack(anchor='w', in_=desc_frame)
         list_container = tk.Frame(main_frame, bg='white')
         list_container.pack(fill='both', expand=True, padx=30, pady=(0, 25))
         list_header = tk.Frame(list_container, bg='#f8fafc', relief='flat', bd=1)
         list_header.pack(fill='x', pady=(0, 10))
-        header_label = tk.Label(list_header, text="📂 사용 가능한 폴더", font=('Malgun Gothic', 14, 'bold'), bg='#f8fafc', fg='#374151', pady=10)
+        header_label = tk.Label(list_header, text="📂 사용 가능한 폴더", font=(self.default_font, 14, 'bold'), bg='#f8fafc', fg='#374151', pady=10)
         header_label.pack(side='left', padx=15)
         list_frame = tk.Frame(list_container, bg='#f8fafc', relief='flat', bd=1)
         list_frame.pack(fill='both', expand=True)
         scrollbar = ttk.Scrollbar(list_frame, orient='vertical')
         scrollbar.pack(side='right', fill='y', padx=(0, 5), pady=5)
-        self.folder_listbox = tk.Listbox(list_frame, font=('Malgun Gothic', 11), selectmode='multiple', yscrollcommand=scrollbar.set, bg='white', fg='#1f2937', selectbackground='#4f46e5', selectforeground='white', relief='flat', bd=0, highlightthickness=0, activestyle='none', height=12)
+        self.folder_listbox = tk.Listbox(list_frame, font=(self.default_font, 11), selectmode='multiple', yscrollcommand=scrollbar.set, bg='white', fg='#1f2937', selectbackground='#4f46e5', selectforeground='white', relief='flat', bd=0, highlightthickness=0, activestyle='none', height=12)
         self.folder_listbox.pack(side='left', fill='both', expand=True, padx=5, pady=5)
         scrollbar.config(command=self.folder_listbox.yview)
 
@@ -192,7 +208,7 @@ class FolderSelector:
         
         status_frame = tk.Frame(main_frame, bg='#f0f9ff', relief='flat', bd=1)
         status_frame.pack(fill='x', padx=30, pady=(20, 30))
-        self.status_label = tk.Label(status_frame, text="⏳ 폴더 목록을 불러오는 중...", font=('Malgun Gothic', 11), bg='#f0f9ff', fg='#0369a1', pady=12)
+        self.status_label = tk.Label(status_frame, text="⏳ 폴더 목록을 불러오는 중...", font=(self.default_font, 11), bg='#f0f9ff', fg='#0369a1', pady=12)
         self.status_label.pack()
 
     def load_folders(self):

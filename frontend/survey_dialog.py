@@ -76,10 +76,29 @@ class SurveyDialog:
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
-        korean_fonts = [
-            'Malgun Gothic', 'Nanum Gothic', 'Nanum Barun Gothic',
-            'Dotum', 'Gulim', 'Batang', 'Arial Unicode MS'
-        ]
+        import platform
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            korean_fonts = [
+                'Apple SD Gothic Neo',  # macOS 기본 한글 폰트
+                'AppleGothic',          # macOS 기본 고딕
+                'Nanum Gothic',         # 나눔고딕 (설치된 경우)
+                'Helvetica Neue',       # macOS 기본 영문 폰트
+                'Lucida Grande',        # macOS 시스템 폰트
+                'Arial Unicode MS'      # Unicode 폰트
+            ]
+        else:  # Windows/Linux
+            korean_fonts = [
+                'Malgun Gothic',        # 맑은 고딕 (Windows 기본)
+                'Nanum Gothic',         # 나눔고딕
+                'Nanum Barun Gothic',   # 나눔바른고딕
+                'Dotum',                # 돋움
+                'Gulim',                # 굴림
+                'Batang',               # 바탕
+                'Arial Unicode MS'      # Unicode 폰트
+            ]
+        
         self.default_font = 'Arial'
         for font in korean_fonts:
             try:
@@ -293,8 +312,16 @@ class SurveyDialog:
     
     def _bind_mousewheel(self):
         """마우스 휠 스크롤 바인딩"""
+        import platform
+        system = platform.system()
+        
         def _on_mousewheel(event):
-            self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            if system == "Darwin":  # macOS
+                # macOS는 delta가 매우 작은 값
+                self.canvas.yview_scroll(int(-1 * event.delta), "units")
+            else:
+                # Windows는 delta가 120 단위
+                self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         
         def _bind_to_mousewheel(event):
             self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
