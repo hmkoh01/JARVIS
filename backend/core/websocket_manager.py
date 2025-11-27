@@ -4,7 +4,7 @@ WebSocket 연결 관리자
 """
 import json
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -16,6 +16,8 @@ class WebSocketManager:
     def __init__(self):
         # user_id -> WebSocket 연결 목록 (한 사용자가 여러 기기에서 접속 가능)
         self.active_connections: Dict[int, List[WebSocket]] = {}
+        # user_id -> 전송 실패한 메시지 큐 (연결이 끊어진 사용자에게 보낼 메시지)
+        self.message_queue: Dict[int, List[Dict[str, Any]]] = {}
     
     async def connect(self, websocket: WebSocket, user_id: int):
         """WebSocket 연결 수락 및 등록"""
@@ -26,6 +28,15 @@ class WebSocketManager:
         
         self.active_connections[user_id].append(websocket)
         logger.info(f"✅ WebSocket 연결됨: user_id={user_id} (현재 연결 수: {len(self.active_connections[user_id])})")
+        
+        # 재연결 시 큐에 있는 메시지 전송
+        if user_id in self.message_queue and self.message_queue[user_id]:
+            queued_messages = self.message_queue[user_id].copy()
+            self.message_queue[user_id] = []  # 전송 후 큐 비우기
+            
+            logger.info(f"📬 큐에 저장된 {len(queued_messages)}개 메시지 재전송: user_id={user_id}")
+            for message in queued_messages:
+                await self.send_to_user(user_id, message)
     
     def disconnect(self, websocket: WebSocket, user_id: int):
         """WebSocket 연결 해제"""
@@ -39,9 +50,23 @@ class WebSocketManager:
                 del self.active_connections[user_id]
     
     async def send_to_user(self, user_id: int, message: Dict[str, Any]):
-        """특정 사용자에게 메시지 전송"""
+        """특정 사용자에게 메시지 전송
+        
+        연결이 없으면 큐에 저장하여 재연결 시 전송합니다.
+        """
         if user_id not in self.active_connections:
-            logger.debug(f"사용자 {user_id}에게 보낼 활성 WebSocket 연결이 없습니다.")
+            # 연결이 없으면 큐에 저장 (report_completed, report_failed 같은 중요한 메시지만)
+            msg_type = message.get('type', '')
+            if msg_type in ['report_completed', 'report_failed']:
+                if user_id not in self.message_queue:
+                    self.message_queue[user_id] = []
+                self.message_queue[user_id].append(message)
+                # 큐 크기 제한 (최근 10개만 유지)
+                if len(self.message_queue[user_id]) > 10:
+                    self.message_queue[user_id] = self.message_queue[user_id][-10:]
+                logger.info(f"💾 메시지 큐에 저장: user_id={user_id}, type={msg_type} (연결 없음)")
+            else:
+                logger.debug(f"사용자 {user_id}에게 보낼 활성 WebSocket 연결이 없습니다.")
             return False
         
         message_json = json.dumps(message, ensure_ascii=False)
@@ -62,11 +87,82 @@ class WebSocketManager:
         return True
     
     async def broadcast_recommendation(self, user_id: int, recommendation: Dict[str, Any]):
-        """새로운 추천을 사용자에게 전송"""
+        """새로운 추천을 사용자에게 전송
+        
+        전송 성공 시 추천 상태를 'shown'으로 변경하여 중복 표시를 방지합니다.
+        """
         message = {
             "type": "new_recommendation",
             "data": recommendation
         }
+        success = await self.send_to_user(user_id, message)
+        
+        # 전송 성공 시 상태를 'shown'으로 변경 (pending에서 제외)
+        if success:
+            try:
+                from database.sqlite import SQLite
+                db = SQLite()
+                rec_id = recommendation.get('id')
+                if rec_id:
+                    db.update_recommendation_status(rec_id, 'shown')
+                    logger.info(f"💡 추천 상태 변경: id={rec_id}, status='shown'")
+            except Exception as e:
+                logger.warning(f"추천 상태 업데이트 실패: {e}")
+        
+        return success
+    
+    async def broadcast_report_completed(
+        self, 
+        user_id: int, 
+        keyword: str, 
+        file_path: str, 
+        file_name: str,
+        sources: List[Dict[str, str]] = None
+    ):
+        """보고서 생성 완료를 사용자에게 전송
+        
+        Args:
+            user_id: 사용자 ID
+            keyword: 보고서 주제 키워드
+            file_path: 생성된 파일 경로
+            file_name: 파일명
+            sources: 출처 목록 (선택)
+        """
+        from datetime import datetime
+        
+        message = {
+            "type": "report_completed",
+            "keyword": keyword,
+            "file_path": file_path,
+            "file_name": file_name,
+            "sources": sources or [],
+            "timestamp": datetime.now().isoformat()
+        }
+        logger.info(f"📄 보고서 완료 알림 전송: user_id={user_id}, keyword={keyword}")
+        return await self.send_to_user(user_id, message)
+    
+    async def broadcast_report_failed(
+        self, 
+        user_id: int, 
+        keyword: str, 
+        reason: str
+    ):
+        """보고서 생성 실패를 사용자에게 전송
+        
+        Args:
+            user_id: 사용자 ID
+            keyword: 보고서 주제 키워드
+            reason: 실패 사유
+        """
+        from datetime import datetime
+        
+        message = {
+            "type": "report_failed",
+            "keyword": keyword,
+            "reason": reason,
+            "timestamp": datetime.now().isoformat()
+        }
+        logger.warning(f"📄 보고서 실패 알림 전송: user_id={user_id}, keyword={keyword}, reason={reason}")
         return await self.send_to_user(user_id, message)
     
     def is_user_connected(self, user_id: int) -> bool:

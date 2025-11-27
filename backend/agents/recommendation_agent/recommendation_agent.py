@@ -7,6 +7,7 @@ LLM(Gemini)이 사용자의 로그와 관심사(Survey)를 분석하여 적절�
 
 import json
 import logging
+import re
 from typing import List, Dict, Any, Optional, Tuple
 
 import google.generativeai as genai
@@ -159,6 +160,14 @@ class RecommendationAgent(BaseAgent):
             user_interests = self.sqlite.get_user_interests(user_id)
             survey_data = self.sqlite.get_survey_response(user_id)
             
+            # 기존 추천 키워드 조회 (중복 추천 방지)
+            all_recommendations = self.sqlite.get_all_recommendations(user_id, limit=100)
+            past_recommended_keywords = [
+                rec.get('keyword', '').lower() 
+                for rec in all_recommendations 
+                if rec.get('keyword')
+            ]
+            
             # 기존 추천이 없으면 force_recommend 활성화 (초기 분석)
             existing_recommendations = self.sqlite.get_pending_recommendations(user_id)
             if not existing_recommendations and not user_interests:
@@ -171,7 +180,8 @@ class RecommendationAgent(BaseAgent):
                 blacklist=blacklist,
                 user_interests=user_interests,
                 survey_data=survey_data,
-                force_recommend=force_recommend
+                force_recommend=force_recommend,
+                past_recommended_keywords=past_recommended_keywords
             )
             
             if not analysis_result or not analysis_result.get('should_recommend'):
@@ -225,17 +235,21 @@ class RecommendationAgent(BaseAgent):
         blacklist: List[str],
         user_interests: List[Dict[str, Any]],
         survey_data: Optional[Dict[str, Any]],
-        force_recommend: bool = False
+        force_recommend: bool = False,
+        past_recommended_keywords: List[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         LLM을 사용하여 로그를 분석하고 추천 여부를 결정합니다.
         
         Args:
             force_recommend: True면 데이터가 있을 경우 무조건 추천 생성
+            past_recommended_keywords: 이미 추천했던 키워드 목록 (중복 추천 방지)
         
         Returns:
             분석 결과 딕셔너리 또는 None
         """
+        if past_recommended_keywords is None:
+            past_recommended_keywords = []
         # 로그 요약 생성
         log_summary = self._prepare_log_summary(browser_logs, content_keywords)
         
@@ -278,15 +292,19 @@ class RecommendationAgent(BaseAgent):
 ## 블랙리스트 (추천 제외 키워드)
 {', '.join(blacklist) if blacklist else '없음'}
 
+## 이미 추천한 키워드 (중복 추천 금지)
+{', '.join(past_recommended_keywords) if past_recommended_keywords else '없음'}
+
 ## 분석 지시사항
 1. 로그에서 의미 있는 키워드와 주제를 추출하세요.
 2. 블랙리스트에 있는 키워드는 절대 추천하지 마세요.
-3. 다음 세 가지 케이스 중 하나를 판단하세요:
+3. **이미 추천한 키워드와 동일하거나 매우 유사한 키워드는 추천하지 마세요.** 새로운 주제를 찾아주세요.
+5. 다음 세 가지 케이스 중 하나를 판단하세요:
    - **Case A (new_interest)**: 기존 관심사에 없던 새로운 주제가 발견된 경우
    - **Case B (periodic_expansion)**: 기존 관심사를 더 깊게 탐구하는 활동이 감지된 경우
    - **Case C (initial_discovery)**: 초기 분석으로, 사용자의 주요 관심사를 파악한 경우
-4. 로그에 데이터가 있다면 가능한 한 추천을 생성하세요. should_recommend를 false로 설정하는 것은 정말 추천할 내용이 없을 때만입니다.
-5. 추천 시, 사용자에게 건넬 **친근한 한국어 말풍선 메시지**를 작성하세요.
+6. 로그에 데이터가 있다면 가능한 한 추천을 생성하세요. should_recommend를 false로 설정하는 것은 정말 추천할 내용이 없을 때만입니다.
+7. 추천 시, 사용자에게 건넬 **친근한 한국어 말풍선 메시지**를 작성하세요.
    - 예시: "요즘 Python에 관심이 많으시네요! 관련 자료를 찾아볼까요? 🐍"
 
 ## 출력 형식 (JSON)
@@ -325,8 +343,8 @@ class RecommendationAgent(BaseAgent):
             if not result_text:
                 return None
             
-            # JSON 파싱
-            result = json.loads(result_text)
+            # JSON 파싱 (로버스트 처리)
+            result = self._parse_json_safely(result_text)
             return result
             
         except json.JSONDecodeError as e:
@@ -403,6 +421,111 @@ class RecommendationAgent(BaseAgent):
             
         except Exception as e:
             logger.error(f"LLM 응답 추출 오류: {e}")
+            return None
+    
+    def _parse_json_safely(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        LLM 응답에서 JSON을 안전하게 추출하고 파싱합니다.
+        
+        - 마크다운 코드 블록 제거
+        - JSON 객체만 추출
+        - 불완전한 JSON 복구 시도
+        """
+        if not text:
+            return None
+        
+        try:
+            # 1단계: 마크다운 코드 블록 제거 (```json ... ``` 또는 ``` ... ```)
+            code_block_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
+            code_match = re.search(code_block_pattern, text)
+            if code_match:
+                text = code_match.group(1).strip()
+            
+            # 2단계: JSON 객체 추출 시도 (가장 바깥쪽 중괄호)
+            json_match = re.search(r'\{[\s\S]*\}', text)
+            if json_match:
+                json_str = json_match.group()
+                
+                # 3단계: 직접 파싱 시도
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+                
+                # 4단계: 불완전한 JSON 복구 시도
+                fixed_json = self._fix_truncated_json(json_str)
+                if fixed_json:
+                    try:
+                        return json.loads(fixed_json)
+                    except json.JSONDecodeError:
+                        pass
+            
+            # 최종: 원본 텍스트 파싱 시도
+            return json.loads(text)
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"LLM 응답 JSON 파싱 오류: {e}")
+            logger.debug(f"원본 텍스트: {text[:500]}...")
+            return None
+        except Exception as e:
+            logger.error(f"JSON 파싱 중 예상치 못한 오류: {e}")
+            return None
+    
+    def _fix_truncated_json(self, json_str: str) -> Optional[str]:
+        """
+        잘린 JSON 문자열을 복구 시도합니다.
+        
+        - 열린 문자열 닫기
+        - 누락된 괄호 추가
+        """
+        try:
+            # 열린 따옴표가 닫히지 않은 경우 처리
+            # 마지막 열린 따옴표 이후의 내용을 찾아서 닫기
+            
+            # 따옴표 개수 세기 (이스케이프된 따옴표 제외)
+            in_string = False
+            last_quote_pos = -1
+            i = 0
+            while i < len(json_str):
+                char = json_str[i]
+                if char == '\\' and i + 1 < len(json_str):
+                    i += 2  # 이스케이프 문자 건너뛰기
+                    continue
+                if char == '"':
+                    in_string = not in_string
+                    if in_string:
+                        last_quote_pos = i
+                i += 1
+            
+            # 문자열이 열린 상태로 끝난 경우
+            if in_string and last_quote_pos >= 0:
+                # 마지막 열린 따옴표 이후 줄바꿈 또는 끝까지의 내용에 따옴표 추가
+                newline_pos = json_str.find('\n', last_quote_pos)
+                if newline_pos > 0:
+                    # 줄바꿈 전에 따옴표 닫기
+                    json_str = json_str[:newline_pos] + '"' + json_str[newline_pos:]
+                else:
+                    # 끝에 따옴표 추가
+                    json_str = json_str.rstrip() + '"'
+            
+            # 괄호 균형 맞추기
+            open_braces = json_str.count('{') - json_str.count('}')
+            open_brackets = json_str.count('[') - json_str.count(']')
+            
+            # 누락된 닫는 괄호 추가
+            if open_braces > 0 or open_brackets > 0:
+                # 마지막 유효 위치 찾기 (쉼표나 값 이후)
+                json_str = json_str.rstrip()
+                if json_str.endswith(','):
+                    json_str = json_str[:-1]
+                
+                json_str += ']' * open_brackets
+                json_str += '}' * open_braces
+            
+            return json_str
+            
+        except Exception as e:
+            logger.debug(f"JSON 복구 실패: {e}")
             return None
     
     # ============================================================

@@ -181,9 +181,15 @@ class SQLite:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     responded_at DATETIME,
                     generated_report_file_id TEXT,
+                    report_file_path TEXT,
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             """)
+            
+            # Migration: Add report_file_path column if it doesn't exist
+            self._migrate_add_column_if_not_exists(
+                conn, 'recommendations', 'report_file_path', 'TEXT'
+            )
             
             # ============================================================
             # Indexes
@@ -217,6 +223,28 @@ class SQLite:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created ON chat_messages(user_id, created_at DESC)")
             
             conn.commit()
+    
+    def _migrate_add_column_if_not_exists(
+        self, conn: sqlite3.Connection, table: str, column: str, column_type: str
+    ):
+        """테이블에 컬럼이 없으면 추가합니다 (마이그레이션용).
+        
+        Args:
+            conn: SQLite 연결 객체
+            table: 테이블 이름
+            column: 추가할 컬럼 이름
+            column_type: 컬럼 타입 (예: TEXT, INTEGER, REAL)
+        """
+        try:
+            # 컬럼 존재 여부 확인
+            cursor = conn.execute(f"PRAGMA table_info({table})")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                logger.info(f"마이그레이션: {table}.{column} 컬럼 추가됨")
+        except Exception as e:
+            logger.warning(f"마이그레이션 오류 (무시됨): {table}.{column} - {e}")
 
     # ============================================================
     # User Management Methods
@@ -927,6 +955,31 @@ class SQLite:
             return True
         except Exception as e:
             logger.error(f"추천 보고서 업데이트 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+    
+    def update_recommendation_report_path(self, recommendation_id: int, 
+                                          report_file_path: str) -> bool:
+        """추천의 보고서 파일 경로 업데이트
+        
+        Args:
+            recommendation_id: 추천 ID
+            report_file_path: 생성된 보고서 파일 경로
+        
+        Returns:
+            성공 여부
+        """
+        try:
+            self.conn.execute("""
+                UPDATE recommendations 
+                SET report_file_path = ?
+                WHERE id = ?
+            """, (report_file_path, recommendation_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"추천 보고서 경로 업데이트 오류: {e}")
             if self.conn:
                 self.conn.rollback()
             return False

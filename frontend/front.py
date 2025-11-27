@@ -13,6 +13,7 @@ import queue
 from datetime import datetime
 import os
 import platform
+import subprocess  # 파일/폴더 열기용
 import websocket  # WebSocket 클라이언트
 
 class FloatingChatApp:
@@ -65,6 +66,11 @@ class FloatingChatApp:
         
         # 기존 알림 변수 (호환성 유지)
         self.recommendation_notification_visible = False
+        
+        # 보고서 알림 말풍선을 위한 변수 (추천과 별도 관리)
+        self.report_notification_window = None
+        self.report_notification_visible = False
+        self.report_auto_close_id = None
 
         # WebSocket 연결 변수
         self.ws = None
@@ -119,6 +125,32 @@ class FloatingChatApp:
         self.button_font = (self.default_font, 12, 'bold')
         self.emoji_font = (self.default_font, 22)
     
+    def _bind_right_click(self, widget, callback):
+        """플랫폼별 우클릭 이벤트를 바인딩합니다."""
+        system = platform.system()
+        
+        # 모든 플랫폼에서 Button-3 바인딩 (표준 우클릭)
+        widget.bind('<Button-3>', callback)
+        
+        if system == "Darwin":  # macOS
+            # macOS: Button-2 (미들 클릭이 우클릭으로 매핑되는 경우)
+            widget.bind('<Button-2>', callback)
+            # macOS: Control + 좌클릭 (트랙패드 우클릭)
+            widget.bind('<Control-Button-1>', callback)
+    
+    def _setup_window_for_macos(self, window, is_popup=False):
+        """macOS에서 창이 올바르게 표시되도록 설정합니다."""
+        system = platform.system()
+        
+        if system == "Darwin":
+            # macOS에서 overrideredirect 창이 보이도록 lift() 호출
+            window.lift()
+            window.update_idletasks()
+            # 포커스 없이도 클릭 이벤트 받을 수 있도록
+            window.attributes('-topmost', True)
+            # 추가로 윈도우를 다시 올림
+            window.after(100, lambda: window.lift() if window.winfo_exists() else None)
+    
     def process_message_queue(self):
         """메시지 큐를 처리합니다. - 메인 스레드에서만 GUI 업데이트"""
         try:
@@ -137,7 +169,11 @@ class FloatingChatApp:
                         
                     elif message['type'] == 'bot_response':
                         # 봇 응답 처리
-                        self.handle_bot_response(message['response'], message['loading_widget'])
+                        self.handle_bot_response(
+                            message['response'], 
+                            message['loading_widget'],
+                            message.get('deep_dive_info')
+                        )
                         
                     elif message['type'] == 'update_loading':
                         # 로딩 메시지 업데이트
@@ -162,6 +198,17 @@ class FloatingChatApp:
                     elif message['type'] == 'stream_chunk':
                         # 스트리밍 청크 처리
                         self.handle_stream_chunk(message['chunk'])
+                    
+                    elif message['type'] == 'show_report_notification':
+                        # 보고서 완료/실패 알림 표시
+                        self.show_report_notification(message['data'])
+                    
+                    elif message['type'] == 'show_deep_dive_offer':
+                        # 심층 보고서 제안 UI 표시
+                        self.show_deep_dive_offer(
+                            message['keyword'],
+                            message['recommendation_id']
+                        )
                         
                 except queue.Empty:
                     break
@@ -183,12 +230,20 @@ class FloatingChatApp:
 
         system = platform.system()
         if system == "Darwin": # macOS
-            self.root.wm_attributes('-transparent', True)
+            # macOS에서 투명 배경 설정
+            try:
+                self.root.wm_attributes('-transparent', True)
+            except tk.TclError:
+                # 일부 macOS 버전에서 지원하지 않을 수 있음
+                pass
         else: # Windows
             self.root.wm_attributes('-transparentcolor', 'black')
 
         # 윈도우 테두리와 제목 표시줄 제거
         self.root.overrideredirect(True)
+        
+        # macOS에서 overrideredirect 창이 올바르게 표시되도록 설정
+        self._setup_window_for_macos(self.root)
         
         # 윈도우 크기를 버튼 크기로 설정 (더 크게)
         self.root.geometry('70x70')
@@ -233,8 +288,8 @@ class FloatingChatApp:
         self.button_canvas.bind('<B1-Motion>', self.on_drag)
         self.button_canvas.bind('<ButtonRelease-1>', self.stop_drag)
         
-        # 우클릭 메뉴 이벤트 바인딩
-        self.button_canvas.bind('<Button-3>', self.show_context_menu)
+        # 우클릭 메뉴 이벤트 바인딩 (플랫폼별)
+        self._bind_right_click(self.button_canvas, self.show_context_menu)
         
         # 호버 효과
         self.button_canvas.bind('<Enter>', self.on_hover)
@@ -483,54 +538,166 @@ class FloatingChatApp:
         self.chat_window.protocol("WM_DELETE_WINDOW", self.close_chat_window)
         
     def open_recommendation_window(self):
-        """추천 내역을 보여주는 새 창을 엽니다."""
+        """추천 내역을 보여주는 새 창을 엽니다 (카드 기반 UI)."""
         rec_window = tk.Toplevel(self.chat_window)
         rec_window.title("JARVIS 추천 내역")
-        rec_window.geometry("600x500")
+        rec_window.geometry("650x600")
         rec_window.configure(bg='white')
         rec_window.attributes('-topmost', True)
+        
+        # 페이지네이션 상태 저장
+        rec_window.recommendations_data = []
+        rec_window.current_page = 0
+        rec_window.items_per_page = 5
 
         # --- 상단 프레임: 제목 ---
-        top_frame = tk.Frame(rec_window, bg='white')
-        top_frame.pack(fill='x', padx=15, pady=10)
+        top_frame = tk.Frame(rec_window, bg='#4f46e5', height=60)
+        top_frame.pack(fill='x')
+        top_frame.pack_propagate(False)
 
-        title_label = tk.Label(top_frame, text="추천 히스토리", font=(self.default_font, 16, 'bold'), bg='white', fg='black')
-        title_label.pack(side='left')
-
-        # --- 추천 목록 표시 영역 ---
-        history_text = scrolledtext.ScrolledText(
-            rec_window,
-            wrap=tk.WORD,
-            font=(self.default_font, 11),
-            bg='#f9fafb',
-            fg='black',
-            relief='solid',
-            borderwidth=1,
-            padx=10,
-            pady=10,
-            state='disabled' # 읽기 전용
+        title_label = tk.Label(
+            top_frame, 
+            text="💡 추천 히스토리", 
+            font=(self.default_font, 16, 'bold'), 
+            bg='#4f46e5', 
+            fg='white'
         )
-        history_text.pack(fill='both', expand=True, padx=15, pady=(0, 15))
+        title_label.pack(side='left', padx=20, pady=15)
+
+        # --- 카드 목록 영역 (Canvas + Frame + Scrollbar) ---
+        cards_container = tk.Frame(rec_window, bg='#f9fafb')
+        cards_container.pack(fill='both', expand=True, padx=15, pady=10)
+        
+        # Canvas와 Scrollbar 설정
+        cards_canvas = tk.Canvas(cards_container, bg='#f9fafb', highlightthickness=0)
+        cards_scrollbar = ttk.Scrollbar(cards_container, orient="vertical", command=cards_canvas.yview)
+        cards_frame = tk.Frame(cards_canvas, bg='#f9fafb')
+        
+        cards_canvas_window = cards_canvas.create_window((0, 0), window=cards_frame, anchor="nw")
+        
+        def configure_cards_scroll(event):
+            cards_canvas.configure(scrollregion=cards_canvas.bbox("all"))
+            # 캔버스 너비에 맞춰 프레임 너비 조정
+            canvas_width = event.width
+            if canvas_width > 1:
+                cards_canvas.itemconfig(cards_canvas_window, width=canvas_width)
+        
+        cards_frame.bind("<Configure>", configure_cards_scroll)
+        cards_canvas.bind("<Configure>", configure_cards_scroll)
+        cards_canvas.configure(yscrollcommand=cards_scrollbar.set)
+        
+        # 마우스 휠 스크롤 (Windows, macOS, Linux 모두 지원)
+        def on_cards_mousewheel(event):
+            system = platform.system()
+            if system == "Darwin":
+                # macOS: delta 값이 작음 (-1 ~ 1 정도)
+                cards_canvas.yview_scroll(-1 * event.delta, "units")
+            elif event.delta:
+                # Windows: delta가 120 단위
+                cards_canvas.yview_scroll(-1 * (event.delta // 120), "units")
+            elif event.num == 4:
+                # Linux: Button-4 = 위로 스크롤
+                cards_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                # Linux: Button-5 = 아래로 스크롤
+                cards_canvas.yview_scroll(1, "units")
+        
+        # 캔버스와 프레임에 스크롤 이벤트 바인딩
+        cards_canvas.bind("<MouseWheel>", on_cards_mousewheel)
+        cards_canvas.bind("<Button-4>", on_cards_mousewheel)
+        cards_canvas.bind("<Button-5>", on_cards_mousewheel)
+        cards_frame.bind("<MouseWheel>", on_cards_mousewheel)
+        cards_frame.bind("<Button-4>", on_cards_mousewheel)
+        cards_frame.bind("<Button-5>", on_cards_mousewheel)
+        
+        # 자식 위젯들에도 스크롤 이벤트 전파를 위한 헬퍼 함수
+        def bind_scroll_to_children(widget):
+            widget.bind("<MouseWheel>", on_cards_mousewheel)
+            widget.bind("<Button-4>", on_cards_mousewheel)
+            widget.bind("<Button-5>", on_cards_mousewheel)
+            for child in widget.winfo_children():
+                bind_scroll_to_children(child)
+        
+        rec_window.bind_scroll_to_children = bind_scroll_to_children
+        
+        cards_canvas.pack(side="left", fill="both", expand=True)
+        cards_scrollbar.pack(side="right", fill="y")
+        
+        # 참조 저장
+        rec_window.cards_frame = cards_frame
+        rec_window.cards_canvas = cards_canvas
+        rec_window.on_cards_mousewheel = on_cards_mousewheel
+
+        # --- 하단 페이지네이션 프레임 ---
+        pagination_frame = tk.Frame(rec_window, bg='white', height=50)
+        pagination_frame.pack(fill='x', padx=15, pady=(0, 10))
+        pagination_frame.pack_propagate(False)
+        
+        # 이전 버튼
+        prev_btn = tk.Button(
+            pagination_frame,
+            text="◀ 이전",
+            font=(self.default_font, 10),
+            bg='#e5e7eb',
+            fg='#374151',
+            relief='flat',
+            cursor='hand2',
+            padx=15,
+            pady=5,
+            state='disabled',
+            command=lambda: self._change_recommendation_page(rec_window, -1)
+        )
+        prev_btn.pack(side='left', padx=(0, 10))
+        rec_window.prev_btn = prev_btn
+        
+        # 페이지 정보 라벨
+        page_label = tk.Label(
+            pagination_frame,
+            text="",
+            font=(self.default_font, 10),
+            bg='white',
+            fg='#6b7280'
+        )
+        page_label.pack(side='left', expand=True)
+        rec_window.page_label = page_label
+        
+        # 다음 버튼
+        next_btn = tk.Button(
+            pagination_frame,
+            text="다음 ▶",
+            font=(self.default_font, 10),
+            bg='#e5e7eb',
+            fg='#374151',
+            relief='flat',
+            cursor='hand2',
+            padx=15,
+            pady=5,
+            state='disabled',
+            command=lambda: self._change_recommendation_page(rec_window, 1)
+        )
+        next_btn.pack(side='right', padx=(10, 0))
+        rec_window.next_btn = next_btn
 
         # 추천 내역 로드
-        self.load_recommendation_history(history_text)
+        self._load_recommendation_cards(rec_window)
 
-    def load_recommendation_history(self, text_widget):
-        """백그라운드에서 추천 내역을 불러와 위젯에 표시합니다."""
-        text_widget.config(state='normal')
-        text_widget.delete('1.0', 'end')
-        text_widget.insert('1.0', "추천 내역을 불러오는 중입니다...")
-        text_widget.config(state='disabled')
+    def _load_recommendation_cards(self, rec_window):
+        """백그라운드에서 추천 내역을 불러와 카드로 표시합니다."""
+        # 로딩 상태 표시
+        self._show_recommendation_loading(rec_window)
+        threading.Thread(
+            target=self._fetch_recommendation_cards, 
+            args=(rec_window,), 
+            daemon=True
+        ).start()
 
-        threading.Thread(target=self._fetch_recommendation_history, args=(text_widget,), daemon=True).start()
-
-    def _fetch_recommendation_history(self, text_widget):
+    def _fetch_recommendation_cards(self, rec_window):
         """[백그라운드 스레드] 추천 히스토리 API를 호출합니다."""
         try:
             from login_view import get_stored_token
             token = get_stored_token()
             if not token:
-                self.update_text_widget(text_widget, "오류: 로그인이 필요합니다.")
+                self.root.after(0, lambda: self._show_recommendation_error(rec_window, "로그인이 필요합니다."))
                 return
 
             response = requests.get(
@@ -542,24 +709,447 @@ class FloatingChatApp:
             if response.status_code == 200:
                 result = response.json()
                 if result.get("success") and result.get("recommendations"):
-                    formatted_text = self.format_recommendations(result["recommendations"])
-                    self.update_text_widget(text_widget, formatted_text)
+                    recommendations = result["recommendations"]
+                    self.root.after(0, lambda: self._render_recommendation_cards(rec_window, recommendations))
                 else:
-                    self.update_text_widget(text_widget, "아직 생성된 추천이 없습니다.")
+                    self.root.after(0, lambda: self._show_recommendation_empty(rec_window))
             else:
                 error_msg = response.json().get("detail", "알 수 없는 오류")
-                self.update_text_widget(text_widget, f"추천 내역을 불러오는데 실패했습니다: {error_msg}")
+                self.root.after(0, lambda: self._show_recommendation_error(rec_window, error_msg))
 
         except requests.exceptions.RequestException as e:
-            self.update_text_widget(text_widget, f"오류: 서버에 연결할 수 없습니다.\n{e}")
+            error_str = str(e)
+            self.root.after(0, lambda err=error_str: self._show_recommendation_error(rec_window, f"서버 연결 오류: {err}"))
+
+    def _show_recommendation_loading(self, rec_window):
+        """로딩 상태를 표시합니다."""
+        cards_frame = rec_window.cards_frame
+        for widget in cards_frame.winfo_children():
+            widget.destroy()
+        
+        loading_frame = tk.Frame(cards_frame, bg='#f9fafb')
+        loading_frame.pack(fill='both', expand=True, pady=100)
+        
+        tk.Label(
+            loading_frame,
+            text="⏳",
+            font=('Arial', 32),
+            bg='#f9fafb'
+        ).pack()
+        
+        tk.Label(
+            loading_frame,
+            text="추천 내역을 불러오는 중...",
+            font=(self.default_font, 12),
+            bg='#f9fafb',
+            fg='#6b7280'
+        ).pack(pady=(10, 0))
+
+    def _show_recommendation_empty(self, rec_window):
+        """빈 상태를 표시합니다."""
+        cards_frame = rec_window.cards_frame
+        for widget in cards_frame.winfo_children():
+            widget.destroy()
+        
+        empty_frame = tk.Frame(cards_frame, bg='#f9fafb')
+        empty_frame.pack(fill='both', expand=True, pady=100)
+        
+        tk.Label(
+            empty_frame,
+            text="💭",
+            font=('Arial', 48),
+            bg='#f9fafb'
+        ).pack()
+        
+        tk.Label(
+            empty_frame,
+            text="아직 추천이 없어요",
+            font=(self.default_font, 14, 'bold'),
+            bg='#f9fafb',
+            fg='#374151'
+        ).pack(pady=(15, 5))
+        
+        tk.Label(
+            empty_frame,
+            text="활동을 계속하면 맞춤형 추천을 준비해 드릴게요!",
+            font=(self.default_font, 11),
+            bg='#f9fafb',
+            fg='#9ca3af'
+        ).pack()
+        
+        # 페이지네이션 숨기기
+        rec_window.page_label.config(text="")
+        rec_window.prev_btn.config(state='disabled')
+        rec_window.next_btn.config(state='disabled')
+
+    def _show_recommendation_error(self, rec_window, error_msg):
+        """에러 상태를 표시합니다."""
+        cards_frame = rec_window.cards_frame
+        for widget in cards_frame.winfo_children():
+            widget.destroy()
+        
+        error_frame = tk.Frame(cards_frame, bg='#fef2f2', padx=20, pady=20)
+        error_frame.pack(fill='x', padx=20, pady=50)
+        
+        tk.Label(
+            error_frame,
+            text="❌",
+            font=('Arial', 24),
+            bg='#fef2f2'
+        ).pack()
+        
+        tk.Label(
+            error_frame,
+            text="오류가 발생했습니다",
+            font=(self.default_font, 12, 'bold'),
+            bg='#fef2f2',
+            fg='#991b1b'
+        ).pack(pady=(10, 5))
+        
+        tk.Label(
+            error_frame,
+            text=error_msg,
+            font=(self.default_font, 10),
+            bg='#fef2f2',
+            fg='#dc2626',
+            wraplength=400
+        ).pack()
+        
+        # 페이지네이션 숨기기
+        rec_window.page_label.config(text="")
+        rec_window.prev_btn.config(state='disabled')
+        rec_window.next_btn.config(state='disabled')
+
+    def _render_recommendation_cards(self, rec_window, recommendations):
+        """추천 카드들을 렌더링합니다."""
+        rec_window.recommendations_data = recommendations
+        rec_window.current_page = 0
+        self._render_current_page(rec_window)
+
+    def _render_current_page(self, rec_window):
+        """현재 페이지의 카드들을 렌더링합니다."""
+        cards_frame = rec_window.cards_frame
+        
+        # 기존 카드 제거
+        for widget in cards_frame.winfo_children():
+            widget.destroy()
+        
+        recommendations = rec_window.recommendations_data
+        current_page = rec_window.current_page
+        items_per_page = rec_window.items_per_page
+        
+        # 페이지 계산
+        total_items = len(recommendations)
+        total_pages = (total_items + items_per_page - 1) // items_per_page
+        start_idx = current_page * items_per_page
+        end_idx = min(start_idx + items_per_page, total_items)
+        
+        page_items = recommendations[start_idx:end_idx]
+        
+        # 카드 렌더링
+        for rec in page_items:
+            self._create_recommendation_card(cards_frame, rec, rec_window)
+        
+        # 페이지네이션 업데이트
+        rec_window.page_label.config(text=f"{current_page + 1} / {total_pages} 페이지 (총 {total_items}개)")
+        rec_window.prev_btn.config(state='normal' if current_page > 0 else 'disabled')
+        rec_window.next_btn.config(state='normal' if current_page < total_pages - 1 else 'disabled')
+        
+        # 스크롤 맨 위로
+        rec_window.cards_canvas.yview_moveto(0)
+
+    def _create_recommendation_card(self, parent, rec, rec_window):
+        """개별 추천 카드를 생성합니다."""
+        # 데이터 추출
+        rec_id = rec.get('id')
+        keyword = rec.get('keyword') or "추천"
+        bubble_message = rec.get('bubble_message') or ""
+        report_content = rec.get('report_content') or bubble_message
+        status = rec.get('status', 'pending')
+        report_file_path = rec.get('report_file_path')
+        
+        # 날짜 파싱
+        created_at = rec.get('created_at')
+        if isinstance(created_at, str):
+            try:
+                dt = datetime.fromisoformat(created_at)
+            except ValueError:
+                dt = datetime.now()
+        elif isinstance(created_at, (int, float)):
+            dt = datetime.fromtimestamp(created_at)
+        else:
+            dt = datetime.now()
+        date_str = dt.strftime('%Y-%m-%d %H:%M')
+        
+        # 상태 텍스트/색상
+        status_config = {
+            'pending': ('대기', '#f59e0b', '#fef3c7'),
+            'accepted': ('수락', '#10b981', '#d1fae5'),
+            'rejected': ('거절', '#6b7280', '#e5e7eb'),
+            'shown': ('표시됨', '#3b82f6', '#dbeafe'),
+            'completed': ('완료', '#10b981', '#d1fae5'),
+        }
+        status_text, status_fg, status_bg = status_config.get(status, ('알 수 없음', '#6b7280', '#e5e7eb'))
+        
+        # 카드 프레임
+        card = tk.Frame(parent, bg='white', relief='solid', borderwidth=1)
+        card.pack(fill='x', padx=10, pady=8)
+        
+        # 카드 내부 패딩
+        card_inner = tk.Frame(card, bg='white', padx=15, pady=12)
+        card_inner.pack(fill='x')
+        
+        # --- 헤더: 키워드 + 상태 배지 ---
+        header_frame = tk.Frame(card_inner, bg='white')
+        header_frame.pack(fill='x')
+        
+        # 키워드
+        keyword_label = tk.Label(
+            header_frame,
+            text=f"🔑 {keyword}",
+            font=(self.default_font, 12, 'bold'),
+            bg='white',
+            fg='#1f2937'
+        )
+        keyword_label.pack(side='left')
+        
+        # 상태 배지
+        status_badge = tk.Label(
+            header_frame,
+            text=status_text,
+            font=(self.default_font, 9),
+            bg=status_bg,
+            fg=status_fg,
+            padx=8,
+            pady=2
+        )
+        status_badge.pack(side='right')
+        
+        # --- 날짜 ---
+        date_label = tk.Label(
+            card_inner,
+            text=f"📅 {date_str}",
+            font=(self.default_font, 9),
+            bg='white',
+            fg='#9ca3af'
+        )
+        date_label.pack(anchor='w', pady=(5, 0))
+        
+        # --- 요약 + 툴팁 아이콘 ---
+        summary_frame = tk.Frame(card_inner, bg='white')
+        summary_frame.pack(fill='x', pady=(8, 0))
+        
+        # 요약 텍스트 (최대 100자)
+        summary_text = report_content[:100] + "..." if len(report_content) > 100 else report_content
+        summary_text = summary_text.replace('\n', ' ')  # 줄바꿈 제거
+        
+        summary_label = tk.Label(
+            summary_frame,
+            text=summary_text,
+            font=(self.default_font, 10),
+            bg='white',
+            fg='#4b5563',
+            wraplength=450,
+            justify='left',
+            anchor='w'
+        )
+        summary_label.pack(side='left', fill='x', expand=True)
+        
+        # 툴팁 아이콘 (전체 내용 보기)
+        if len(report_content) > 100:
+            info_icon = tk.Label(
+                summary_frame,
+                text="ℹ️",
+                font=('Arial', 12),
+                bg='white',
+                cursor='hand2'
+            )
+            info_icon.pack(side='right', padx=(5, 0))
+            
+            # 툴팁 이벤트 바인딩
+            info_icon.bind("<Enter>", lambda e, content=report_content, kw=keyword: 
+                          self._show_recommendation_tooltip(e, kw, content, rec_window))
+            info_icon.bind("<Leave>", lambda e: self._hide_recommendation_tooltip(rec_window))
+        
+        # --- 액션 버튼 ---
+        button_frame = tk.Frame(card_inner, bg='white')
+        button_frame.pack(fill='x', pady=(12, 0))
+        
+        # 보고서 열기 버튼 (report_file_path가 있을 때만 활성)
+        open_btn = tk.Button(
+            button_frame,
+            text="📄 보고서 열기",
+            font=(self.default_font, 9),
+            bg='#4f46e5' if report_file_path else '#e5e7eb',
+            fg='white' if report_file_path else '#9ca3af',
+            relief='flat',
+            cursor='hand2' if report_file_path else 'arrow',
+            padx=10,
+            pady=4,
+            state='normal' if report_file_path else 'disabled',
+            command=lambda path=report_file_path: self._open_report_file(path) if path else None
+        )
+        open_btn.pack(side='left', padx=(0, 8))
+        
+        # 관심 없음 버튼 (이미 거절된 상태가 아닐 때만)
+        if status != 'rejected':
+            reject_btn = tk.Button(
+                button_frame,
+                text="🚫 관심 없음",
+                font=(self.default_font, 9),
+                bg='#fee2e2',
+                fg='#dc2626',
+                relief='flat',
+                cursor='hand2',
+                padx=10,
+                pady=4,
+                command=lambda rid=rec_id, win=rec_window: self._reject_from_history(rid, win)
+            )
+            reject_btn.pack(side='left')
+        
+        # 카드와 모든 자식 위젯에 스크롤 이벤트 바인딩
+        if hasattr(rec_window, 'bind_scroll_to_children'):
+            rec_window.bind_scroll_to_children(card)
+
+    def _show_recommendation_tooltip(self, event, keyword, content, rec_window):
+        """추천 카드의 전체 내용 툴팁을 표시합니다."""
+        # 기존 툴팁 제거
+        self._hide_recommendation_tooltip(rec_window)
+        
+        # 툴팁 윈도우 생성
+        tooltip = tk.Toplevel(self.root)
+        tooltip.wm_overrideredirect(True)
+        tooltip.configure(bg='white', relief='solid', borderwidth=1)
+        tooltip.attributes('-topmost', True)
+        
+        rec_window.recommendation_tooltip = tooltip
+        
+        # 내용 프레임
+        frame = tk.Frame(tooltip, bg='white', padx=12, pady=12)
+        frame.pack(fill='both', expand=True)
+        
+        # 제목
+        tk.Label(
+            frame,
+            text=f"🔑 {keyword}",
+            font=(self.default_font, 11, 'bold'),
+            bg='white',
+            fg='#1f2937'
+        ).pack(anchor='w')
+        
+        # 구분선
+        tk.Frame(frame, height=1, bg='#e5e7eb').pack(fill='x', pady=8)
+        
+        # 본문 (스크롤 가능)
+        body_frame = tk.Frame(frame, bg='white')
+        body_frame.pack(fill='both', expand=True)
+        
+        scrollbar = ttk.Scrollbar(body_frame, orient='vertical')
+        scrollbar.pack(side='right', fill='y')
+        
+        body_text = tk.Text(
+            body_frame,
+            font=(self.default_font, 10),
+            bg='white',
+            fg='#4b5563',
+            wrap='word',
+            relief='flat',
+            borderwidth=0,
+            height=15,
+            width=50
+        )
+        body_text.pack(side='left', fill='both', expand=True)
+        body_text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.configure(command=body_text.yview)
+        
+        body_text.insert('1.0', content)
+        body_text.config(state='disabled')
+        
+        # 위치 계산
+        tooltip.update_idletasks()
+        tooltip_width = tooltip.winfo_reqwidth()
+        tooltip_height = tooltip.winfo_reqheight()
+        
+        screen_width = tooltip.winfo_screenwidth()
+        screen_height = tooltip.winfo_screenheight()
+        
+        x = event.x_root + 15
+        y = event.y_root + 15
+        
+        # 화면 경계 보정
+        if x + tooltip_width > screen_width:
+            x = event.x_root - tooltip_width - 15
+        if y + tooltip_height > screen_height:
+            y = event.y_root - tooltip_height - 15
+        
+        tooltip.geometry(f"+{x}+{y}")
+
+    def _hide_recommendation_tooltip(self, rec_window):
+        """추천 카드 툴팁을 숨깁니다."""
+        if hasattr(rec_window, 'recommendation_tooltip') and rec_window.recommendation_tooltip:
+            try:
+                rec_window.recommendation_tooltip.destroy()
+            except:
+                pass
+            rec_window.recommendation_tooltip = None
+
+    def _change_recommendation_page(self, rec_window, delta):
+        """페이지를 변경합니다."""
+        rec_window.current_page += delta
+        self._render_current_page(rec_window)
+
+    def _open_report_file(self, file_path):
+        """보고서 파일을 엽니다."""
+        try:
+            if not file_path or not os.path.exists(file_path):
+                print(f"[UI] 파일을 찾을 수 없습니다: {file_path}")
+                return
+            
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(file_path)
+            elif system == "Darwin":
+                subprocess.call(['open', file_path])
+            else:
+                subprocess.call(['xdg-open', file_path])
+            
+            print(f"[UI] 보고서 파일 열기: {file_path}")
+        except Exception as e:
+            print(f"[UI] 파일 열기 오류: {e}")
+
+    def _reject_from_history(self, recommendation_id, rec_window):
+        """히스토리에서 추천을 거절합니다 (블랙리스트 추가)."""
+        print(f"[UI] 히스토리에서 추천 {recommendation_id} 거절")
+        
+        def do_reject():
+            try:
+                from login_view import get_stored_token
+                token = get_stored_token()
+                if not token:
+                    return
+                
+                response = requests.post(
+                    f"{self.API_BASE_URL}/api/v2/recommendations/{recommendation_id}/respond",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"action": "reject"},
+                    timeout=15
+                )
+                
+                if response.status_code == 200:
+                    # 성공 시 카드 목록 새로고침
+                    self.root.after(0, lambda: self._load_recommendation_cards(rec_window))
+                else:
+                    print(f"[UI] 거절 실패: {response.status_code}")
+                    
+            except Exception as e:
+                print(f"[UI] 거절 API 호출 오류: {e}")
+        
+        threading.Thread(target=do_reject, daemon=True).start()
 
     def refresh_recommendation_window(self, window):
         """추천 창의 내용을 새로고침합니다."""
-        # window에서 ScrolledText 위젯 찾기
-        for widget in window.winfo_children():
-            if isinstance(widget, scrolledtext.ScrolledText):
-                self.load_recommendation_history(widget)
-                break
+        if hasattr(window, 'cards_frame'):
+            self._load_recommendation_cards(window)
 
     def update_text_widget(self, text_widget, content):
         """[메인 스레드 호출용] 텍스트 위젯 내용을 안전하게 업데이트합니다."""
@@ -571,16 +1161,33 @@ class FloatingChatApp:
         self.root.after(0, _update)
 
     def format_recommendations(self, recommendations: list) -> str:
-        """추천 목록을 서식이 있는 텍스트로 변환합니다."""
+        """추천 목록을 서식이 있는 텍스트로 변환합니다. (Legacy 호환용)"""
         formatted_lines = []
         for rec in recommendations:
-            dt = datetime.fromtimestamp(rec['created_at'])
-            date_str = dt.strftime('%Y-%m-%d %H:%M')
-            rec_type = "수동 생성" if rec.get('type') == 'manual' else "자동 생성"
+            # created_at이 문자열(ISO format)인 경우와 Unix timestamp인 경우 모두 처리
+            created_at = rec.get('created_at')
+            if isinstance(created_at, str):
+                try:
+                    dt = datetime.fromisoformat(created_at)
+                except ValueError:
+                    dt = datetime.now()
+            elif isinstance(created_at, (int, float)):
+                dt = datetime.fromtimestamp(created_at)
+            else:
+                dt = datetime.now()
             
-            formatted_lines.append(f"## {rec['title']} ##")
+            date_str = dt.strftime('%Y-%m-%d %H:%M')
+            # trigger_type으로 생성 유형 표시
+            trigger_type = rec.get('trigger_type', '')
+            rec_type = "수동 생성" if trigger_type == 'manual' else "자동 생성"
+            
+            # 실제 DB 필드명에 맞게 수정: bubble_message, report_content, keyword
+            title = rec.get('bubble_message') or rec.get('keyword') or "추천"
+            content = rec.get('report_content') or rec.get('bubble_message') or ""
+            
+            formatted_lines.append(f"## {title} ##")
             formatted_lines.append(f"[{date_str} | {rec_type}]")
-            formatted_lines.append(f"{rec['content']}")
+            formatted_lines.append(f"{content}")
             formatted_lines.append("-" * 40 + "\n")
         
         return "\n".join(formatted_lines)
@@ -1046,6 +1653,9 @@ class FloatingChatApp:
             # 항상 최상단
             popup.attributes('-topmost', True)
             
+            # macOS에서 팝업이 올바르게 표시되도록 설정
+            self._setup_window_for_macos(popup, is_popup=True)
+            
             # 내용 표시 프레임
             frame = tk.Frame(popup, bg='white', padx=12, pady=12)
             frame.pack(fill='both', expand=True)
@@ -1241,6 +1851,16 @@ class FloatingChatApp:
 
             self._update_messages_scrollregion()
             self.messages_canvas.yview_moveto(1)
+            
+            # 타이핑 완료 후 대기 중인 deep_dive_offer가 있으면 표시
+            if hasattr(self, 'pending_deep_dive_info') and self.pending_deep_dive_info:
+                deep_dive_info = self.pending_deep_dive_info
+                self.pending_deep_dive_info = None  # 초기화
+                # 약간의 지연 후 버튼 표시 (메시지 렌더링 완료 후)
+                self.root.after(200, lambda: self.show_deep_dive_offer(
+                    deep_dive_info['keyword'],
+                    deep_dive_info['recommendation_id']
+                ))
     
     def show_loading_message(self):
         """로딩 메시지를 표시합니다."""
@@ -1426,12 +2046,14 @@ class FloatingChatApp:
                     })
                     return
     
-    def handle_bot_response(self, bot_response, loading_text_widget):
+    def handle_bot_response(self, bot_response, loading_text_widget, deep_dive_info=None):
         """봇 응답을 처리합니다."""
         # 로딩 메시지 제거
         self.remove_loading_message(loading_text_widget)
         
         # 타이핑 애니메이션으로 봇 메시지 표시
+        # deep_dive_info가 있으면 메시지 출력 완료 후 버튼 표시를 위해 저장
+        self.pending_deep_dive_info = deep_dive_info
         self.add_bot_message(bot_response)
     
     def create_streaming_bot_message(self, loading_text_widget):
@@ -1649,8 +2271,9 @@ class FloatingChatApp:
                     on_close=self._on_ws_close
                 )
                 
-                # 연결 유지 (블로킹)
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                # 연결 유지 (블로킹) - 보고서 생성 등 오래 걸리는 작업을 위해 ping 간격 증가
+                # ping_interval > ping_timeout 이어야 함
+                self.ws.run_forever(ping_interval=120, ping_timeout=60)
                 
             except Exception as e:
                 print(f"[WebSocket] 연결 오류: {e}")
@@ -1683,6 +2306,32 @@ class FloatingChatApp:
                         'type': 'show_recommendation',
                         'recommendations': [recommendation]
                     })
+            
+            elif msg_type == 'report_completed':
+                # 보고서 생성 완료 알림
+                print(f"[WebSocket] 📄 보고서 완료: {data.get('keyword')}")
+                self.message_queue.put({
+                    'type': 'show_report_notification',
+                    'data': {
+                        'success': True,
+                        'keyword': data.get('keyword', ''),
+                        'file_path': data.get('file_path', ''),
+                        'file_name': data.get('file_name', ''),
+                        'sources': data.get('sources', [])
+                    }
+                })
+            
+            elif msg_type == 'report_failed':
+                # 보고서 생성 실패 알림
+                print(f"[WebSocket] 📄 보고서 실패: {data.get('keyword')} - {data.get('reason')}")
+                self.message_queue.put({
+                    'type': 'show_report_notification',
+                    'data': {
+                        'success': False,
+                        'keyword': data.get('keyword', ''),
+                        'reason': data.get('reason', '알 수 없는 오류')
+                    }
+                })
                     
         except json.JSONDecodeError as e:
             print(f"[WebSocket] JSON 파싱 오류: {e}")
@@ -1725,6 +2374,9 @@ class FloatingChatApp:
         self.recommendation_bubble.wm_overrideredirect(True)
         self.recommendation_bubble.attributes('-topmost', True)
         self.recommendation_bubble.configure(bg='white')
+        
+        # macOS에서 팝업이 올바르게 표시되도록 설정
+        self._setup_window_for_macos(self.recommendation_bubble, is_popup=True)
         
         # 메시지 내용
         bubble_message = recommendation.get('bubble_message', '새로운 추천이 있어요!')
@@ -1880,12 +2532,27 @@ class FloatingChatApp:
         # 15초 후 자동 닫기
         self.bubble_auto_close_id = self.root.after(15000, self.close_recommendation_bubble)
     
-    def close_recommendation_bubble(self):
-        """말풍선을 닫습니다."""
+    def close_recommendation_bubble(self, auto_reject=True):
+        """말풍선을 닫습니다.
+        
+        Args:
+            auto_reject: True면 현재 추천을 자동으로 거절 처리 (기본값: True)
+        """
         # 자동 닫기 타이머 취소
         if self.bubble_auto_close_id:
             self.root.after_cancel(self.bubble_auto_close_id)
             self.bubble_auto_close_id = None
+        
+        # 자동 거절 처리 (수락/거절 버튼을 누르지 않고 닫힌 경우)
+        if auto_reject and self.current_recommendation:
+            rec_id = self.current_recommendation.get('id')
+            if rec_id:
+                print(f"[UI] 추천 {rec_id} 자동 거절 (무응답)")
+                threading.Thread(
+                    target=self._call_recommendation_respond_api,
+                    args=(rec_id, 'reject', None),
+                    daemon=True
+                ).start()
         
         # 말풍선 파괴
         if self.recommendation_bubble and self.recommendation_bubble.winfo_exists():
@@ -1899,8 +2566,8 @@ class FloatingChatApp:
         """[네, 궁금해요] 클릭 처리"""
         print(f"[UI] 추천 {recommendation_id} 수락")
         
-        # 말풍선 닫기
-        self.close_recommendation_bubble()
+        # 말풍선 닫기 (이미 수락 처리하므로 auto_reject=False)
+        self.close_recommendation_bubble(auto_reject=False)
         
         # 채팅창 열기
         if self.chat_window.state() == 'withdrawn':
@@ -1921,8 +2588,8 @@ class FloatingChatApp:
         """[관심 없음] 클릭 처리"""
         print(f"[UI] 추천 {recommendation_id} 거절")
         
-        # 말풍선 닫기
-        self.close_recommendation_bubble()
+        # 말풍선 닫기 (이미 거절 처리하므로 auto_reject=False)
+        self.close_recommendation_bubble(auto_reject=False)
         
         # 백그라운드에서 API 호출
         threading.Thread(
@@ -1958,11 +2625,25 @@ class FloatingChatApp:
                 if action == 'accept' and result.get('success'):
                     # 리포트 내용을 채팅창에 표시
                     report_content = result.get('report_content', '리포트를 불러올 수 없습니다.')
+                    
+                    # 심층 보고서 제안 정보도 함께 전달 (메시지 출력 완료 후 버튼 표시)
+                    deep_dive_info = None
+                    if result.get('offer_deep_dive'):
+                        keyword = result.get('keyword', '')
+                        rec_id = result.get('recommendation_id')
+                        if keyword:
+                            deep_dive_info = {
+                                'keyword': keyword,
+                                'recommendation_id': rec_id
+                            }
+                    
                     self.message_queue.put({
                         'type': 'bot_response',
                         'response': report_content,
-                        'loading_widget': loading_widget
+                        'loading_widget': loading_widget,
+                        'deep_dive_info': deep_dive_info
                     })
+                            
                 elif action == 'reject':
                     print(f"[UI] 추천 거절 완료: {result.get('message')}")
                 else:
@@ -1996,6 +2677,546 @@ class FloatingChatApp:
                     'response': f"서버 연결 오류: {str(e)}",
                     'loading_widget': loading_widget
                 })
+    
+    # ============================================================
+    # Deep Dive Report (심층 보고서) 기능
+    # ============================================================
+    
+    def show_deep_dive_offer(self, keyword, recommendation_id):
+        """심층 보고서 제안 UI를 채팅창에 표시합니다."""
+        # 채팅창이 열려있는지 확인
+        if self.chat_window.state() == 'withdrawn':
+            return
+        
+        # 제안 메시지 프레임 생성
+        offer_frame = tk.Frame(self.scrollable_frame, bg='#f0f9ff', padx=10, pady=8)
+        offer_frame.pack(fill='x', padx=10, pady=(5, 10))
+        
+        # 제안 메시지
+        offer_label = tk.Label(
+            offer_frame,
+            text=f"📄 '{keyword}'에 대한 심층 보고서를 PDF로 작성해 드릴까요?",
+            font=(self.default_font, 10),
+            bg='#f0f9ff',
+            fg='#0369a1',
+            wraplength=350,
+            justify='left'
+        )
+        offer_label.pack(anchor='w', pady=(0, 8))
+        
+        # 버튼 컨테이너 (별도 Frame)
+        button_container = tk.Frame(offer_frame, bg='#f0f9ff')
+        button_container.pack(anchor='w')
+        
+        # "응" 버튼
+        yes_btn = tk.Button(
+            button_container,
+            text="응, 작성해줘 📝",
+            font=(self.default_font, 9, 'bold'),
+            bg='#0284c7',
+            fg='white',
+            relief='flat',
+            cursor='hand2',
+            padx=10,
+            pady=4,
+            command=lambda: self._handle_deep_dive_yes(keyword, recommendation_id, offer_frame),
+            activebackground='#0369a1',
+            activeforeground='white'
+        )
+        yes_btn.pack(side='left', padx=(0, 8))
+        
+        # "아니" 버튼
+        no_btn = tk.Button(
+            button_container,
+            text="아니, 괜찮아",
+            font=(self.default_font, 9),
+            bg='#e0e7ff',
+            fg='#4338ca',
+            relief='flat',
+            cursor='hand2',
+            padx=10,
+            pady=4,
+            command=lambda: self._handle_deep_dive_no(offer_frame),
+            activebackground='#c7d2fe'
+        )
+        no_btn.pack(side='left')
+        
+        # 스크롤을 맨 아래로
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+    
+    def _handle_deep_dive_yes(self, keyword, recommendation_id, offer_frame):
+        """'응' 버튼 클릭 - 심층 보고서 생성 요청"""
+        print(f"[UI] 심층 보고서 생성 요청: keyword='{keyword}'")
+        
+        # 버튼 영역 제거
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+        
+        # 확인 메시지 표시
+        confirm_frame = tk.Frame(self.scrollable_frame, bg='#f0fdf4', padx=10, pady=8)
+        confirm_frame.pack(fill='x', padx=10, pady=(0, 10))
+        
+        confirm_label = tk.Label(
+            confirm_frame,
+            text=f"✅ '{keyword}' 보고서 생성을 시작했어요. 완료되면 알려드릴게요!",
+            font=(self.default_font, 10),
+            bg='#f0fdf4',
+            fg='#166534',
+            wraplength=350,
+            justify='left'
+        )
+        confirm_label.pack(anchor='w')
+        
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+        
+        # 백그라운드에서 API 호출
+        threading.Thread(
+            target=self._call_report_create_api,
+            args=(keyword, recommendation_id),
+            daemon=True
+        ).start()
+    
+    def _handle_deep_dive_no(self, offer_frame):
+        """'아니' 버튼 클릭 - 제안 UI 제거"""
+        print("[UI] 심층 보고서 제안 거절")
+        
+        # 버튼 영역만 제거
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+    
+    def _call_report_create_api(self, keyword, recommendation_id=None):
+        """[백그라운드 스레드] 보고서 생성 API를 호출합니다."""
+        try:
+            from login_view import get_stored_token
+            token = get_stored_token()
+            
+            if not token:
+                self.message_queue.put({
+                    'type': 'bot_response',
+                    'response': "오류: 로그인이 필요합니다.",
+                    'loading_widget': None
+                })
+                return
+            
+            payload = {"keyword": keyword}
+            if recommendation_id:
+                payload["recommendation_id"] = recommendation_id
+            
+            response = requests.post(
+                f"{self.API_BASE_URL}/api/v2/reports/create",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+                timeout=10  # API는 즉시 202 반환하므로 짧은 타임아웃
+            )
+            
+            if response.status_code in [200, 202]:
+                # 성공 - 아무 메시지 출력하지 않음 (WebSocket으로 완료 알림 받을 예정)
+                print(f"[UI] 보고서 생성 요청 성공: {response.json()}")
+            else:
+                # 실패 - 오류 메시지 표시
+                error_msg = f"보고서 생성 요청 실패 (상태 코드: {response.status_code})"
+                try:
+                    error_detail = response.json().get('detail', '')
+                    if error_detail:
+                        error_msg = f"오류: {error_detail}"
+                except:
+                    pass
+                
+                self.message_queue.put({
+                    'type': 'bot_response',
+                    'response': error_msg,
+                    'loading_widget': None
+                })
+                
+        except requests.exceptions.Timeout:
+            # 타임아웃 발생해도 백그라운드에서 진행 중 - 사용자에게 안내
+            print(f"[UI] 보고서 생성 API 응답 지연 - 백그라운드에서 계속 진행 중")
+            # 타임아웃은 정상적인 상황일 수 있음 (백엔드가 백그라운드 작업 시작함)
+            # 사용자에게 알림 없이 조용히 처리 - WebSocket으로 완료 알림 받을 예정
+        except requests.exceptions.RequestException as e:
+            error_str = str(e)
+            # Read timed out은 백그라운드 작업이 진행 중일 수 있음
+            if "Read timed out" in error_str:
+                print(f"[UI] 보고서 생성 API Read timeout - 백그라운드에서 계속 진행 중")
+                # 타임아웃은 정상적인 상황일 수 있음 - WebSocket으로 완료 알림 받을 예정
+            else:
+                print(f"보고서 생성 API 호출 오류: {e}")
+                self.message_queue.put({
+                    'type': 'bot_response',
+                    'response': f"서버 연결 오류: {error_str}",
+                    'loading_widget': None
+                })
+    
+    # ============================================================
+    # Report Notification (보고서 완료/실패 알림)
+    # ============================================================
+    
+    def show_report_notification(self, data):
+        """보고서 생성 완료/실패 알림 말풍선을 표시합니다."""
+        # 기존 보고서 알림이 있으면 닫기
+        self.close_report_notification()
+        
+        success = data.get('success', False)
+        keyword = data.get('keyword', '')
+        
+        # 말풍선 Toplevel 윈도우 생성
+        self.report_notification_window = tk.Toplevel(self.root)
+        self.report_notification_window.wm_overrideredirect(True)
+        self.report_notification_window.attributes('-topmost', True)
+        
+        # macOS에서 팝업이 올바르게 표시되도록 설정
+        self._setup_window_for_macos(self.report_notification_window, is_popup=True)
+        
+        if success:
+            # 성공 알림
+            file_path = data.get('file_path', '')
+            file_name = data.get('file_name', '')
+            self._create_report_success_bubble(keyword, file_path, file_name)
+        else:
+            # 실패 알림
+            reason = data.get('reason', '알 수 없는 오류')
+            self._create_report_failure_bubble(keyword, reason)
+        
+        self.report_notification_visible = True
+        
+        # 20초 후 자동 닫기
+        self.report_auto_close_id = self.root.after(20000, self.close_report_notification)
+    
+    def _create_report_success_bubble(self, keyword, file_path, file_name):
+        """보고서 성공 알림 말풍선 UI를 생성합니다."""
+        self.report_notification_window.configure(bg='white')
+        
+        # 메인 프레임
+        main_frame = tk.Frame(self.report_notification_window, bg='white', padx=2, pady=2)
+        main_frame.pack(fill='both', expand=True)
+        
+        # 내부 컨테이너 (성공: 녹색 계열)
+        inner_frame = tk.Frame(main_frame, bg='#f0fdf4', padx=15, pady=12)
+        inner_frame.pack(fill='both', expand=True)
+        
+        # 상단: 아이콘과 닫기 버튼
+        header_frame = tk.Frame(inner_frame, bg='#f0fdf4')
+        header_frame.pack(fill='x', pady=(0, 8))
+        
+        # 📄 아이콘
+        icon_label = tk.Label(
+            header_frame,
+            text="📄",
+            font=('Arial', 16),
+            bg='#f0fdf4'
+        )
+        icon_label.pack(side='left')
+        
+        # 키워드 라벨
+        keyword_label = tk.Label(
+            header_frame,
+            text=f"'{keyword}' 보고서",
+            font=(self.default_font, 10, 'bold'),
+            bg='#f0fdf4',
+            fg='#166534'
+        )
+        keyword_label.pack(side='left', padx=(8, 0))
+        
+        # 닫기 버튼
+        close_btn = tk.Button(
+            header_frame,
+            text="✕",
+            font=(self.default_font, 10),
+            bg='#f0fdf4',
+            fg='#9ca3af',
+            relief='flat',
+            cursor='hand2',
+            command=self.close_report_notification,
+            activebackground='#dcfce7'
+        )
+        close_btn.pack(side='right')
+        
+        # 메시지 라벨
+        message_label = tk.Label(
+            inner_frame,
+            text=f"보고서를 PDF로 저장했어요! 열어볼까요?",
+            font=(self.default_font, 11),
+            bg='#f0fdf4',
+            fg='#1f2937',
+            wraplength=250,
+            justify='left'
+        )
+        message_label.pack(fill='x', pady=(0, 4))
+        
+        # 파일명 표시
+        if file_name:
+            filename_label = tk.Label(
+                inner_frame,
+                text=f"📁 {file_name}",
+                font=(self.default_font, 9),
+                bg='#f0fdf4',
+                fg='#6b7280',
+                wraplength=250,
+                justify='left'
+            )
+            filename_label.pack(fill='x', pady=(0, 12))
+        
+        # 버튼 프레임
+        button_frame = tk.Frame(inner_frame, bg='#f0fdf4')
+        button_frame.pack(fill='x')
+        
+        # [폴더 열기] 버튼
+        open_btn = tk.Button(
+            button_frame,
+            text="폴더 열기 📂",
+            font=(self.default_font, 10, 'bold'),
+            bg='#22c55e',
+            fg='white',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=lambda: self._open_report_folder(file_path),
+            activebackground='#16a34a',
+            activeforeground='white'
+        )
+        open_btn.pack(side='left', padx=(0, 8))
+        
+        # [닫기] 버튼
+        dismiss_btn = tk.Button(
+            button_frame,
+            text="닫기",
+            font=(self.default_font, 10),
+            bg='#e5e7eb',
+            fg='#4b5563',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=self.close_report_notification,
+            activebackground='#d1d5db'
+        )
+        dismiss_btn.pack(side='left')
+        
+        # 말풍선 꼬리
+        tail_canvas = tk.Canvas(
+            self.report_notification_window,
+            width=20,
+            height=10,
+            bg='white',
+            highlightthickness=0
+        )
+        tail_canvas.pack(side='bottom')
+        tail_canvas.create_polygon(
+            0, 0,
+            10, 10,
+            20, 0,
+            fill='#f0fdf4',
+            outline='#f0fdf4'
+        )
+        
+        # 테두리
+        self.report_notification_window.configure(
+            highlightbackground='#bbf7d0',
+            highlightthickness=1
+        )
+        
+        # 위치 계산
+        self._position_report_bubble()
+    
+    def _create_report_failure_bubble(self, keyword, reason):
+        """보고서 실패 알림 말풍선 UI를 생성합니다."""
+        self.report_notification_window.configure(bg='white')
+        
+        # 메인 프레임
+        main_frame = tk.Frame(self.report_notification_window, bg='white', padx=2, pady=2)
+        main_frame.pack(fill='both', expand=True)
+        
+        # 내부 컨테이너 (실패: 빨간색 계열)
+        inner_frame = tk.Frame(main_frame, bg='#fef2f2', padx=15, pady=12)
+        inner_frame.pack(fill='both', expand=True)
+        
+        # 상단: 아이콘과 닫기 버튼
+        header_frame = tk.Frame(inner_frame, bg='#fef2f2')
+        header_frame.pack(fill='x', pady=(0, 8))
+        
+        # ❌ 아이콘
+        icon_label = tk.Label(
+            header_frame,
+            text="❌",
+            font=('Arial', 16),
+            bg='#fef2f2'
+        )
+        icon_label.pack(side='left')
+        
+        # 키워드 라벨
+        keyword_label = tk.Label(
+            header_frame,
+            text=f"'{keyword}' 보고서",
+            font=(self.default_font, 10, 'bold'),
+            bg='#fef2f2',
+            fg='#991b1b'
+        )
+        keyword_label.pack(side='left', padx=(8, 0))
+        
+        # 닫기 버튼
+        close_btn = tk.Button(
+            header_frame,
+            text="✕",
+            font=(self.default_font, 10),
+            bg='#fef2f2',
+            fg='#9ca3af',
+            relief='flat',
+            cursor='hand2',
+            command=self.close_report_notification,
+            activebackground='#fee2e2'
+        )
+        close_btn.pack(side='right')
+        
+        # 메시지 라벨
+        message_label = tk.Label(
+            inner_frame,
+            text=f"보고서 생성 중 오류가 발생했어요.",
+            font=(self.default_font, 11),
+            bg='#fef2f2',
+            fg='#1f2937',
+            wraplength=250,
+            justify='left'
+        )
+        message_label.pack(fill='x', pady=(0, 4))
+        
+        # 오류 사유
+        reason_label = tk.Label(
+            inner_frame,
+            text=f"사유: {reason}",
+            font=(self.default_font, 9),
+            bg='#fef2f2',
+            fg='#6b7280',
+            wraplength=250,
+            justify='left'
+        )
+        reason_label.pack(fill='x', pady=(0, 12))
+        
+        # 버튼 프레임
+        button_frame = tk.Frame(inner_frame, bg='#fef2f2')
+        button_frame.pack(fill='x')
+        
+        # [닫기] 버튼
+        dismiss_btn = tk.Button(
+            button_frame,
+            text="확인",
+            font=(self.default_font, 10),
+            bg='#e5e7eb',
+            fg='#4b5563',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=self.close_report_notification,
+            activebackground='#d1d5db'
+        )
+        dismiss_btn.pack(side='left')
+        
+        # 말풍선 꼬리
+        tail_canvas = tk.Canvas(
+            self.report_notification_window,
+            width=20,
+            height=10,
+            bg='white',
+            highlightthickness=0
+        )
+        tail_canvas.pack(side='bottom')
+        tail_canvas.create_polygon(
+            0, 0,
+            10, 10,
+            20, 0,
+            fill='#fef2f2',
+            outline='#fef2f2'
+        )
+        
+        # 테두리
+        self.report_notification_window.configure(
+            highlightbackground='#fecaca',
+            highlightthickness=1
+        )
+        
+        # 위치 계산
+        self._position_report_bubble()
+    
+    def _position_report_bubble(self):
+        """보고서 알림 말풍선 위치를 계산합니다."""
+        self.report_notification_window.update_idletasks()
+        bubble_width = self.report_notification_window.winfo_reqwidth()
+        bubble_height = self.report_notification_window.winfo_reqheight()
+        
+        button_x = self.root.winfo_x()
+        button_y = self.root.winfo_y()
+        
+        # 버튼 중앙 위에 배치 (추천 알림과 겹치지 않도록 약간 오른쪽으로)
+        x = button_x + 35 - (bubble_width // 2) + 50
+        y = button_y - bubble_height - 10
+        
+        # 화면 경계 확인
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        if x < 10:
+            x = 10
+        if x + bubble_width > screen_width - 10:
+            x = screen_width - bubble_width - 10
+        if y < 10:
+            y = button_y + 80
+        
+        self.report_notification_window.geometry(f"+{x}+{y}")
+    
+    def _open_report_folder(self, file_path):
+        """보고서 파일이 있는 폴더를 엽니다. (플랫폼별 처리)"""
+        try:
+            if not file_path:
+                print("[UI] 파일 경로가 없습니다.")
+                return
+            
+            # 파일의 디렉토리 경로 추출
+            folder_path = os.path.dirname(file_path)
+            if not folder_path:
+                folder_path = file_path
+            
+            system = platform.system()
+            
+            if system == "Windows":
+                # Windows: explorer로 폴더 열기 (파일 선택)
+                if os.path.isfile(file_path):
+                    subprocess.run(['explorer', '/select,', file_path])
+                else:
+                    os.startfile(folder_path)
+            elif system == "Darwin":
+                # macOS: Finder로 열기
+                if os.path.isfile(file_path):
+                    subprocess.call(['open', '-R', file_path])
+                else:
+                    subprocess.call(['open', folder_path])
+            else:
+                # Linux: xdg-open으로 열기
+                subprocess.call(['xdg-open', folder_path])
+            
+            print(f"[UI] 폴더 열기: {folder_path}")
+            
+        except Exception as e:
+            print(f"[UI] 폴더 열기 오류: {e}")
+        
+        # 알림 닫기
+        self.close_report_notification()
+    
+    def close_report_notification(self):
+        """보고서 알림 말풍선을 닫습니다."""
+        # 자동 닫기 타이머 취소
+        if self.report_auto_close_id:
+            self.root.after_cancel(self.report_auto_close_id)
+            self.report_auto_close_id = None
+        
+        # 말풍선 파괴
+        if self.report_notification_window and self.report_notification_window.winfo_exists():
+            self.report_notification_window.destroy()
+        
+        self.report_notification_window = None
+        self.report_notification_visible = False
     
     # ============================================================
     # Legacy Recommendation Notification (Backward Compatibility)

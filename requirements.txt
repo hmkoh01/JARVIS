@@ -25,7 +25,7 @@ openpyxl>=3.1.0  # Excel support
 psutil>=5.9.0
 aiohttp>=3.9.0         # For asynchronous web requests
 beautifulsoup4>=4.12.0 # For parsing HTML
-lxml>=5.0.0            # High-performance parser for BeautifulSoup
+lxml>=4.0.0,<6.0.0 
 trafilatura>=2.0.0     # For extracting main content from web pages
 
 # Web framework
@@ -40,6 +40,7 @@ python-jose[cryptography]>=3.3.0  # For JWT token handling
 httpx>=0.25.0  # For async HTTP requests
 
 # LangChain and AI
+langchain>=0.3.0 
 langchain-community>=0.0.20
 langchain-core>=0.1.0
 langgraph>=0.0.40
@@ -57,3 +58,12 @@ keyring>=24.0.0  # For secure token storage
 apscheduler>=3.10.0 # For background task scheduling
 websocket-client>=1.9.0  # For WebSocket client (real-time notifications)
 websockets>=12.0  # For uvicorn WebSocket support (server-side)
+
+# Report Agent - Web Search
+ddgs>=1.0.0  # For DuckDuckGo web search (no API key required) - renamed from duckduckgo-search
+duckduckgo-search>=6.0.0  # Fallback for older installations
+
+# Report Agent - PDF Generation
+reportlab>=4.0.0  # For PDF generation (primary method, platypus module)
+markdown2>=2.4.0  # For Markdown to HTML conversion
+xhtml2pdf>=0.2.11  # For HTML to PDF conversion (fallback method)

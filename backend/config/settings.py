@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT: int = 120  # 요청 타임아웃 (초)
     KEEP_ALIVE_TIMEOUT: int = 5  # Keep-alive 타임아웃 (초)
     
+    # Report Agent 설정
+    REPORTS_DIR: str = str(Path.home() / "Documents" / "JARVIS" / "Reports")
+    
     # Google OAuth 2.0 설정
     GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID")
     GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET")

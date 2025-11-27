@@ -11,7 +11,7 @@ backend_dir = Path(__file__).parent.parent.absolute()
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -695,6 +695,16 @@ async def respond_to_recommendation(
     
     - action='accept': 추천 수락 → 리포트 생성 후 반환
     - action='reject': 추천 거절 → 키워드 블랙리스트 추가
+    
+    응답 (accept 시):
+        {
+            "success": true,
+            "action": "accept",
+            "report_content": "...",
+            "offer_deep_dive": true,  // 심층 보고서 제안 여부
+            "keyword": "Python",
+            "recommendation_id": 123
+        }
     """
     try:
         action = request_data.get("action")
@@ -714,15 +724,39 @@ async def respond_to_recommendation(
         if recommendation.get("user_id") != user_id:
             raise HTTPException(status_code=403, detail="해당 추천에 대한 권한이 없습니다.")
         
+        keyword = recommendation.get("keyword", "")
+        
         # handle_response 호출 (비동기)
         success, result_message = await recommendation_agent.handle_response(recommendation_id, action)
         
-        return {
-            "success": success,
-            "action": action,
-            "message": result_message if action == "reject" else None,
-            "report_content": result_message if action == "accept" and success else None
-        }
+        if action == "accept" and success:
+            # 수락 시: 심층 보고서 제안 포함
+            return {
+                "success": success,
+                "action": action,
+                "report_content": result_message,
+                "offer_deep_dive": True,  # ReportAgent를 통한 심층 보고서 제안
+                "keyword": keyword,
+                "recommendation_id": recommendation_id
+            }
+        elif action == "reject":
+            # 거절 시
+            return {
+                "success": success,
+                "action": action,
+                "message": result_message,
+                "keyword": keyword,
+                "recommendation_id": recommendation_id
+            }
+        else:
+            # 실패 시
+            return {
+                "success": success,
+                "action": action,
+                "message": result_message if not success else None,
+                "keyword": keyword,
+                "recommendation_id": recommendation_id
+            }
         
     except HTTPException:
         raise
@@ -761,6 +795,153 @@ async def initial_setup(
     except Exception as e:
         logger.error(f"초기 설정 실패: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 보고서 생성 관련 엔드포인트
+# ============================================================================
+
+async def _create_report_background_task(
+    user_id: int,
+    keyword: str,
+    recommendation_id: Optional[int] = None
+):
+    """
+    백그라운드에서 보고서를 생성하고 완료 시 WebSocket으로 알림을 보냅니다.
+    
+    Args:
+        user_id: 사용자 ID
+        keyword: 보고서 주제 키워드
+        recommendation_id: 연관된 추천 ID (선택)
+    """
+    from core.websocket_manager import get_websocket_manager
+    from database.sqlite import SQLite
+    
+    logger.info(f"📄 보고서 생성 시작: user_id={user_id}, keyword='{keyword}'")
+    
+    try:
+        # ReportAgent 가져오기
+        report_agent = agent_registry.get_agent("report")
+        if not report_agent:
+            logger.error("ReportAgent를 찾을 수 없습니다.")
+            ws_manager = get_websocket_manager()
+            await ws_manager.broadcast_report_failed(
+                user_id, keyword, "ReportAgent를 사용할 수 없습니다."
+            )
+            return
+        
+        # 보고서 생성 실행
+        result = await report_agent.create_report(
+            user_id=user_id,
+            keyword=keyword,
+            recommendation_id=recommendation_id
+        )
+        
+        ws_manager = get_websocket_manager()
+        
+        if result.get("success"):
+            # 성공: DB 업데이트 및 WebSocket 알림
+            logger.info(f"📄 보고서 생성 완료: {result.get('pdf_filename')}")
+            
+            pdf_path = result.get("pdf_path", "")
+            
+            # recommendation_id가 있으면 report_file_path 업데이트
+            if recommendation_id:
+                db = SQLite()
+                db.update_recommendation_report_path(
+                    recommendation_id, 
+                    pdf_path
+                )
+            
+            # 1. 먼저 WebSocket 알림 전송 (사용자에게 완료 알림)
+            await ws_manager.broadcast_report_completed(
+                user_id=user_id,
+                keyword=keyword,
+                file_path=pdf_path,
+                file_name=result.get("pdf_filename", ""),
+                sources=result.get("sources", [])
+            )
+            
+            # 2. 그 후 보고서 파일을 SQLite와 Qdrant에 인덱싱 (채팅에서 검색 가능하도록)
+            if pdf_path:
+                try:
+                    from utils.report_indexer import index_report_file_async
+                    indexing_success = await index_report_file_async(
+                        file_path=pdf_path,
+                        user_id=user_id,
+                        keyword=keyword
+                    )
+                    if indexing_success:
+                        logger.info(f"📄 보고서 인덱싱 완료: {pdf_path}")
+                    else:
+                        logger.warning(f"📄 보고서 인덱싱 실패 (파일은 생성됨): {pdf_path}")
+                except Exception as e:
+                    logger.warning(f"📄 보고서 인덱싱 오류 (무시): {e}")
+        else:
+            # 실패: WebSocket 알림
+            error_message = result.get("message", "알 수 없는 오류가 발생했습니다.")
+            logger.error(f"📄 보고서 생성 실패: {error_message}")
+            
+            await ws_manager.broadcast_report_failed(
+                user_id=user_id,
+                keyword=keyword,
+                reason=error_message
+            )
+            
+    except Exception as e:
+        logger.exception(f"📄 보고서 백그라운드 작업 오류: {e}")
+        try:
+            ws_manager = get_websocket_manager()
+            await ws_manager.broadcast_report_failed(
+                user_id=user_id,
+                keyword=keyword,
+                reason=str(e)
+            )
+        except Exception:
+            pass
+
+
+@router.post("/reports/create")
+async def create_report(
+    request_data: dict,
+    background_tasks: BackgroundTasks,
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    보고서 생성 요청 (비동기 - 백그라운드 작업)
+    
+    요청 JSON:
+        {
+            "keyword": "보고서 주제",
+            "recommendation_id": 123  // 선택적
+        }
+    
+    응답:
+        즉시 HTTP 202 반환, 완료 시 WebSocket으로 알림
+    """
+    keyword = request_data.get("keyword", "").strip()
+    recommendation_id = request_data.get("recommendation_id")
+    
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword는 필수입니다.")
+    
+    logger.info(f"📄 보고서 생성 요청 접수: user_id={user_id}, keyword='{keyword}'")
+    
+    # 백그라운드 작업으로 보고서 생성 시작
+    background_tasks.add_task(
+        _create_report_background_task,
+        user_id=user_id,
+        keyword=keyword,
+        recommendation_id=recommendation_id
+    )
+    
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"'{keyword}' 보고서 생성이 시작되었습니다. 완료되면 알림을 보내드립니다.",
+        "keyword": keyword,
+        "recommendation_id": recommendation_id
+    }
 
 
 @router.post("/settings/update-folder")

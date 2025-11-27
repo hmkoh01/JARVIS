@@ -3,6 +3,7 @@ from agents.chatbot_agent.chatbot_agent import ChatbotAgent
 from agents.coding_agent.coding_agent import CodingAgent
 from agents.dashboard_agent.dashboard_agent import DashboardAgent
 from agents.recommendation_agent.recommendation_agent import RecommendationAgent
+from agents.report_agent.report_agent import ReportAgent
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 
@@ -25,7 +26,8 @@ class AgentRegistry:
             ChatbotAgent(),  # 멀티모달 RAG 챗봇 에이전트
             CodingAgent(),
             DashboardAgent(),
-            RecommendationAgent()
+            RecommendationAgent(),
+            ReportAgent(),  # 웹 검색 기반 보고서 생성 에이전트
         ]
         
         for agent in default_agents:
