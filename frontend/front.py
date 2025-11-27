@@ -337,9 +337,7 @@ class FloatingChatApp:
         
         # 항상 최상단에 표시
         self.chat_window.attributes('-topmost', True)
-        
-        # 윈도우 크기 조정 방지
-        self.chat_window.resizable(False, False)
+    
         
         # 헤더 (높이 증가)
         header_frame = tk.Frame(self.chat_window, bg='#4f46e5', height=100)
