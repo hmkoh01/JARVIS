@@ -30,6 +30,14 @@ from database.sqlite import SQLite
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 
+# KeywordExtractor 싱글톤 (채팅 키워드 추출용)
+try:
+    from utils.keyword_extractor import get_keyword_extractor
+    _keyword_extractor = get_keyword_extractor()
+except Exception as e:
+    logger.warning(f"KeywordExtractor 초기화 실패, 키워드 추출 비활성화: {e}")
+    _keyword_extractor = None
+
 router = APIRouter()
 security = HTTPBearer()
 
@@ -105,12 +113,64 @@ async def chat_with_agent(chat_request: ChatRequest, request: Request):
         logger.error(f"채팅 처리 중 오류 발생: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"채팅 처리 중 오류가 발생했습니다: {str(e)}")
 
+async def _extract_and_store_keywords(user_id: int, message: str, message_id: int):
+    """채팅 메시지에서 키워드를 추출하고 content_keywords에 저장 (백그라운드 태스크)"""
+    if len(message.strip()) < 10:
+        return  # 짧은 메시지는 스킵
+    
+    try:
+        db = SQLite()
+        keywords = []
+        
+        if _keyword_extractor and _keyword_extractor.is_available():
+            # KeyBERT로 키워드 추출 (asyncio.to_thread로 블로킹 방지)
+            extracted = await asyncio.to_thread(
+                _keyword_extractor.extract, 
+                message, 
+                5,  # top_n
+                (1, 2)  # keyphrase_ngram_range
+            )
+            keywords = list(set([kw for kw, _ in extracted]))
+        else:
+            # Fallback: 단순 휴리스틱 (2자 이상 토큰)
+            tokens = message.split()
+            keywords = list(set([t for t in tokens if len(t) > 2]))[:5]
+        
+        # content_keywords에 저장
+        for kw in keywords:
+            db.insert_content_keyword(
+                user_id=user_id,
+                source_type='chat',
+                source_id=f"chat:{message_id}",
+                keyword=kw,
+                original_text=message[:200] if len(message) > 200 else message
+            )
+        
+        if keywords:
+            logger.debug(f"채팅 키워드 추출 완료: user_id={user_id}, keywords={keywords}")
+    except Exception as e:
+        logger.warning(f"채팅 키워드 추출 실패 (무시됨): {e}")
+
 @router.post("/process")
 async def process_message(request_data: dict, request: Request):
     """프론트엔드용 메시지 처리 엔드포인트 (스트리밍 지원)"""
     try:
         message = request_data.get("message", "")
         user_id = request_data.get("user_id", 1)
+        
+        # 채팅 메시지 로깅 (사용자 메시지)
+        db = SQLite()
+        user_message_id = -1
+        if message.strip():
+            user_message_id = db.log_chat_message(
+                user_id=user_id,
+                role='user',
+                content=message,
+                metadata={"type": "user"}
+            )
+            # 백그라운드에서 키워드 추출 (10자 이상인 경우만)
+            if user_message_id > 0 and len(message.strip()) >= 10:
+                asyncio.create_task(_extract_and_store_keywords(user_id, message, user_message_id))
         
         # 스트리밍 요청 확인 (Accept 헤더)
         accept_header = request.headers.get("accept", "")
@@ -146,6 +206,16 @@ async def process_message(request_data: dict, request: Request):
                 error_msg = str(supervisor_response.response)
                 logger.error(f"Supervisor 응답 실패: {error_msg}")
                 content = f"처리 중 오류가 발생했습니다: {error_msg}"
+
+            # Assistant 응답 로깅 (스트리밍 전에 로깅)
+            agent_type = supervisor_response.response.agent_type if supervisor_response.success else "unknown"
+            if len(content.strip()) >= 10:
+                db.log_chat_message(
+                    user_id=user_id,
+                    role='assistant',
+                    content=content,
+                    metadata={"agent_type": agent_type, "success": supervisor_response.success}
+                )
 
             async def generate_stream():
                 try:
@@ -207,11 +277,21 @@ async def process_message(request_data: dict, request: Request):
                 if not content.strip():
                     content = "처리 중 오류가 발생했습니다."
             
+            # Assistant 응답 로깅 (비스트리밍)
+            agent_type = supervisor_response.response.agent_type if supervisor_response.success else "unknown"
+            if len(content.strip()) >= 10:
+                db.log_chat_message(
+                    user_id=user_id,
+                    role='assistant',
+                    content=content,
+                    metadata={"agent_type": agent_type, "success": supervisor_response.success}
+                )
+            
             # 프론트엔드가 기대하는 형식으로 반환
             return {
                 "success": supervisor_response.success,
                 "content": content,
-                "agent_type": supervisor_response.response.agent_type if supervisor_response.success else "unknown",
+                "agent_type": agent_type,
                 "metadata": supervisor_response.response.metadata if supervisor_response.success else {}
             }
     except asyncio.TimeoutError:
@@ -728,6 +808,8 @@ async def update_folder(
             db.conn.execute("DELETE FROM browser_logs WHERE user_id = ?", (user_id,))
             # content_keywords 테이블 삭제
             db.conn.execute("DELETE FROM content_keywords WHERE user_id = ?", (user_id,))
+            # chat_messages 테이블 삭제
+            db.conn.execute("DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
             db.conn.commit()
             logger.info("SQLite 데이터 삭제 완료")
         except Exception as e:

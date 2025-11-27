@@ -200,6 +200,22 @@ class SQLite:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_created_at ON content_keywords(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_source ON content_keywords(source_type, source_id)")
             
+            # ============================================================
+            # 6. Chat Messages (Short-term Memory for Chatbot)
+            # ============================================================
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    metadata TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created ON chat_messages(user_id, created_at DESC)")
+            
             conn.commit()
 
     # ============================================================
@@ -937,6 +953,98 @@ class SQLite:
             return 0
 
     # ============================================================
+    # Chat Messages Methods (Short-term Memory)
+    # ============================================================
+    
+    def log_chat_message(self, user_id: int, role: str, content: str, 
+                         metadata: Optional[Dict[str, Any]] = None) -> int:
+        """채팅 메시지 저장 (최대 4000자로 truncate)
+        
+        Args:
+            user_id: 사용자 ID
+            role: 'user' 또는 'assistant'
+            content: 메시지 내용
+            metadata: 추가 메타데이터 (JSON으로 저장)
+        
+        Returns:
+            삽입된 메시지의 ID, 실패 시 -1
+        """
+        try:
+            # 4000자로 truncate
+            truncated_content = content[:4000] if content else ""
+            metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+            
+            cursor = self.conn.execute("""
+                INSERT INTO chat_messages (user_id, role, content, metadata)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, role, truncated_content, metadata_json))
+            self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"채팅 메시지 저장 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return -1
+    
+    def get_recent_chat_messages(self, user_id: int, limit: int = 12) -> List[Dict[str, Any]]:
+        """최근 채팅 메시지 조회 (oldest→newest 순서로 반환)
+        
+        Args:
+            user_id: 사용자 ID
+            limit: 최대 반환 개수
+        
+        Returns:
+            채팅 메시지 리스트 (시간순 정렬)
+        """
+        try:
+            self.conn.row_factory = sqlite3.Row
+            # 최신순으로 limit개 가져온 후 역순으로 정렬하여 oldest→newest
+            cursor = self.conn.execute("""
+                SELECT * FROM (
+                    SELECT * FROM chat_messages 
+                    WHERE user_id = ? 
+                    ORDER BY created_at DESC 
+                    LIMIT ?
+                ) ORDER BY created_at ASC
+            """, (user_id, limit))
+            rows = cursor.fetchall()
+            
+            result = []
+            for row in rows:
+                msg = dict(row)
+                # metadata JSON 파싱
+                if msg.get('metadata'):
+                    try:
+                        msg['metadata'] = json.loads(msg['metadata'])
+                    except json.JSONDecodeError:
+                        pass
+                result.append(msg)
+            return result
+        except Exception as e:
+            logger.error(f"채팅 메시지 조회 오류: {e}")
+            return []
+    
+    def delete_chat_messages_for_user(self, user_id: int) -> bool:
+        """사용자의 모든 채팅 메시지 삭제
+        
+        Args:
+            user_id: 사용자 ID
+        
+        Returns:
+            성공 여부
+        """
+        try:
+            self.conn.execute("DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
+            self.conn.commit()
+            logger.info(f"사용자 {user_id}의 채팅 메시지가 삭제되었습니다.")
+            return True
+        except Exception as e:
+            logger.error(f"채팅 메시지 삭제 오류: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+
+    # ============================================================
     # Statistics Methods
     # ============================================================
     
@@ -957,6 +1065,10 @@ class SQLite:
                     "SELECT COUNT(*) FROM content_keywords WHERE user_id = ?", (user_id,)
                 )
                 stats['content_keywords'] = cursor.fetchone()[0]
+                cursor = self.conn.execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE user_id = ?", (user_id,)
+                )
+                stats['chat_messages'] = cursor.fetchone()[0]
             else:
                 cursor = self.conn.execute("SELECT COUNT(*) FROM files")
                 stats['files'] = cursor.fetchone()[0]
@@ -964,6 +1076,8 @@ class SQLite:
                 stats['browser_logs'] = cursor.fetchone()[0]
                 cursor = self.conn.execute("SELECT COUNT(*) FROM content_keywords")
                 stats['content_keywords'] = cursor.fetchone()[0]
+                cursor = self.conn.execute("SELECT COUNT(*) FROM chat_messages")
+                stats['chat_messages'] = cursor.fetchone()[0]
             return stats
         except Exception as e:
             logger.error(f"수집 통계 조회 오류: {e}")
@@ -979,7 +1093,7 @@ class SQLite:
             tables = [
                 'recommendations', 'recommendation_blacklist', 
                 'browser_logs', 'files', 'content_keywords',
-                'user_interests', 'user_survey_responses'
+                'user_interests', 'user_survey_responses', 'chat_messages'
             ]
             for table in tables:
                 self.conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))

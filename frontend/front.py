@@ -107,7 +107,6 @@ class FloatingChatApp:
                 test_label = tk.Label(self.root, font=(font, 12))
                 test_label.destroy()
                 self.default_font = font
-                print(f"한글 폰트 설정: {font}")
                 break
             except:
                 continue
@@ -150,7 +149,6 @@ class FloatingChatApp:
                     
                     elif message['type'] == 'create_streaming_message':
                         # 스트리밍용 빈 봇 메시지 생성
-                        print("[DEBUG] process_message_queue: create_streaming_message 수신 → create_streaming_bot_message() 호출")
                         self.create_streaming_bot_message(message['loading_widget'])
                     
                     elif message['type'] == 'update_streaming':
@@ -159,21 +157,17 @@ class FloatingChatApp:
                     
                     elif message['type'] == 'complete_streaming':
                         # 스트리밍 완료
-                        print("[DEBUG] process_message_queue: complete_streaming 메시지 수신 → complete_streaming_message() 호출")
                         self.complete_streaming_message()
-                        print("[DEBUG] process_message_queue: complete_streaming_message() 호출 완료")
                     
                     elif message['type'] == 'stream_chunk':
                         # 스트리밍 청크 처리
-                        chunk_len = len(message.get('chunk', ''))
-                        print(f"[DEBUG] process_message_queue: stream_chunk 수신 (len={chunk_len})")
                         self.handle_stream_chunk(message['chunk'])
                         
                 except queue.Empty:
                     break
                     
         except Exception as e:
-            print(f"큐 처리 중 오류: {e}")
+            pass  # 큐 처리 중 오류 무시
         finally:
             # 100ms 후에 다시 큐 확인
             try:
@@ -1132,8 +1126,8 @@ class FloatingChatApp:
             
             popup.geometry(f"+{x}+{y}")
             
-        except Exception as e:
-            print(f"팝업 표시 오류: {e}")
+        except Exception:
+            pass  # 팝업 표시 오류 무시
 
     def hide_citation_popup(self, event):
         """팝업을 숨깁니다 (유지 상태가 아닐 때만)."""
@@ -1380,30 +1374,17 @@ class FloatingChatApp:
                     
                     # 스트리밍 응답 읽기 (decode_unicode=True로 설정하여 안전하게 읽기)
                     try:
-                        print(f"[DEBUG] 스트리밍 응답 읽기 시작...")
-                        chunk_count = 0
-                        total_bytes = 0
-                        
                         # chunk_size=None으로 설정하여 스트림이 도착하는 대로 받음
                         for chunk_text in response.iter_content(chunk_size=None, decode_unicode=True):
                             if chunk_text:
-                                chunk_count += 1
-                                total_bytes += len(chunk_text.encode('utf-8') if isinstance(chunk_text, str) else chunk_text)
                                 self.message_queue.put({
                                     'type': 'stream_chunk',
                                     'chunk': chunk_text
                                 })
                         
-                        print(f"[DEBUG] 스트리밍 읽기 완료 (총 {chunk_count}개 청크, {total_bytes} bytes)")
-                        print(f"[DEBUG] complete_streaming 메시지를 큐에 넣는 중...")
                         self.message_queue.put({'type': 'complete_streaming'})
-                        print(f"[DEBUG] complete_streaming 메시지 큐 투입 완료")
                         
                     except Exception as e:
-                        print(f"[DEBUG] 스트리밍 처리 중 오류: {e}")
-                        print(f"[DEBUG] 스트리밍 오류 발생으로 인해 complete_streaming 메시지가 전송되지 않았습니다.")
-                        import traceback
-                        print(f"[DEBUG] 스트리밍 오류 스택 트레이스:\n{traceback.format_exc()}")
                         error_msg = f"스트리밍 처리 중 오류가 발생했습니다: {str(e)}"
                         self.message_queue.put({
                             'type': 'bot_response',
@@ -1497,9 +1478,8 @@ class FloatingChatApp:
         self.streaming_text_buffer = ""
         self.streaming_displayed_length = 0
         self.streaming_typing_active = False
-        self.stream_finished_flag = False  # [추가] 네트워크 수신 완료 여부 플래그
+        self.stream_finished_flag = False  # 네트워크 수신 완료 여부 플래그
         self._reference_marker_logged = False
-        print("[DEBUG] 스트리밍 위젯 초기화: buffer=0, displayed=0, finished_flag=False")
         
         # 초기 높이 조정 (after_idle로 지연)
         self.root.after_idle(lambda: self._adjust_text_widget_height(bot_text) if bot_text.winfo_exists() else None)
@@ -1510,7 +1490,6 @@ class FloatingChatApp:
     def handle_stream_chunk(self, chunk):
         """스트리밍 청크를 처리하고 누적합니다."""
         if not hasattr(self, 'streaming_text_widget') or not self.streaming_text_widget.winfo_exists():
-            print(f"[DEBUG] 스트리밍 위젯이 없어 청크를 처리할 수 없습니다.")
             return
         
         # 청크를 버퍼에 추가
@@ -1519,19 +1498,9 @@ class FloatingChatApp:
         
         self.streaming_text_buffer += chunk
         
-        chunk_preview = chunk.replace("\n", "\\n")
-        if len(chunk_preview) > 80:
-            chunk_preview = chunk_preview[:80] + "..."
-        print(
-            f"[DEBUG] stream_chunk 수신: len={len(chunk)}, 누적버퍼={len(self.streaming_text_buffer)}, "
-            f"preview='{chunk_preview}'"
-        )
-        
         # 타이핑 애니메이션이 진행 중이 아니면 시작
-        # 진행 중이어도 새로운 텍스트가 있으면 계속 진행되도록 보장
         if not self.streaming_typing_active:
             self.animate_streaming_typing()
-        # 진행 중이면 자동으로 새로운 텍스트를 표시하게 됨 (animate_streaming_typing이 버퍼를 확인하므로)
     
     def animate_streaming_typing(self):
         """스트리밍 메시지를 타이핑 애니메이션으로 표시합니다 (참고문헌 숨김 처리)."""
@@ -1545,7 +1514,7 @@ class FloatingChatApp:
         if not hasattr(self, 'streaming_displayed_length'):
             self.streaming_displayed_length = 0
         
-        # [핵심 수정] 버퍼에서 [참고 문헌] 위치를 찾습니다.
+        # 버퍼에서 [참고 문헌] 위치를 찾습니다.
         # 애니메이션은 이 위치까지만 진행하고 멈춥니다.
         ref_marker = "[참고 문헌]"
         limit_index = self.streaming_text_buffer.find(ref_marker)
@@ -1554,9 +1523,7 @@ class FloatingChatApp:
         total_length = len(self.streaming_text_buffer)
         if limit_index != -1:
             total_length = limit_index
-            if not getattr(self, '_reference_marker_logged', False):
-                print("[DEBUG] 버퍼에 [참고 문헌] 표시가 감지되어 본문만 스트리밍합니다.")
-                self._reference_marker_logged = True
+            self._reference_marker_logged = True
         
         # 표시할 새 텍스트가 있다면
         if self.streaming_displayed_length < total_length:
@@ -1597,25 +1564,13 @@ class FloatingChatApp:
         else:
             # 버퍼를 (제한선까지) 다 비웠음
             stream_finished = getattr(self, 'stream_finished_flag', False)
-            buffer_len = len(self.streaming_text_buffer) if hasattr(self, 'streaming_text_buffer') else 0
-            displayed_len = getattr(self, 'streaming_displayed_length', 0)
-            
-            print(
-                f"[DEBUG] animate_streaming_typing: 버퍼 소비 완료 - "
-                f"buffer_len={buffer_len}, displayed_len={displayed_len}, "
-                f"stream_finished_flag={stream_finished}"
-            )
             
             if not stream_finished:
-                print("[DEBUG] stream_finished_flag=False → complete_streaming 신호 대기 중 (50ms 후 재확인)")
                 # 아직 네트워크 수신 중이면 대기
                 self.root.after(50, self.animate_streaming_typing)
             else:
-                # [진짜 종료 처리]
-                print("[DEBUG] stream_finished_flag=True → finalize_streaming_display() 호출")
+                # 종료 처리
                 self.streaming_typing_active = False
-                
-                # 최종 정리 호출
                 self.finalize_streaming_display()
     
     def update_streaming_message(self, text):
@@ -1626,20 +1581,12 @@ class FloatingChatApp:
     def complete_streaming_message(self):
         """스트리밍 수신 완료 신호 처리"""
         self.stream_finished_flag = True
-        print("[DEBUG] complete_streaming_message 수신 → stream_finished_flag=True")
     
     def finalize_streaming_display(self):
         """스트리밍 종료 후 최종 화면 처리를 담당합니다."""
-        print("[DEBUG] finalize_streaming_display() 진입")
         if hasattr(self, 'streaming_text_widget') and self.streaming_text_widget.winfo_exists():
             # 최종 텍스트 (전체 버퍼)
             final_text = self.streaming_text_buffer if hasattr(self, 'streaming_text_buffer') else ""
-            ref_marker_pos = final_text.find("[참고 문헌]")
-            print(
-                f"[DEBUG] finalize_streaming_display 실행 - "
-                f"최종 텍스트 길이={len(final_text)}, "
-                f"[참고 문헌] 위치={ref_marker_pos if ref_marker_pos != -1 else '없음'}"
-            )
             
             # 1. 화면에 전체 텍스트를 일단 넣음 (highlight_citations가 처리할 수 있도록)
             self.streaming_text_widget.config(state='normal')
@@ -1649,17 +1596,13 @@ class FloatingChatApp:
             self.streaming_text_widget.config(state='disabled')
             
             # 2. 하이라이트 및 [참고 문헌] 정리 실행
-            # 이 함수 내부에서 _update_citation_details -> _rewrite_reference_section이 호출되어
-            # 원본 텍스트가 삭제되고 깔끔한 링크로 변환됩니다.
             self.highlight_citations(self.streaming_text_widget)
             
             # 3. 최종 높이 및 스크롤 조정
             def finalize_height():
                 if self.streaming_text_widget.winfo_exists():
-                    # 현재 높이 유지 (줄어들지 않도록)
                     current_height = self.streaming_text_widget.cget('height')
                     new_height = self._calculate_display_lines(self.streaming_text_widget, force_tk=True)
-                    # 새 높이가 현재보다 크면 적용, 아니면 현재 유지
                     final_height = max(current_height, new_height)
                     self.streaming_text_widget.config(height=final_height)
                     self._update_messages_scrollregion()
@@ -1667,15 +1610,10 @@ class FloatingChatApp:
             
             self.root.after_idle(finalize_height)
             self.root.after(150, finalize_height)
-            print("[DEBUG] finalize_streaming_display 완료 - 화면 업데이트 및 정리 완료")
-        else:
-            print("[DEBUG] finalize_streaming_display: streaming_text_widget가 없거나 파괴됨")
             
         # 변수 정리
         if hasattr(self, 'streaming_text_buffer'):
-            buffer_len = len(self.streaming_text_buffer)
             delattr(self, 'streaming_text_buffer')
-            print(f"[DEBUG] finalize_streaming_display: 버퍼 정리 완료 (정리 전 길이={buffer_len})")
         
     # ============================================================
     # WebSocket 연결 (실시간 추천 알림)

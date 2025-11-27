@@ -141,7 +141,6 @@ class RecommendationAgent(BaseAgent):
         Returns:
             Tuple[bool, str]: (성공 여부, 메시지)
         """
-        logger.info(f"사용자 {user_id}에 대한 능동형 분석 시작... (force_recommend={force_recommend})")
         
         if not self.llm_available:
             return False, "LLM 서비스를 사용할 수 없습니다."
@@ -153,7 +152,6 @@ class RecommendationAgent(BaseAgent):
             content_keywords = self.sqlite.get_content_keywords(user_id, limit=100)
             
             if not browser_logs and not content_keywords:
-                logger.info(f"User {user_id}: 분석할 새로운 로그가 없습니다.")
                 return False, "분석할 새로운 활동 데이터가 없습니다."
             
             # 참조 데이터 조회
@@ -165,7 +163,6 @@ class RecommendationAgent(BaseAgent):
             existing_recommendations = self.sqlite.get_pending_recommendations(user_id)
             if not existing_recommendations and not user_interests:
                 force_recommend = True
-                logger.info(f"User {user_id}: 초기 분석 모드 활성화 (기존 추천/관심사 없음)")
             
             # Step 2: LLM Analysis & Decision
             analysis_result = await self._analyze_with_llm(
@@ -178,7 +175,6 @@ class RecommendationAgent(BaseAgent):
             )
             
             if not analysis_result or not analysis_result.get('should_recommend'):
-                logger.info(f"User {user_id}: LLM이 추천할 만한 내용이 없다고 판단했습니다.")
                 return False, "현재 추천할 만한 특별한 활동이 감지되지 않았습니다."
             
             # 추천 생성
@@ -191,7 +187,6 @@ class RecommendationAgent(BaseAgent):
             )
             
             if rec_id <= 0:
-                logger.error(f"User {user_id}: 추천 저장에 실패했습니다.")
                 return False, "추천 저장에 실패했습니다."
             
             # 새로운 관심사라면 등록
@@ -214,11 +209,9 @@ class RecommendationAgent(BaseAgent):
                 recommendation = self.sqlite.get_recommendation(rec_id)
                 if recommendation and ws_manager.is_user_connected(user_id):
                     await ws_manager.broadcast_recommendation(user_id, recommendation)
-                    logger.info(f"📤 User {user_id}: WebSocket으로 추천 알림 전송됨")
-            except Exception as ws_error:
-                logger.debug(f"WebSocket 알림 전송 실패 (무시됨): {ws_error}")
+            except Exception:
+                pass  # WebSocket 알림 전송 실패 무시
             
-            logger.info(f"✅ User {user_id}: 새로운 추천 생성 완료 (ID: {rec_id})")
             return True, f"새로운 추천이 생성되었습니다: {analysis_result.get('keyword')}"
             
         except Exception as e:
@@ -314,67 +307,33 @@ class RecommendationAgent(BaseAgent):
 """
 
         try:
-            logger.info("🤖 Gemini LLM 호출 시작")
             response = self.llm_model.generate_content(
                 prompt,
                 request_options={"timeout": 30}
             )
-            
-            # 응답 객체 상세 로깅
-            logger.info("📥 Gemini 응답 수신 완료")
-            logger.info("   - candidates 수: %d", len(getattr(response, 'candidates', []) or []))
             
             # prompt_feedback 확인 (안전 필터 차단 여부)
             prompt_feedback = getattr(response, 'prompt_feedback', None)
             if prompt_feedback:
                 block_reason = getattr(prompt_feedback, 'block_reason', None)
                 if block_reason:
-                    logger.warning("⚠️ Gemini 응답이 차단됨 - block_reason: %s", block_reason)
-                    logger.warning("   - prompt_feedback: %s", prompt_feedback)
+                    logger.warning("Gemini 응답이 차단됨 - block_reason: %s", block_reason)
                     return None
             
             # 응답 파싱
             result_text = self._extract_llm_response_text(response)
             if not result_text:
-                logger.warning("❌ LLM 응답 텍스트를 추출하지 못했습니다.")
-                # 디버깅용 상세 로그
-                candidates = getattr(response, 'candidates', None)
-                if candidates:
-                    for i, cand in enumerate(candidates):
-                        finish_reason = getattr(cand, 'finish_reason', 'UNKNOWN')
-                        safety_ratings = getattr(cand, 'safety_ratings', [])
-                        logger.warning("   - candidate[%d] finish_reason: %s", i, finish_reason)
-                        if safety_ratings:
-                            logger.warning("   - candidate[%d] safety_ratings: %s", i, safety_ratings)
-                        content = getattr(cand, 'content', None)
-                        if content:
-                            parts = getattr(content, 'parts', [])
-                            logger.warning("   - candidate[%d] parts 수: %d", i, len(parts) if parts else 0)
-                else:
-                    logger.warning("   - candidates가 비어있음")
-                    # response.text 시도
-                    try:
-                        raw_text = response.text
-                        logger.warning("   - response.text: %s", raw_text[:500] if raw_text else "None")
-                    except Exception as e:
-                        logger.warning("   - response.text 접근 실패: %s", e)
                 return None
-            
-            logger.info("✅ LLM 응답 텍스트 추출 성공 (길이: %d)", len(result_text))
-            logger.info("📄 LLM Raw Response: %s", result_text[:500] if len(result_text) > 500 else result_text)
             
             # JSON 파싱
             result = json.loads(result_text)
-            logger.info("✅ JSON 파싱 성공 - should_recommend: %s, keyword: %s", 
-                       result.get('should_recommend'), result.get('keyword', 'N/A'))
             return result
             
         except json.JSONDecodeError as e:
-            logger.error(f"❌ LLM 응답 JSON 파싱 오류: {e}")
-            logger.error(f"   - 원본 텍스트: {result_text[:500] if result_text else 'None'}")
+            logger.error(f"LLM 응답 JSON 파싱 오류: {e}")
             return None
         except Exception as e:
-            logger.error(f"❌ LLM 분석 중 오류: {e}", exc_info=True)
+            logger.error(f"LLM 분석 중 오류: {e}")
             return None
     
     def _prepare_log_summary(
@@ -419,24 +378,16 @@ class RecommendationAgent(BaseAgent):
             try:
                 text = getattr(response, "text", None)
                 if text and text.strip():
-                    logger.debug("응답을 response.text로 추출 성공")
                     return text.strip()
-            except Exception as e:
-                logger.debug(f"response.text 접근 실패: {e}")
+            except Exception:
+                pass
             
             # Fallback: candidates에서 추출
             candidates = getattr(response, "candidates", None) or []
             if not candidates:
-                logger.warning("응답에 candidates가 없습니다")
                 return None
             
             candidate = candidates[0]
-            
-            # finish_reason 확인
-            finish_reason = getattr(candidate, "finish_reason", None)
-            if finish_reason and finish_reason != 1:  # 1 = STOP (정상)
-                logger.warning(f"응답이 정상 종료되지 않음: finish_reason={finish_reason}")
-            
             content_parts = getattr(getattr(candidate, "content", None), "parts", None) or []
             
             extracted_chunks = []
@@ -446,15 +397,12 @@ class RecommendationAgent(BaseAgent):
                     extracted_chunks.append(text_chunk)
             
             if extracted_chunks:
-                result = "\n".join(extracted_chunks).strip()
-                logger.debug(f"응답을 candidates에서 추출 성공 (길이: {len(result)})")
-                return result
+                return "\n".join(extracted_chunks).strip()
             
-            logger.warning("응답 텍스트를 추출할 수 없습니다")
             return None
             
         except Exception as e:
-            logger.error(f"LLM 응답 추출 오류: {e}", exc_info=True)
+            logger.error(f"LLM 응답 추출 오류: {e}")
             return None
     
     # ============================================================
@@ -472,7 +420,6 @@ class RecommendationAgent(BaseAgent):
         Returns:
             Tuple[bool, str]: (성공 여부, 결과 메시지 또는 리포트)
         """
-        logger.info(f"추천 {recommendation_id}에 대한 응답 처리: {action}")
         
         # 추천 정보 조회
         recommendation = self.sqlite.get_recommendation(recommendation_id)
@@ -518,7 +465,6 @@ class RecommendationAgent(BaseAgent):
                 source='user_accepted'
             )
         
-        logger.info(f"✅ 추천 {rec_id} 수락 처리 완료")
         return True, report_content
     
     async def _handle_reject(self, recommendation: Dict[str, Any]) -> Tuple[bool, str]:
@@ -533,9 +479,7 @@ class RecommendationAgent(BaseAgent):
         # 키워드 블랙리스트에 추가
         if keyword:
             self.sqlite.add_to_blacklist(user_id, keyword)
-            logger.info(f"키워드 '{keyword}'가 사용자 {user_id}의 블랙리스트에 추가되었습니다.")
         
-        logger.info(f"❌ 추천 {rec_id} 거절 처리 완료")
         return True, "추천이 거절되었습니다. 해당 키워드는 더 이상 추천되지 않습니다."
     
     async def _generate_report(
@@ -625,13 +569,9 @@ class RecommendationAgent(BaseAgent):
 이 주제에 대한 심층 보고서를 작성해서 파일로 저장해 드릴 수 있습니다. {keyword}에 대한 보고서를 작성해드릴까요?
 """
                 return report_with_footer
-            else:
-                logger.warning(f"LLM 응답이 비어있습니다. response 객체: {response}")
-                if hasattr(response, 'candidates'):
-                    logger.warning(f"candidates: {response.candidates}")
             
         except Exception as e:
-            logger.error(f"리포트 생성 중 오류: {e}", exc_info=True)
+            logger.error(f"리포트 생성 중 오류: {e}")
         
         # Fallback 리포트
         return f"""## {keyword} 📌

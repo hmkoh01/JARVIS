@@ -32,12 +32,10 @@ def _get_cached_user_profile(user_id: int) -> Optional[str]:
             cache_entry = _user_profile_cache[user_id]
             # 캐시 만료 확인
             if datetime.now() < cache_entry['expires_at']:
-                logger.debug(f"사용자 {user_id} 프로필 캐시 히트")
                 return cache_entry['profile']
             else:
                 # 만료된 캐시 제거
                 del _user_profile_cache[user_id]
-                logger.debug(f"사용자 {user_id} 프로필 캐시 만료로 제거")
     return None
 
 def _cache_user_profile(user_id: int, profile: str):
@@ -47,7 +45,6 @@ def _cache_user_profile(user_id: int, profile: str):
             'profile': profile,
             'expires_at': datetime.now() + timedelta(hours=CACHE_EXPIRY_HOURS)
         }
-        logger.debug(f"사용자 {user_id} 프로필 캐시 저장")
 
 def _clear_expired_cache():
     """만료된 캐시 항목들 정리"""
@@ -59,8 +56,52 @@ def _clear_expired_cache():
         ]
         for key in expired_keys:
             del _user_profile_cache[key]
-        if expired_keys:
-            logger.debug(f"만료된 캐시 {len(expired_keys)}개 항목 정리")
+
+def _get_chat_history_context(user_id: int, max_turns: int = 6) -> Optional[str]:
+    """최근 채팅 기록을 XML 형식 컨텍스트로 반환
+    
+    Args:
+        user_id: 사용자 ID
+        max_turns: 최대 대화 턴 수 (user+assistant 쌍)
+    
+    Returns:
+        XML 형식의 대화 기록 문자열 또는 None
+    """
+    try:
+        from database.sqlite import SQLite
+        db = SQLite()
+        
+        # max_turns * 2개의 메시지 조회 (user + assistant)
+        messages = db.get_recent_chat_messages(user_id, limit=max_turns * 2)
+        
+        if not messages:
+            return None
+        
+        # XML 형식으로 포맷팅
+        turns = []
+        for msg in messages:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            # 각 메시지 내용을 100자로 제한
+            if len(content) > 100:
+                content = content[:100] + "..."
+            turns.append(f'<turn role="{role}">{content}</turn>')
+        
+        if not turns:
+            return None
+        
+        history_block = "<recent_conversation>\n" + "\n".join(turns) + "\n</recent_conversation>"
+        
+        # 전체 블록을 1000자로 제한
+        if len(history_block) > 1000:
+            history_block = history_block[:1000] + "...</recent_conversation>"
+        
+        logger.debug(f"채팅 기록 컨텍스트 생성: user_id={user_id}, messages={len(messages)}")
+        return history_block
+        
+    except Exception as e:
+        logger.warning(f"채팅 기록 조회 실패: {e}")
+        return None
 
 def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
     """[수정됨 v2] 검색 결과를 정리하고 HTML 엔티티/태그 및 특수 문자를 제거하여 컨텍스트 생성"""
@@ -113,7 +154,6 @@ def _clean_search_results(evidences: List[Dict[str, Any]]) -> str:
         context_parts.append(f"{i}. {snippet}")
     
     clean_context = "\n\n".join(context_parts)
-    logger.info(f"--- 정제된 컨텍스트 (v2) ---\n{clean_context}\n--------------------")
     return clean_context
 
 def _format_citations(evidences: List[Dict[str, Any]]) -> str:
@@ -205,22 +245,21 @@ def images_to_base64(images: List[Image.Image]) -> List[str]:
 # Gemini LLM 호출 함수
 # ==============================================================================
 
-def call_llm_for_answer_stream(question: str, context: Optional[str], user_profile: Optional[Any] = None):
-    """Gemini 모델을 사용하여 스트리밍 방식으로 답변을 생성합니다 (제너레이터)."""
+def call_llm_for_answer_stream(question: str, context: Optional[str], user_profile: Optional[Any] = None, chat_history: Optional[str] = None):
+    """Gemini 모델을 사용하여 스트리밍 방식으로 답변을 생성합니다 (제너레이터).
+    
+    Args:
+        question: 사용자 질문
+        context: RAG 검색 결과 컨텍스트
+        user_profile: 사용자 프로필 정보
+        chat_history: 최근 대화 기록 (XML 형식)
+    """
     try:
         # Gemini API 호출
         try:
             import google.generativeai as genai
             from config.settings import settings
             
-            # [추가] .env에서 로드된 API 키를 로깅하여 확인합니다.
-            if not settings.GEMINI_API_KEY:
-                logger.error("!!! 치명적 오류: settings.GEMINI_API_KEY가 비어 있습니다. .env 파일을 확인하세요.")
-                yield "죄송합니다. API 키가 설정되지 않았습니다."
-                return
-            else:
-                logger.info(f"--- API 키 확인 (answerer.py): {settings.GEMINI_API_KEY[:5]}...{settings.GEMINI_API_KEY[-4:]} ---")
-
             # API 키 확인
             if not settings.GEMINI_API_KEY:
                 logger.warning("GEMINI_API_KEY가 설정되지 않았습니다.")
@@ -326,10 +365,20 @@ You are responding to a user you know. Use the following context to personalize 
 ---
 """
             
+            # 채팅 기록 컨텍스트 생성
+            chat_history_prompt = ""
+            if chat_history:
+                chat_history_prompt = f"""
+{chat_history}
+
+위 대화 기록을 참고하여 문맥에 맞게 답변하세요.
+---
+"""
+            
             # 프롬프트 구성 (간소화 + 품질 개선)
             if context:
                 # STANDARD_RAG 또는 SUMMARY_QUERY 경로
-                prompt = f"""{user_context_prompt}검색된 정보를 바탕으로 질문에 답변하세요. 답변의 각 문장 끝에 관련 정보의 출처 번호를 [1], [2]와 같이 인라인으로 표시하세요. (주의: [1, 2] 형식이 아닌 [1], [2] 형식으로 분리해서 표기)
+                prompt = f"""{user_context_prompt}{chat_history_prompt}검색된 정보를 바탕으로 질문에 답변하세요. 답변의 각 문장 끝에 관련 정보의 출처 번호를 [1], [2]와 같이 인라인으로 표시하세요. (주의: [1, 2] 형식이 아닌 [1], [2] 형식으로 분리해서 표기)
 
 정보:
 {context[:1000]}  # 컨텍스트 길이 제한
@@ -347,7 +396,7 @@ You are responding to a user you know. Use the following context to personalize 
 답변:"""
             else:
                 # GENERAL_CHAT 경로
-                prompt = f"""{user_context_prompt}일반적인 질문에 간결하고 친근하게 답변하세요.
+                prompt = f"""{user_context_prompt}{chat_history_prompt}일반적인 질문에 간결하고 친근하게 답변하세요.
 
 질문: {question}
 
@@ -406,31 +455,22 @@ You are responding to a user you know. Use the following context to personalize 
                     stream=True,
                     request_options={"timeout": 60}
                 )
-                logger.info("Gemini streaming response object type: %s", type(response))
 
-                for idx, chunk in enumerate(response):
-                    logger.info("Gemini chunk #%d raw object: %s", idx, repr(chunk))
+                for chunk in response:
                     chunk_text = _extract_text_from_chunk(chunk)
                     if chunk_text:
                         unified_chunks.append(chunk_text)
                         yield chunk_text
-                    else:
-                        logger.info("Gemini chunk #%d produced no text.", idx)
 
-                logger.info("Gemini 스트리밍이 정상적으로 종료되었습니다.")
                 if not unified_chunks:
-                    logger.warning("Gemini 스트리밍 응답이 비어 있습니다. (unified_chunks=0)")
-                    yield "죄송합니다. API가 빈 응답을 반환했습니다. (No chunks)"
-                else:
-                    logger.info("Gemini 스트리밍 답변 생성 성공 (총 %d개 청크)", len(unified_chunks))
+                    yield "죄송합니다. API가 빈 응답을 반환했습니다."
 
-            except StopIteration as stop_err:
-                logger.error("Gemini 스트림이 즉시 StopIteration을 반환했습니다. API 키, 결제 상태 또는 안전 설정을 확인하세요.", exc_info=True)
-                yield "죄송합니다. API가 빈 스트림을 반환했습니다. (안전 설정 또는 API 키 문제일 수 있습니다)"
+            except StopIteration:
+                yield "죄송합니다. API가 빈 스트림을 반환했습니다."
                 return
             except Exception as api_error:
-                logger.error("Gemini API 호출 중 오류 발생", exc_info=True)
-                yield f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {api_error}"
+                logger.error(f"Gemini API 호출 중 오류 발생: {api_error}")
+                yield f"죄송합니다. 답변 생성 중 오류가 발생했습니다."
                 return
                 
         except ImportError:
@@ -482,9 +522,6 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
                             if len(profile_str) > 500:
                                 profile_str = profile_str[:500] + "..."
                             _cache_user_profile(user_id, profile_str)
-                        logger.debug(f"사용자 {user_id} 프로필을 DB에서 조회하여 캐시에 저장")
-                    else:
-                        logger.debug(f"사용자 {user_id} 프로필이 DB에 없음")
                 except Exception as e:
                     logger.warning(f"프로필 로드 실패: {e}")
             else:
@@ -493,17 +530,20 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
                     from database.sqlite import SQLite
                     db = SQLite()
                     user_profile = db.get_user_survey_response(user_id)
-                    logger.debug(f"사용자 {user_id} 프로필을 캐시에서 조회")
-                except Exception as e:
-                    logger.warning(f"프로필 dict 조회 실패: {e}")
+                except Exception:
+                    pass
+        
+        # 채팅 기록 컨텍스트 가져오기
+        chat_history = None
+        if user_id:
+            chat_history = _get_chat_history_context(user_id, max_turns=6)
         
         # evidences가 None인 경우 (GENERAL_CHAT 경로)
         if evidences is None:
             try:
                 # 스트리밍 방식으로 답변 생성
-                for chunk in call_llm_for_answer_stream(question, None, user_profile):
+                for chunk in call_llm_for_answer_stream(question, None, user_profile, chat_history):
                     yield chunk
-                logger.info("Gemini 일반 대화 답변 생성 성공")
                 return
             except Exception as e:
                 logger.warning(f"Gemini 일반 대화 답변 생성 실패: {e}")
@@ -547,21 +587,18 @@ def compose_answer(question: str, evidences: Optional[List[Dict[str, Any]]], use
         if answer_prefix:
             yield answer_prefix
         
-        # Gemini를 사용한 답변 생성 시도 (프로필 포함) - 스트리밍 방식
+        # Gemini를 사용한 답변 생성 시도 (프로필 + 채팅 기록 포함) - 스트리밍 방식
         try:
-            for chunk in call_llm_for_answer_stream(question, context, user_profile):
+            for chunk in call_llm_for_answer_stream(question, context, user_profile, chat_history):
                 yield chunk
             
-            # [추가] 답변 끝에 출처 목록 추가
+            # 답변 끝에 출처 목록 추가
             citations_str = _format_citations(evidences)
             if citations_str:
                 yield "\n\n[참고 문헌]\n" + citations_str
 
-            logger.info("Gemini 답변 생성 성공")
         except Exception as e:
             logger.warning(f"Gemini 답변 생성 실패: {e}")
-            # Gemini가 실패한 경우, 사용자 친화적인 오류 메시지 반환
-            logger.warning("Gemini 답변 생성에 실패하여 사용자에게 오류 메시지를 반환합니다.")
             yield "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다. 잠시 후 다시 시도해주세요."
     except Exception as e:
         logger.error(f"응답 생성 오류: {e}")
