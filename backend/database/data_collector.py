@@ -502,10 +502,14 @@ class FileCollector:
         text_files = unique_text_files
 
         cpu_count = multiprocessing.cpu_count()
+        
+        # 메모리 최적화: 설정에서 max_parallel_workers 로드 (기본값 2)
+        max_parallel_workers = getattr(parser, 'max_parallel_workers', 2) if parser else 2
+        
         self.logger.info(
-            "📝 텍스트 파일 인덱싱 시작 - 파일 %d개, 사용 코어 %d개",
+            "📝 텍스트 파일 인덱싱 시작 - 파일 %d개, 사용 워커 %d개 (메모리 최적화)",
             len(text_files),
-            cpu_count
+            max_parallel_workers
         )
         
         if manager:
@@ -524,10 +528,11 @@ class FileCollector:
         # 키워드 추출용 데이터 수집
         files_for_keywords: List[Tuple[str, str, str]] = []  # (doc_id, combined_text, file_path)
 
-        max_workers = min(cpu_count, 8) if cpu_count > 0 else 1
+        # 메모리 최적화: 워커 수 제한 (기존 min(cpu_count, 8) → max_parallel_workers)
+        max_workers = max_parallel_workers
         parser_ref = parser.__class__ if parser is not None else DocumentParser
 
-        self.logger.info("--- [1/3] 파일 파싱 시작 (병렬 처리) ---")
+        self.logger.info("--- [1/3] 파일 파싱 시작 (워커 %d개, 메모리 최적화) ---", max_workers)
         with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker_logging) as executor:
             futures = {
                 executor.submit(self._parse_single_file, file_info, parser_ref, self.user_id): file_info
@@ -1077,6 +1082,9 @@ class DataCollectionManager:
             if not success:
                 self.logger.warning("초기 데이터 수집이 실패했습니다. 이후 요청 시 재시도할 수 있습니다.")
             else:
+                # 진행률 100% 유지 (백그라운드 스케줄러 시작 시 덮어쓰지 않도록)
+                self.progress = 100.0
+                self.progress_message = "✅ 수집 완료 - 백그라운드 동기화 중"
                 self.logger.info("백그라운드 데이터 수집 스케줄러를 시작합니다.")
                 self.start_collection(selected_folders)
     
@@ -1095,6 +1103,12 @@ class DataCollectionManager:
                 time.sleep(10)
                 continue
             current_time = time.time()
+            
+            # 백그라운드 동기화 중에는 진행률을 100%로 유지
+            if self.initial_collection_done:
+                self.progress = 100.0
+                self.progress_message = "✅ 수집 완료 - 백그라운드 동기화 중"
+            
             if current_time - last_run['file'] >= intervals['file']: 
                 self._collect_files()
                 last_run['file'] = current_time

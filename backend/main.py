@@ -9,7 +9,7 @@ current_dir = Path(__file__).parent.absolute()
 if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from api.routes import router
@@ -39,12 +39,15 @@ global_profile_indexer: UserProfileIndexer = None
 # 전역 스케줄러 인스턴스
 scheduler = AsyncIOScheduler()
 
-async def trigger_recommendation_analysis():
+async def trigger_recommendation_analysis(force_recommend: bool = False):
     """
     주기적으로 추천 분석을 트리거하는 함수.
     모든 사용자에 대해 분석을 실행합니다.
+    
+    Args:
+        force_recommend: True면 데이터가 있을 경우 무조건 추천 생성 (시작 시 초기 분석용)
     """
-    logger.info("📈 주기적 추천 분석 시작...")
+    logger.info(f"📈 추천 분석 시작... (force_recommend={force_recommend})")
     try:
         # agent_registry에서 recommendation 에이전트를 가져옵니다.
         recommendation_agent = agent_registry.get_agent("recommendation")
@@ -59,12 +62,12 @@ async def trigger_recommendation_analysis():
             logger.info(f"{len(all_users)}명의 사용자에 대한 분석을 시작합니다.")
             for user in all_users:
                 user_id = user['user_id']
-                await recommendation_agent.run_active_analysis(user_id)
+                await recommendation_agent.run_active_analysis(user_id, force_recommend=force_recommend)
         else:
             logger.warning("Recommendation agent 또는 분석 메서드를 찾을 수 없습니다.")
 
     except Exception as e:
-        logger.error(f"주기적 추천 분석 중 오류 발생: {e}", exc_info=True)
+        logger.error(f"추천 분석 중 오류 발생: {e}", exc_info=True)
 
 
 # -----------------------------------------------------------------------------
@@ -143,9 +146,9 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("📅 주기적 추천 분석 스케줄러 시작됨 (10분 간격)")
     
-    # 4. 서버 시작 시 즉시 1회 실행 (개발/테스트 편의성)
-    asyncio.create_task(trigger_recommendation_analysis())
-    logger.info("🚀 서버 시작 시 추천 분석 즉시 실행 트리거됨")
+    # 4. 서버 시작 시 즉시 1회 실행 (force_recommend=True로 무조건 추천 생성)
+    asyncio.create_task(trigger_recommendation_analysis(force_recommend=True))
+    logger.info("🚀 서버 시작 시 초기 추천 분석 즉시 실행 트리거됨 (force_recommend=True)")
 
     logger.info(f"📊 등록된 에이전트: {list(agent_registry.get_agent_descriptions().keys())}")
     logger.info("✅ 시스템이 준비되었습니다!")
@@ -217,6 +220,63 @@ async def root():
         "status": "running",
         "docs": "/docs",
     }
+
+
+# -----------------------------------------------------------------------------
+# WebSocket 엔드포인트 (실시간 알림용)
+# -----------------------------------------------------------------------------
+from core.websocket_manager import get_websocket_manager
+from jose import jwt, JWTError
+
+@app.websocket("/ws/{token}")
+async def websocket_endpoint(websocket: WebSocket, token: str):
+    """
+    WebSocket 연결 엔드포인트
+    토큰으로 사용자 인증 후 연결을 유지하고 실시간 알림을 전송합니다.
+    """
+    ws_manager = get_websocket_manager()
+    user_id = None
+    
+    try:
+        # JWT 토큰에서 user_id 추출
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        user_id = payload.get("user_id")
+        
+        if not user_id:
+            await websocket.close(code=4001, reason="Invalid token")
+            return
+        
+        # WebSocket 연결 수락
+        await ws_manager.connect(websocket, user_id)
+        
+        # 연결 시 대기 중인 추천이 있으면 바로 전송
+        db = SQLite()
+        pending_recommendations = db.get_pending_recommendations(user_id)
+        if pending_recommendations:
+            for rec in pending_recommendations:
+                await ws_manager.broadcast_recommendation(user_id, rec)
+        
+        # 연결 유지 (클라이언트로부터 메시지 대기)
+        while True:
+            try:
+                # 클라이언트로부터 ping/pong 또는 메시지 수신 대기
+                data = await websocket.receive_text()
+                
+                # ping 메시지에 pong으로 응답
+                if data == "ping":
+                    await websocket.send_text("pong")
+                    
+            except WebSocketDisconnect:
+                break
+                
+    except JWTError:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+    except Exception as e:
+        logger.error(f"WebSocket 오류: {e}", exc_info=True)
+    finally:
+        if user_id:
+            ws_manager.disconnect(websocket, user_id)
 
 
 # -----------------------------------------------------------------------------

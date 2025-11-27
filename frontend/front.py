@@ -13,6 +13,7 @@ import queue
 from datetime import datetime
 import os
 import platform
+import websocket  # WebSocket 클라이언트
 
 class FloatingChatApp:
     def __init__(self):
@@ -61,8 +62,13 @@ class FloatingChatApp:
         # 기존 알림 변수 (호환성 유지)
         self.recommendation_notification_visible = False
 
-        # 추천 폴링 시작 (30초마다)
-        self.poll_recommendations()
+        # WebSocket 연결 변수
+        self.ws = None
+        self.ws_connected = False
+        self.ws_reconnect_delay = 5  # 재연결 대기 시간 (초)
+        
+        # WebSocket 연결 시작 (실시간 추천 알림용)
+        self.connect_websocket()
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
@@ -128,6 +134,7 @@ class FloatingChatApp:
                     
                     elif message['type'] == 'create_streaming_message':
                         # 스트리밍용 빈 봇 메시지 생성
+                        print("[DEBUG] process_message_queue: create_streaming_message 수신 → create_streaming_bot_message() 호출")
                         self.create_streaming_bot_message(message['loading_widget'])
                     
                     elif message['type'] == 'update_streaming':
@@ -136,10 +143,14 @@ class FloatingChatApp:
                     
                     elif message['type'] == 'complete_streaming':
                         # 스트리밍 완료
+                        print("[DEBUG] process_message_queue: complete_streaming 메시지 수신 → complete_streaming_message() 호출")
                         self.complete_streaming_message()
+                        print("[DEBUG] process_message_queue: complete_streaming_message() 호출 완료")
                     
                     elif message['type'] == 'stream_chunk':
                         # 스트리밍 청크 처리
+                        chunk_len = len(message.get('chunk', ''))
+                        print(f"[DEBUG] process_message_queue: stream_chunk 수신 (len={chunk_len})")
                         self.handle_stream_chunk(message['chunk'])
                         
                 except queue.Empty:
@@ -618,45 +629,84 @@ class FloatingChatApp:
             if bbox:
                 self.messages_canvas.configure(scrollregion=bbox)
     
-    def _adjust_text_widget_height(self, text_widget):
-        """텍스트 위젯의 높이를 텍스트 내용에 맞게 정확하게 조정합니다."""
+    def _calculate_display_lines(self, text_widget, force_tk=False):
+        """현재 위젯의 실제 표시 라인 수를 계산합니다 (word wrap 고려).
+        
+        Args:
+            text_widget: 대상 Text 위젯
+            force_tk: True이면 Tk 값과 추정치 중 큰 값을 반환 (보수적 계산)
+        """
+        if not text_widget or not text_widget.winfo_exists():
+            return 1
+
+        text_widget.update_idletasks()
+
+        # 1) 텍스트 내용 기반 예상 줄 수 계산 (fallback)
+        try:
+            content = text_widget.get('1.0', 'end-1c')
+        except Exception:
+            return 1
+
+        if not content.strip():
+            return 1
+
+        lines = content.split('\n')
+        estimated_lines = 0
+
+        # Text 위젯 width(문자 수)를 기준으로 대략적인 wrap 계산
+        try:
+            max_chars = int(text_widget.cget('width'))
+        except Exception:
+            max_chars = 35  # 실패 시 기본값
+
+        for line in lines:
+            if not line.strip():
+                estimated_lines += 1
+            else:
+                # 한글 기준으로 1줄당 max_chars * 0.7 정도로 가정
+                approx_per_line = max(1, int(max_chars * 0.7))
+                estimated_lines += max(1, (len(line) + approx_per_line - 1) // approx_per_line)
+
+        estimated_lines = max(1, estimated_lines)
+
+        # 2) Tk의 displaylines 결과 얻기
+        tk_lines = 1
+        try:
+            result = text_widget.tk.call(
+                text_widget._w, 'count', '-update', '-displaylines', '1.0', 'end-1c'
+            )
+            if isinstance(result, (list, tuple)):
+                result = result[0]
+            tk_lines = max(1, int(result))
+        except Exception:
+            tk_lines = 1
+
+        # 3) 최종 결정
+        if force_tk:
+            # force_tk=True: Tk 값을 신뢰하되, 너무 작으면 추정치 사용
+            if tk_lines < estimated_lines:
+                return estimated_lines
+            return tk_lines
+        else:
+            # force_tk=False: Tk 값이 비정상적으로 크면(2배 이상) 추정치 사용
+            if tk_lines > estimated_lines * 2:
+                return estimated_lines
+            else:
+                return tk_lines
+    
+    def _adjust_text_widget_height(self, text_widget, force_tk=False):
+        """텍스트 위젯의 높이를 텍스트 내용에 맞게 정확하게 조정합니다.
+        
+        Args:
+            text_widget: 대상 Text 위젯
+            force_tk: True이면 Tk count 결과를 무조건 신뢰 (렌더링 완료 후 호출 시)
+        """
         if not text_widget or not text_widget.winfo_exists():
             return
         
         try:
-            text_widget.update_idletasks()
-            
-            # 텍스트 내용 가져오기 (마지막 개행 제외)
-            content = text_widget.get('1.0', 'end-1c')
-            
-            if not content.strip():
-                # 빈 텍스트면 높이 1로 설정
-                text_widget.config(height=1)
-                return
-            
-            # Tkinter의 count 명령을 사용하여 실제 표시 라인 수 계산
-            # '-update' 옵션으로 위젯을 업데이트하고 '-displaylines'로 표시 라인 수 계산
-            try:
-                text_height = text_widget.tk.call((text_widget, 'count', '-update', '-displaylines', '1.0', 'end-1c'))
-                # end-1c를 사용하여 마지막 빈 줄 제외
-                
-                # 텍스트 끝의 불필요한 빈 줄 제거
-                # 마지막 라인이 비어있으면 높이에서 제외
-                lines = content.split('\n')
-                if lines and not lines[-1].strip():
-                    # 마지막 라인이 비어있으면 높이에서 1 줄 빼기
-                    text_height = max(1, text_height - 1)
-                
-                text_widget.config(height=max(1, text_height))
-            except Exception:
-                # count 명령 실패 시 대체 방법 사용
-                # 텍스트의 실제 라인 수 계산
-                lines = content.split('\n')
-                # 빈 줄 제거
-                non_empty_lines = [line for line in lines if line.strip()]
-                text_height = max(1, len(non_empty_lines))
-                text_widget.config(height=text_height)
-            
+            text_height = self._calculate_display_lines(text_widget, force_tk=force_tk)
+            text_widget.config(height=text_height)
         except Exception as e:
             # 오류 발생 시 기본 높이 유지
             pass
@@ -684,6 +734,15 @@ class FloatingChatApp:
             widget.bind("<MouseWheel>", self._on_mousewheel)
             widget.bind("<Button-4>", self._on_mousewheel)
             widget.bind("<Button-5>", self._on_mousewheel)
+    
+    def _disable_text_widget_scroll(self, text_widget):
+        """Text 위젯의 내부 스크롤을 비활성화하고, 대신 canvas 스크롤로 전달합니다."""
+        if not text_widget:
+            return
+        # Text 위젯의 기본 스크롤 동작을 막고, canvas 스크롤로 전달
+        text_widget.bind("<MouseWheel>", lambda e: (self._on_mousewheel(e), "break")[1])
+        text_widget.bind("<Button-4>", lambda e: (self._on_mousewheel(e), "break")[1])
+        text_widget.bind("<Button-5>", lambda e: (self._on_mousewheel(e), "break")[1])
     
     def _bind_popup_text_scroll(self, text_widget):
         """팝업 내 텍스트 위젯 스크롤 바인딩"""
@@ -763,7 +822,7 @@ class FloatingChatApp:
         text_widget.delete(start_idx, end_idx)
         
         lines = ["[참고 문헌]", ""]
-        for num in sorted(details.keys(), key=lambda x: int(x) if x.isdigit() else x):
+        for num in sorted(details.keys(), key=lambda x: (0, int(x)) if x.isdigit() else (1, x)):
             label = details[num].get("label", f"출처 {num}")
             lines.append(f"[{num}] {label}")
         
@@ -800,18 +859,21 @@ class FloatingChatApp:
         )
         user_text.pack()
         
-        # 마우스 휠 스크롤 바인딩
-        self._bind_canvas_scroll_events(user_text)
+        # Text 위젯 내부 스크롤 비활성화 (canvas 스크롤로 전달)
+        self._disable_text_widget_scroll(user_text)
         
         # 텍스트 삽입 및 높이 자동 조정
         user_text.config(state='normal')
         user_text.insert('1.0', message)
         user_text.config(state='disabled')
         
-        # 텍스트 높이에 맞게 조정
-        user_text.update_idletasks()
-        text_height = user_text.tk.call((user_text, 'count', '-update', '-displaylines', '1.0', 'end'))
-        user_text.config(height=max(1, text_height))
+        # Tk 레이아웃 완료 후 높이 조정 (after_idle로 지연)
+        def adjust_height():
+            if user_text.winfo_exists():
+                self._adjust_text_widget_height(user_text)
+                self._update_messages_scrollregion()
+                self.messages_canvas.yview_moveto(1)
+        self.root.after_idle(adjust_height)
         
         # 스크롤을 맨 아래로
         self._update_messages_scrollregion()
@@ -845,7 +907,9 @@ class FloatingChatApp:
             cursor='arrow'
         )
         bot_text.pack()
-        self._bind_canvas_scroll_events(bot_text)
+        
+        # Text 위젯 내부 스크롤 비활성화 (canvas 스크롤로 전달)
+        self._disable_text_widget_scroll(bot_text)
         
         # 인용 태그 설정
         self.setup_citation_tags(bot_text)
@@ -855,7 +919,9 @@ class FloatingChatApp:
         self.messages_canvas.yview_moveto(1)
         
         # 타이핑 애니메이션 시작
-        self.animate_typing(bot_text, message)
+        # 환영 메시지인지 확인 (force_tk=False로 설정하여 높이 계산 오류 방지)
+        is_welcome_message = "안녕하세요! JARVIS AI Assistant입니다" in message
+        self.animate_typing(bot_text, message, force_tk_final=not is_welcome_message)
     
     def setup_citation_tags(self, text_widget):
         """인용 태그 스타일 및 이벤트를 설정합니다."""
@@ -1092,41 +1158,68 @@ class FloatingChatApp:
         """(Deprecated) 기존 스크롤 핸들러 - 팝업으로 대체됨"""
         pass
 
-    def animate_typing(self, text_widget, full_text, current_index=0):
-        """타이핑 애니메이션을 실행합니다."""
-        if current_index <= len(full_text):
-            # 현재까지의 텍스트 표시
-            current_text = full_text[:current_index]
+    def animate_typing(self, text_widget, full_text, current_index=0, force_tk_final=True):
+        """타이핑 애니메이션을 실행합니다 (append 방식 + chunk 단위).
+        
+        Args:
+            text_widget: 텍스트 위젯
+            full_text: 전체 텍스트
+            current_index: 현재 타이핑 인덱스
+            force_tk_final: 타이핑 완료 시 force_tk 옵션 사용 여부 (기본값: True)
+        """
+        if not text_widget or not text_widget.winfo_exists():
+            return
+        
+        total_length = len(full_text)
+        
+        if current_index < total_length:
+            # chunk 크기 결정 (남은 텍스트 양에 따라 동적 조절)
+            remaining = total_length - current_index
+            if remaining > 200:
+                chunk_size = 8  # 긴 텍스트는 8자씩
+            elif remaining > 50:
+                chunk_size = 5  # 중간 텍스트는 5자씩
+            else:
+                chunk_size = 3  # 짧은 텍스트는 3자씩
             
-            # Text 위젯에 텍스트 삽입
+            # 새로 추가할 텍스트 chunk
+            end_index = min(current_index + chunk_size, total_length)
+            new_chunk = full_text[current_index:end_index]
+            
+            # append 방식: 기존 텍스트를 지우지 않고 끝에 추가
             text_widget.config(state='normal')
-            text_widget.delete('1.0', 'end')
-            text_widget.insert('1.0', current_text)
-            
-            # 인용 하이라이트 적용 (매 프레임마다 적용하면 느릴 수 있으므로 최적화 필요하지만, 일단 적용)
-            # 타이핑 중에는 텍스트가 계속 변하므로 매번 적용해야 함
-            # 성능 이슈가 있다면 타이핑 완료 후에만 적용하도록 변경 가능
-            
+            text_widget.insert('end', new_chunk)
             text_widget.config(state='disabled')
             
-            # 인용 하이라이트 (state=normal일 때 해야 함, 위에서 disabled로 바꿨으므로 순서 주의)
-            self.highlight_citations(text_widget)
+            # 높이 조정 (줄바꿈이 포함되거나 20자마다)
+            if '\n' in new_chunk or end_index % 20 == 0:
+                self.root.after_idle(lambda: self._adjust_text_widget_height(text_widget) if text_widget.winfo_exists() else None)
             
-            # 텍스트 높이에 맞게 조정
-            text_widget.update_idletasks()
-            text_height = text_widget.tk.call((text_widget, 'count', '-update', '-displaylines', '1.0', 'end'))
-            text_widget.config(height=max(1, text_height))
-            
-            # 다음 글자로 진행
-            if current_index < len(full_text):
-                # 타이핑 속도 조절 (밀리초)
-                typing_speed = 30  # 빠른 타이핑
-                self.root.after(typing_speed, lambda: self.animate_typing(text_widget, full_text, current_index + 1))
+            # 타이핑 속도 (밀리초) - 줄바꿈 후에는 약간 더 긴 딜레이
+            if '\n' in new_chunk:
+                typing_speed = 50  # 줄바꿈 후 약간 멈춤
             else:
-                # 타이핑 완료 시 한 번 더 확실하게 하이라이트
-                self.highlight_citations(text_widget)
+                typing_speed = 20  # 일반 타이핑
+            
+            self.root.after(typing_speed, lambda: self.animate_typing(text_widget, full_text, end_index, force_tk_final))
             
             # 스크롤을 맨 아래로 유지
+            if self.messages_canvas.yview()[1] > 0.9:
+                self._update_messages_scrollregion()
+                self.messages_canvas.yview_moveto(1)
+        else:
+            # 타이핑 완료 시 인용 하이라이트 및 최종 높이 조정
+            self.highlight_citations(text_widget)
+
+            def _final_adjust():
+                if text_widget.winfo_exists():
+                    self._adjust_text_widget_height(text_widget, force_tk=force_tk_final)
+
+            # force_tk_final 파라미터에 따라 높이 계산 방식 결정
+            self.root.after_idle(_final_adjust)
+            # 렌더링이 완전히 끝난 뒤 한 번 더 보정 (일부 시스템에서 지연 필요)
+            self.root.after(150, _final_adjust)
+
             self._update_messages_scrollregion()
             self.messages_canvas.yview_moveto(1)
     
@@ -1158,7 +1251,9 @@ class FloatingChatApp:
             cursor='arrow'
         )
         loading_text.pack()
-        self._bind_canvas_scroll_events(loading_text)
+        
+        # Text 위젯 내부 스크롤 비활성화 (canvas 스크롤로 전달)
+        self._disable_text_widget_scroll(loading_text)
         
         # 초기 텍스트 삽입
         loading_text.config(state='normal')
@@ -1176,17 +1271,26 @@ class FloatingChatApp:
     
     def animate_loading(self, text_widget, dots=0):
         """로딩 애니메이션을 실행합니다."""
-        dots_text = "." * (dots + 1)
-        loading_text = f"답변을 생성하고 있습니다{dots_text}"
+        # 위젯이 파괴되었는지 확인
+        if not text_widget or not text_widget.winfo_exists():
+            return  # 위젯이 파괴되었으면 애니메이션 중지
         
-        # Text 위젯에 텍스트 삽입
-        text_widget.config(state='normal')
-        text_widget.delete('1.0', 'end')
-        text_widget.insert('1.0', loading_text)
-        text_widget.config(state='disabled')
-        
-        # 다음 애니메이션 프레임
-        self.root.after(500, lambda: self.animate_loading(text_widget, (dots + 1) % 4))
+        try:
+            dots_text = "." * (dots + 1)
+            loading_text = f"답변을 생성하고 있습니다{dots_text}"
+            
+            # Text 위젯에 텍스트 삽입
+            text_widget.config(state='normal')
+            text_widget.delete('1.0', 'end')
+            text_widget.insert('1.0', loading_text)
+            text_widget.config(state='disabled')
+            
+            # 다음 애니메이션 프레임 (위젯이 여전히 존재하는지 다시 확인)
+            if text_widget.winfo_exists():
+                self.root.after(500, lambda: self.animate_loading(text_widget, (dots + 1) % 4))
+        except tk.TclError:
+            # 위젯이 파괴되었거나 접근할 수 없는 경우 예외 처리
+            return
     
     def remove_loading_message(self, loading_text_widget):
         """로딩 메시지를 제거합니다."""
@@ -1251,21 +1355,28 @@ class FloatingChatApp:
                     try:
                         print(f"[DEBUG] 스트리밍 응답 읽기 시작...")
                         chunk_count = 0
+                        total_bytes = 0
                         
                         # chunk_size=None으로 설정하여 스트림이 도착하는 대로 받음
                         for chunk_text in response.iter_content(chunk_size=None, decode_unicode=True):
                             if chunk_text:
                                 chunk_count += 1
+                                total_bytes += len(chunk_text.encode('utf-8') if isinstance(chunk_text, str) else chunk_text)
                                 self.message_queue.put({
                                     'type': 'stream_chunk',
                                     'chunk': chunk_text
                                 })
                         
-                        print(f"[DEBUG] 스트리밍 읽기 완료 (총 {chunk_count}개 청크)")
+                        print(f"[DEBUG] 스트리밍 읽기 완료 (총 {chunk_count}개 청크, {total_bytes} bytes)")
+                        print(f"[DEBUG] complete_streaming 메시지를 큐에 넣는 중...")
                         self.message_queue.put({'type': 'complete_streaming'})
+                        print(f"[DEBUG] complete_streaming 메시지 큐 투입 완료")
                         
                     except Exception as e:
                         print(f"[DEBUG] 스트리밍 처리 중 오류: {e}")
+                        print(f"[DEBUG] 스트리밍 오류 발생으로 인해 complete_streaming 메시지가 전송되지 않았습니다.")
+                        import traceback
+                        print(f"[DEBUG] 스트리밍 오류 스택 트레이스:\n{traceback.format_exc()}")
                         error_msg = f"스트리밍 처리 중 오류가 발생했습니다: {str(e)}"
                         self.message_queue.put({
                             'type': 'bot_response',
@@ -1348,7 +1459,9 @@ class FloatingChatApp:
             cursor='arrow'
         )
         bot_text.pack()
-        self._bind_canvas_scroll_events(bot_text)
+        
+        # Text 위젯 내부 스크롤 비활성화 (canvas 스크롤로 전달)
+        self._disable_text_widget_scroll(bot_text)
         
         self.setup_citation_tags(bot_text)
         
@@ -1358,6 +1471,11 @@ class FloatingChatApp:
         self.streaming_displayed_length = 0
         self.streaming_typing_active = False
         self.stream_finished_flag = False  # [추가] 네트워크 수신 완료 여부 플래그
+        self._reference_marker_logged = False
+        print("[DEBUG] 스트리밍 위젯 초기화: buffer=0, displayed=0, finished_flag=False")
+        
+        # 초기 높이 조정 (after_idle로 지연)
+        self.root.after_idle(lambda: self._adjust_text_widget_height(bot_text) if bot_text.winfo_exists() else None)
         
         self._update_messages_scrollregion()
         self.messages_canvas.yview_moveto(1)
@@ -1373,6 +1491,14 @@ class FloatingChatApp:
             self.streaming_text_buffer = ""
         
         self.streaming_text_buffer += chunk
+        
+        chunk_preview = chunk.replace("\n", "\\n")
+        if len(chunk_preview) > 80:
+            chunk_preview = chunk_preview[:80] + "..."
+        print(
+            f"[DEBUG] stream_chunk 수신: len={len(chunk)}, 누적버퍼={len(self.streaming_text_buffer)}, "
+            f"preview='{chunk_preview}'"
+        )
         
         # 타이핑 애니메이션이 진행 중이 아니면 시작
         # 진행 중이어도 새로운 텍스트가 있으면 계속 진행되도록 보장
@@ -1401,6 +1527,9 @@ class FloatingChatApp:
         total_length = len(self.streaming_text_buffer)
         if limit_index != -1:
             total_length = limit_index
+            if not getattr(self, '_reference_marker_logged', False):
+                print("[DEBUG] 버퍼에 [참고 문헌] 표시가 감지되어 본문만 스트리밍합니다.")
+                self._reference_marker_logged = True
         
         # 표시할 새 텍스트가 있다면
         if self.streaming_displayed_length < total_length:
@@ -1428,24 +1557,35 @@ class FloatingChatApp:
             self.streaming_text_widget.insert('end', new_text_chunk)
             self.streaming_text_widget.config(state='disabled')
             
+            # 높이 조정 (매 프레임마다 after_idle로 지연 실행)
+            self.root.after_idle(lambda: self._adjust_text_widget_height(self.streaming_text_widget) if self.streaming_text_widget.winfo_exists() else None)
+            
             # 자동 스크롤
             if self.messages_canvas.yview()[1] > 0.9:
                 self._update_messages_scrollregion()
                 self.messages_canvas.yview_moveto(1)
-                
-            # 높이 조정
-            if '\n' in new_text_chunk or self.streaming_displayed_length % 20 == 0:
-                self._adjust_text_widget_height(self.streaming_text_widget)
             
             self.root.after(15, self.animate_streaming_typing)
             
         else:
             # 버퍼를 (제한선까지) 다 비웠음
-            if not getattr(self, 'stream_finished_flag', False):
+            stream_finished = getattr(self, 'stream_finished_flag', False)
+            buffer_len = len(self.streaming_text_buffer) if hasattr(self, 'streaming_text_buffer') else 0
+            displayed_len = getattr(self, 'streaming_displayed_length', 0)
+            
+            print(
+                f"[DEBUG] animate_streaming_typing: 버퍼 소비 완료 - "
+                f"buffer_len={buffer_len}, displayed_len={displayed_len}, "
+                f"stream_finished_flag={stream_finished}"
+            )
+            
+            if not stream_finished:
+                print("[DEBUG] stream_finished_flag=False → complete_streaming 신호 대기 중 (50ms 후 재확인)")
                 # 아직 네트워크 수신 중이면 대기
                 self.root.after(50, self.animate_streaming_typing)
             else:
                 # [진짜 종료 처리]
+                print("[DEBUG] stream_finished_flag=True → finalize_streaming_display() 호출")
                 self.streaming_typing_active = False
                 
                 # 최종 정리 호출
@@ -1459,12 +1599,20 @@ class FloatingChatApp:
     def complete_streaming_message(self):
         """스트리밍 수신 완료 신호 처리"""
         self.stream_finished_flag = True
+        print("[DEBUG] complete_streaming_message 수신 → stream_finished_flag=True")
     
     def finalize_streaming_display(self):
         """스트리밍 종료 후 최종 화면 처리를 담당합니다."""
+        print("[DEBUG] finalize_streaming_display() 진입")
         if hasattr(self, 'streaming_text_widget') and self.streaming_text_widget.winfo_exists():
             # 최종 텍스트 (전체 버퍼)
-            final_text = self.streaming_text_buffer
+            final_text = self.streaming_text_buffer if hasattr(self, 'streaming_text_buffer') else ""
+            ref_marker_pos = final_text.find("[참고 문헌]")
+            print(
+                f"[DEBUG] finalize_streaming_display 실행 - "
+                f"최종 텍스트 길이={len(final_text)}, "
+                f"[참고 문헌] 위치={ref_marker_pos if ref_marker_pos != -1 else '없음'}"
+            )
             
             # 1. 화면에 전체 텍스트를 일단 넣음 (highlight_citations가 처리할 수 있도록)
             self.streaming_text_widget.config(state='normal')
@@ -1479,53 +1627,117 @@ class FloatingChatApp:
             self.highlight_citations(self.streaming_text_widget)
             
             # 3. 최종 높이 및 스크롤 조정
-            self._adjust_text_widget_height(self.streaming_text_widget)
-            self._update_messages_scrollregion()
-            self.messages_canvas.yview_moveto(1)
+            def finalize_height():
+                if self.streaming_text_widget.winfo_exists():
+                    # 현재 높이 유지 (줄어들지 않도록)
+                    current_height = self.streaming_text_widget.cget('height')
+                    new_height = self._calculate_display_lines(self.streaming_text_widget, force_tk=True)
+                    # 새 높이가 현재보다 크면 적용, 아니면 현재 유지
+                    final_height = max(current_height, new_height)
+                    self.streaming_text_widget.config(height=final_height)
+                    self._update_messages_scrollregion()
+                    self.messages_canvas.yview_moveto(1)
+            
+            self.root.after_idle(finalize_height)
+            self.root.after(150, finalize_height)
+            print("[DEBUG] finalize_streaming_display 완료 - 화면 업데이트 및 정리 완료")
+        else:
+            print("[DEBUG] finalize_streaming_display: streaming_text_widget가 없거나 파괴됨")
             
         # 변수 정리
         if hasattr(self, 'streaming_text_buffer'):
+            buffer_len = len(self.streaming_text_buffer)
             delattr(self, 'streaming_text_buffer')
+            print(f"[DEBUG] finalize_streaming_display: 버퍼 정리 완료 (정리 전 길이={buffer_len})")
         
+    # ============================================================
+    # WebSocket 연결 (실시간 추천 알림)
+    # ============================================================
+    
+    def connect_websocket(self):
+        """WebSocket 연결을 시작합니다."""
+        threading.Thread(target=self._websocket_thread, daemon=True).start()
+    
+    def _websocket_thread(self):
+        """[백그라운드 스레드] WebSocket 연결을 관리합니다."""
+        while True:
+            try:
+                from login_view import get_stored_token
+                token = get_stored_token()
+                
+                if not token:
+                    print("[WebSocket] 토큰이 없습니다. 5초 후 재시도...")
+                    import time
+                    time.sleep(5)
+                    continue
+                
+                # WebSocket URL 구성 (http -> ws, https -> wss)
+                ws_url = self.API_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
+                ws_url = f"{ws_url}/ws/{token}"
+                
+                print(f"[WebSocket] 연결 시도: {ws_url[:50]}...")
+                
+                # WebSocket 연결
+                self.ws = websocket.WebSocketApp(
+                    ws_url,
+                    on_open=self._on_ws_open,
+                    on_message=self._on_ws_message,
+                    on_error=self._on_ws_error,
+                    on_close=self._on_ws_close
+                )
+                
+                # 연결 유지 (블로킹)
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                
+            except Exception as e:
+                print(f"[WebSocket] 연결 오류: {e}")
+            
+            # 연결 끊어지면 재연결 시도
+            self.ws_connected = False
+            print(f"[WebSocket] {self.ws_reconnect_delay}초 후 재연결 시도...")
+            import time
+            time.sleep(self.ws_reconnect_delay)
+    
+    def _on_ws_open(self, ws):
+        """WebSocket 연결 성공 시 호출"""
+        self.ws_connected = True
+        print("[WebSocket] ✅ 연결 성공!")
+    
+    def _on_ws_message(self, ws, message):
+        """WebSocket 메시지 수신 시 호출"""
+        try:
+            data = json.loads(message)
+            msg_type = data.get('type')
+            
+            print(f"[WebSocket] 메시지 수신: type={msg_type}")
+            
+            if msg_type == 'new_recommendation':
+                # 새로운 추천 알림 처리
+                recommendation = data.get('data')
+                if recommendation:
+                    # UI 스레드에서 말풍선 표시
+                    self.message_queue.put({
+                        'type': 'show_recommendation',
+                        'recommendations': [recommendation]
+                    })
+                    
+        except json.JSONDecodeError as e:
+            print(f"[WebSocket] JSON 파싱 오류: {e}")
+        except Exception as e:
+            print(f"[WebSocket] 메시지 처리 오류: {e}")
+    
+    def _on_ws_error(self, ws, error):
+        """WebSocket 오류 시 호출"""
+        print(f"[WebSocket] ❌ 오류: {error}")
+    
+    def _on_ws_close(self, ws, close_status_code, close_msg):
+        """WebSocket 연결 종료 시 호출"""
+        self.ws_connected = False
+        print(f"[WebSocket] 연결 종료 (code={close_status_code}, msg={close_msg})")
+    
     # ============================================================
     # Recommendation Bubble UI (Active Agent Integration)
     # ============================================================
-    
-    def poll_recommendations(self):
-        """30초마다 백엔드에서 pending 추천을 확인합니다."""
-        # 백그라운드 스레드에서 API 호출
-        threading.Thread(target=self._fetch_pending_recommendations, daemon=True).start()
-        
-        # 30초 후에 다시 확인
-        self.root.after(30000, self.poll_recommendations)
-    
-    def _fetch_pending_recommendations(self):
-        """[백그라운드 스레드] pending 추천 API를 호출합니다."""
-        try:
-            from login_view import get_stored_token
-            token = get_stored_token()
-            if not token:
-                return
-
-            response = requests.get(
-                f"{self.API_BASE_URL}/api/v2/recommendations",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10
-            )
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("success") and result.get("recommendations"):
-                    recommendations = result["recommendations"]
-                    # pending 상태인 것만 필터링
-                    pending_recs = [r for r in recommendations if r.get('status') == 'pending']
-                    if pending_recs:
-                        # UI 스레드에서 말풍선 표시
-                        self.message_queue.put({
-                            'type': 'show_recommendation',
-                            'recommendations': pending_recs
-                        })
-        except requests.exceptions.RequestException as e:
-            print(f"추천 폴링 중 오류: {e}")
     
     def show_recommendation_notification(self, recommendations):
         """새로운 추천이 있으면 말풍선을 표시합니다."""

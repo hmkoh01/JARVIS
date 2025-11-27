@@ -623,9 +623,10 @@ def start_frontend():
             return None
         
         # 데스크톱 플로팅 채팅 앱 실행
+        # stdout/stderr 파이프를 제거하여 콘솔에 출력되도록 함
         process = subprocess.Popen([
             sys.executable, str(frontend_file)
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ])  # stdout, stderr 인자 제거 - 콘솔에 직접 출력
         
         # 서버 시작 대기
         time.sleep(3)
@@ -633,14 +634,13 @@ def start_frontend():
         if process.poll() is None:
             print("✅ 데스크톱 플로팅 채팅 앱이 시작되었습니다.")
             print("💬 화면 우측 하단에 플로팅 버튼이 나타납니다.")
+            print("💡 프런트엔드 디버그 로그가 이 콘솔에 출력됩니다.")
             return process
         else:
-            stdout, stderr = process.communicate()
-            print(f"❌ 데스크톱 앱 시작 실패:")
-            if stdout:
-                print(f"stdout: {stdout.decode()}")
-            if stderr:
-                print(f"stderr: {stderr.decode()}")
+            # 프로세스가 즉시 종료된 경우 (에러 발생)
+            print(f"❌ 데스크톱 앱 시작 실패: 프로세스가 즉시 종료되었습니다.")
+            print("   프런트엔드 파일에 오류가 있을 수 있습니다. 직접 실행하여 확인하세요:")
+            print(f"   python {frontend_file}")
             return None
     except Exception as e:
         print(f"❌ 데스크톱 앱 시작 중 오류: {e}")

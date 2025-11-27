@@ -39,18 +39,18 @@ class RecommendationAgent(BaseAgent):
         try:
             genai.configure(api_key=settings.GEMINI_API_KEY)
             self.safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "block_none"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "block_none"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "block_none"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "block_none"},
             ]
             self.llm_model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
+                model_name="gemini-2.5-pro",
                 generation_config={
                     "temperature": 0.7,
                     "top_p": 0.9,
                     "top_k": 40,
-                    "max_output_tokens": 1024,
+                    "max_output_tokens": 2048,
                     "response_mime_type": "application/json",
                 },
                 safety_settings=self.safety_settings,
@@ -130,14 +130,18 @@ class RecommendationAgent(BaseAgent):
     # Core Active Analysis Methods
     # ============================================================
     
-    async def run_active_analysis(self, user_id: int) -> Tuple[bool, str]:
+    async def run_active_analysis(self, user_id: int, force_recommend: bool = False) -> Tuple[bool, str]:
         """
         능동형 분석 실행 - 주기적으로 호출되어 추천을 생성합니다.
+        
+        Args:
+            user_id: 사용자 ID
+            force_recommend: True면 데이터가 있을 경우 무조건 추천 생성 (초기 분석용)
         
         Returns:
             Tuple[bool, str]: (성공 여부, 메시지)
         """
-        logger.info(f"사용자 {user_id}에 대한 능동형 분석 시작...")
+        logger.info(f"사용자 {user_id}에 대한 능동형 분석 시작... (force_recommend={force_recommend})")
         
         if not self.llm_available:
             return False, "LLM 서비스를 사용할 수 없습니다."
@@ -157,13 +161,20 @@ class RecommendationAgent(BaseAgent):
             user_interests = self.sqlite.get_user_interests(user_id)
             survey_data = self.sqlite.get_survey_response(user_id)
             
+            # 기존 추천이 없으면 force_recommend 활성화 (초기 분석)
+            existing_recommendations = self.sqlite.get_pending_recommendations(user_id)
+            if not existing_recommendations and not user_interests:
+                force_recommend = True
+                logger.info(f"User {user_id}: 초기 분석 모드 활성화 (기존 추천/관심사 없음)")
+            
             # Step 2: LLM Analysis & Decision
             analysis_result = await self._analyze_with_llm(
                 browser_logs=browser_logs,
                 content_keywords=content_keywords,
                 blacklist=blacklist,
                 user_interests=user_interests,
-                survey_data=survey_data
+                survey_data=survey_data,
+                force_recommend=force_recommend
             )
             
             if not analysis_result or not analysis_result.get('should_recommend'):
@@ -194,6 +205,19 @@ class RecommendationAgent(BaseAgent):
                         source='active_analysis'
                     )
             
+            # WebSocket으로 실시간 알림 전송
+            try:
+                from core.websocket_manager import get_websocket_manager
+                ws_manager = get_websocket_manager()
+                
+                # 생성된 추천 정보 조회
+                recommendation = self.sqlite.get_recommendation(rec_id)
+                if recommendation and ws_manager.is_user_connected(user_id):
+                    await ws_manager.broadcast_recommendation(user_id, recommendation)
+                    logger.info(f"📤 User {user_id}: WebSocket으로 추천 알림 전송됨")
+            except Exception as ws_error:
+                logger.debug(f"WebSocket 알림 전송 실패 (무시됨): {ws_error}")
+            
             logger.info(f"✅ User {user_id}: 새로운 추천 생성 완료 (ID: {rec_id})")
             return True, f"새로운 추천이 생성되었습니다: {analysis_result.get('keyword')}"
             
@@ -207,10 +231,14 @@ class RecommendationAgent(BaseAgent):
         content_keywords: List[Dict[str, Any]],
         blacklist: List[str],
         user_interests: List[Dict[str, Any]],
-        survey_data: Optional[Dict[str, Any]]
+        survey_data: Optional[Dict[str, Any]],
+        force_recommend: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         LLM을 사용하여 로그를 분석하고 추천 여부를 결정합니다.
+        
+        Args:
+            force_recommend: True면 데이터가 있을 경우 무조건 추천 생성
         
         Returns:
             분석 결과 딕셔너리 또는 None
@@ -234,8 +262,18 @@ class RecommendationAgent(BaseAgent):
 - 커스텀 키워드: {custom_keywords if custom_keywords else '없음'}
 """
         
+        # force_recommend 모드: 데이터가 있으면 무조건 추천 생성
+        force_instruction = ""
+        if force_recommend:
+            force_instruction = """
+## 🔴 중요: 강제 추천 모드
+이것은 초기 분석입니다. 로그에 어떤 데이터든 있다면 **반드시 should_recommend를 true로 설정**하고 
+가장 흥미로운 주제에 대해 추천을 생성하세요. 새로운 관심사인지 기존 관심사인지는 중요하지 않습니다.
+사용자에게 유용한 정보를 제공하는 것이 목표입니다.
+"""
+        
         prompt = f"""당신은 사용자의 활동을 분석하여 맞춤형 추천을 제안하는 AI 어시스턴트입니다.
-
+{force_instruction}
 ## 사용자 활동 로그
 {log_summary}
 
@@ -250,17 +288,18 @@ class RecommendationAgent(BaseAgent):
 ## 분석 지시사항
 1. 로그에서 의미 있는 키워드와 주제를 추출하세요.
 2. 블랙리스트에 있는 키워드는 절대 추천하지 마세요.
-3. 다음 두 가지 케이스 중 하나를 판단하세요:
+3. 다음 세 가지 케이스 중 하나를 판단하세요:
    - **Case A (new_interest)**: 기존 관심사에 없던 새로운 주제가 발견된 경우
    - **Case B (periodic_expansion)**: 기존 관심사를 더 깊게 탐구하는 활동이 감지된 경우
-4. 추천할 만한 내용이 없다면 should_recommend를 false로 설정하세요.
+   - **Case C (initial_discovery)**: 초기 분석으로, 사용자의 주요 관심사를 파악한 경우
+4. 로그에 데이터가 있다면 가능한 한 추천을 생성하세요. should_recommend를 false로 설정하는 것은 정말 추천할 내용이 없을 때만입니다.
 5. 추천 시, 사용자에게 건넬 **친근한 한국어 말풍선 메시지**를 작성하세요.
    - 예시: "요즘 Python에 관심이 많으시네요! 관련 자료를 찾아볼까요? 🐍"
 
 ## 출력 형식 (JSON)
 {{
     "should_recommend": true/false,
-    "trigger_type": "new_interest" 또는 "periodic_expansion",
+    "trigger_type": "new_interest" 또는 "periodic_expansion" 또는 "initial_discovery",
     "keyword": "핵심 키워드 (한 단어 또는 짧은 구문)",
     "related_keywords": ["관련", "키워드", "목록"],
     "bubble_message": "친근한 한국어 말풍선 메시지",
@@ -275,25 +314,67 @@ class RecommendationAgent(BaseAgent):
 """
 
         try:
+            logger.info("🤖 Gemini LLM 호출 시작")
             response = self.llm_model.generate_content(
                 prompt,
                 request_options={"timeout": 30}
             )
             
+            # 응답 객체 상세 로깅
+            logger.info("📥 Gemini 응답 수신 완료")
+            logger.info("   - candidates 수: %d", len(getattr(response, 'candidates', []) or []))
+            
+            # prompt_feedback 확인 (안전 필터 차단 여부)
+            prompt_feedback = getattr(response, 'prompt_feedback', None)
+            if prompt_feedback:
+                block_reason = getattr(prompt_feedback, 'block_reason', None)
+                if block_reason:
+                    logger.warning("⚠️ Gemini 응답이 차단됨 - block_reason: %s", block_reason)
+                    logger.warning("   - prompt_feedback: %s", prompt_feedback)
+                    return None
+            
             # 응답 파싱
             result_text = self._extract_llm_response_text(response)
             if not result_text:
+                logger.warning("❌ LLM 응답 텍스트를 추출하지 못했습니다.")
+                # 디버깅용 상세 로그
+                candidates = getattr(response, 'candidates', None)
+                if candidates:
+                    for i, cand in enumerate(candidates):
+                        finish_reason = getattr(cand, 'finish_reason', 'UNKNOWN')
+                        safety_ratings = getattr(cand, 'safety_ratings', [])
+                        logger.warning("   - candidate[%d] finish_reason: %s", i, finish_reason)
+                        if safety_ratings:
+                            logger.warning("   - candidate[%d] safety_ratings: %s", i, safety_ratings)
+                        content = getattr(cand, 'content', None)
+                        if content:
+                            parts = getattr(content, 'parts', [])
+                            logger.warning("   - candidate[%d] parts 수: %d", i, len(parts) if parts else 0)
+                else:
+                    logger.warning("   - candidates가 비어있음")
+                    # response.text 시도
+                    try:
+                        raw_text = response.text
+                        logger.warning("   - response.text: %s", raw_text[:500] if raw_text else "None")
+                    except Exception as e:
+                        logger.warning("   - response.text 접근 실패: %s", e)
                 return None
+            
+            logger.info("✅ LLM 응답 텍스트 추출 성공 (길이: %d)", len(result_text))
+            logger.info("📄 LLM Raw Response: %s", result_text[:500] if len(result_text) > 500 else result_text)
             
             # JSON 파싱
             result = json.loads(result_text)
+            logger.info("✅ JSON 파싱 성공 - should_recommend: %s, keyword: %s", 
+                       result.get('should_recommend'), result.get('keyword', 'N/A'))
             return result
             
         except json.JSONDecodeError as e:
-            logger.error(f"LLM 응답 JSON 파싱 오류: {e}")
+            logger.error(f"❌ LLM 응답 JSON 파싱 오류: {e}")
+            logger.error(f"   - 원본 텍스트: {result_text[:500] if result_text else 'None'}")
             return None
         except Exception as e:
-            logger.error(f"LLM 분석 중 오류: {e}", exc_info=True)
+            logger.error(f"❌ LLM 분석 중 오류: {e}", exc_info=True)
             return None
     
     def _prepare_log_summary(
@@ -334,11 +415,28 @@ class RecommendationAgent(BaseAgent):
     def _extract_llm_response_text(self, response) -> Optional[str]:
         """Gemini 응답에서 텍스트를 안전하게 추출합니다."""
         try:
+            # 먼저 response.text를 시도 (가장 간단하고 안정적인 방법)
+            try:
+                text = getattr(response, "text", None)
+                if text and text.strip():
+                    logger.debug("응답을 response.text로 추출 성공")
+                    return text.strip()
+            except Exception as e:
+                logger.debug(f"response.text 접근 실패: {e}")
+            
+            # Fallback: candidates에서 추출
             candidates = getattr(response, "candidates", None) or []
             if not candidates:
+                logger.warning("응답에 candidates가 없습니다")
                 return None
             
             candidate = candidates[0]
+            
+            # finish_reason 확인
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason and finish_reason != 1:  # 1 = STOP (정상)
+                logger.warning(f"응답이 정상 종료되지 않음: finish_reason={finish_reason}")
+            
             content_parts = getattr(getattr(candidate, "content", None), "parts", None) or []
             
             extracted_chunks = []
@@ -347,17 +445,16 @@ class RecommendationAgent(BaseAgent):
                 if text_chunk:
                     extracted_chunks.append(text_chunk)
             
-            if not extracted_chunks:
-                # Fallback: response.text
-                try:
-                    return (response.text or "").strip()
-                except Exception:
-                    return None
+            if extracted_chunks:
+                result = "\n".join(extracted_chunks).strip()
+                logger.debug(f"응답을 candidates에서 추출 성공 (길이: {len(result)})")
+                return result
             
-            return "\n".join(extracted_chunks).strip()
+            logger.warning("응답 텍스트를 추출할 수 없습니다")
+            return None
             
         except Exception as e:
-            logger.error(f"LLM 응답 추출 오류: {e}")
+            logger.error(f"LLM 응답 추출 오류: {e}", exc_info=True)
             return None
     
     # ============================================================
@@ -457,47 +554,81 @@ class RecommendationAgent(BaseAgent):
             if job_field:
                 context = f"사용자 직업/분야: {job_field}"
         
-        prompt = f"""당신은 사용자에게 맞춤형 정보를 제공하는 AI 어시스턴트입니다.
+        prompt = f"""당신은 특정 주제에 대해 간결하고 핵심적인 요약 정보를 제공하는 AI 어시스턴트입니다.
 
-## 키워드 정보
+## 조사 주제
 - 핵심 키워드: {keyword}
 - 관련 키워드: {', '.join(related_keywords) if related_keywords else '없음'}
 {f'- {context}' if context else ''}
 
 ## 요청
-위 키워드에 대해 사용자가 알면 좋을 **핵심 정보를 3~5줄로 요약**해서 Markdown 형식으로 작성해 주세요.
+위 키워드에 대해 당신의 지식을 바탕으로 전문적이고 유용한 정보를 **간결하고 요약된 형태**로 핵심 정보만 제공해 주세요.
+자세한 내용은 별도의 보고서에서 다룰 예정이므로, 여기서는 개요와 핵심만 설명해 주세요.
 
 ## 작성 가이드라인
-1. 친근하고 이해하기 쉬운 한국어로 작성
-2. 핵심 개념이나 최신 트렌드 위주로 설명
-3. 이모지를 적절히 활용하여 가독성 향상
-4. 필요하다면 간단한 팁이나 추천 리소스 포함
+1. **간결성**: 각 섹션은 2-3문장으로 간단히 요약
+2. **핵심만**: 가장 중요한 정의, 특징, 활용 분야만 포함
+3. **읽기 쉬운 형식**: 불릿 포인트나 짧은 문장 사용
+4. **한국어**로 작성하되, 전문 용어는 영어 원어를 병기
+5. 이모지를 적절히 활용
 
 ## 출력 형식
-Markdown 형식의 요약 리포트 (3~5줄)
+반드시 다음 구조와 형식을 정확히 따라 작성해 주세요:
+
+## {keyword} 📌
+
+### 개요
+키워드의 간단한 정의와 기본 소개 (1-2문장)
+
+### 핵심 내용
+- 주요 특징이나 개념을 불릿 포인트로 2-3개 나열
+
+### 활용 분야
+주요 활용 분야나 관련 분야를 1-2문장으로 설명
+
+---
+
+중요: 위 형식을 정확히 따라 작성해 주세요. 추가적인 안내 문구나 설명은 포함하지 마세요.
 """
 
         try:
             # 리포트 생성용 모델 설정 (일반 텍스트 출력)
+            report_safety_settings = [
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "block_none"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "block_none"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "block_none"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "block_none"},
+            ]
             report_model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
+                model_name="gemini-2.5-pro",
                 generation_config={
                     "temperature": 0.7,
                     "top_p": 0.9,
-                    "max_output_tokens": 512,
+                    "max_output_tokens": 4096,
                     "response_mime_type": "text/plain",
                 },
-                safety_settings=self.safety_settings,
+                safety_settings=report_safety_settings,
             )
             
             response = report_model.generate_content(
                 prompt,
-                request_options={"timeout": 20}
+                request_options={"timeout": 30}
             )
             
             report_text = self._extract_llm_response_text(response)
-            if report_text:
-                return report_text
+            if report_text and report_text.strip():
+                # 보고서 안내 문구 추가
+                report_with_footer = f"""{report_text}
+
+---
+💡 **더 자세한 내용이 필요하신가요?**
+이 주제에 대한 심층 보고서를 작성해서 파일로 저장해 드릴 수 있습니다. {keyword}에 대한 보고서를 작성해드릴까요?
+"""
+                return report_with_footer
+            else:
+                logger.warning(f"LLM 응답이 비어있습니다. response 객체: {response}")
+                if hasattr(response, 'candidates'):
+                    logger.warning(f"candidates: {response.candidates}")
             
         except Exception as e:
             logger.error(f"리포트 생성 중 오류: {e}", exc_info=True)
@@ -505,11 +636,15 @@ Markdown 형식의 요약 리포트 (3~5줄)
         # Fallback 리포트
         return f"""## {keyword} 📌
 
-**{keyword}**에 대해 관심을 가지고 계시네요!
+### 개요
+**{keyword}**에 대해 관심을 가지고 계시네요! 현재 정보를 불러오는 데 문제가 발생했습니다.
 
-관련 키워드: {', '.join(related_keywords) if related_keywords else '없음'}
+### 관련 키워드
+{', '.join(related_keywords) if related_keywords else '관련 키워드 없음'}
 
-더 자세한 정보가 필요하시면 채팅으로 질문해 주세요! 🔍
+---
+💡 **더 자세한 내용이 필요하신가요?**
+이 주제에 대한 심층 보고서를 작성해서 파일로 저장해 드릴 수 있습니다. {keyword}에 대한 보고서를 작성해드릴까요?
 """
     
     # ============================================================

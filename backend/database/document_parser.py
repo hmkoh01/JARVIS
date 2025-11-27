@@ -33,6 +33,15 @@ class DocumentParser:
         self.docling_config = self.config.get('docling', {})
         self.export_type = self.docling_config.get('export_type', 'markdown')
         
+        # 메모리 최적화 설정 로드
+        self.use_cpu_only = self.docling_config.get('use_cpu_only', True)
+        self.max_parallel_workers = self.docling_config.get('max_parallel_workers', 2)
+        
+        # GPU 메모리 부족 방지: CPU 모드 강제
+        if self.use_cpu_only:
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''  # GPU 비활성화
+            logger.info("🔧 Docling CPU 모드 활성화 (GPU 메모리 부족 방지)")
+        
         # Docling 컨버터 초기화
         if DOCLING_AVAILABLE:
             converter_kwargs = self._build_converter_kwargs()

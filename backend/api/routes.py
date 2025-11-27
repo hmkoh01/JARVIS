@@ -154,10 +154,27 @@ async def process_message(request_data: dict, request: Request):
                         return
 
                     chunk_size = 80
+                    chunk_count = 0
+                    total_length = len(content)
+                    logger.info("스트리밍 응답 전송 시작 - 길이: %d", total_length)
                     for i in range(0, len(content), chunk_size):
                         chunk = content[i:i + chunk_size]
+                        chunk_count += 1
+                        chunk_preview = chunk.replace("\n", "\\n")
+                        if len(chunk_preview) > 80:
+                            chunk_preview = chunk_preview[:80] + "..."
+                        logger.debug(
+                            "스트림 청크 #%d 전송 (len=%d, preview='%s')",
+                            chunk_count,
+                            len(chunk),
+                            chunk_preview
+                        )
                         yield chunk
                         await asyncio.sleep(0.01)
+                    logger.info(
+                        "스트리밍 응답 전송 완료 - 총 %d개 청크",
+                        chunk_count
+                    )
                 except Exception as e:
                     logger.error(f"스트리밍 응답 생성 중 오류: {e}", exc_info=True)
                     yield f"오류가 발생했습니다: {str(e)}"

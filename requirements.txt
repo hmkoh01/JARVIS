@@ -55,3 +55,5 @@ tqdm>=4.66.0
 pywin32>=305; sys_platform == 'win32'  # For Windows system information collection
 keyring>=24.0.0  # For secure token storage
 apscheduler>=3.10.0 # For background task scheduling
+websocket-client>=1.9.0  # For WebSocket client (real-time notifications)
+websockets>=12.0  # For uvicorn WebSocket support (server-side)
