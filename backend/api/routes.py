@@ -1080,4 +1080,199 @@ async def update_folder(
     
     except Exception as e:
         logger.error(f"폴더 경로 업데이트 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Dashboard API Endpoints
+# =============================================================================
+
+@router.get("/dashboard/summary")
+async def get_dashboard_summary(user_id: int = Depends(get_current_user_id)):
+    """대시보드 전체 요약 데이터 조회"""
+    try:
+        db = SQLite()
+        
+        # 사용자 정보
+        user_info = db.get_user_by_id(user_id)
+        if not user_info:
+            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+        
+        # 관심사 요약
+        interest_summary = db.get_interest_summary(user_id)
+        
+        # 활동 요약
+        activity_summary = db.get_activity_summary(user_id)
+        
+        return {
+            "success": True,
+            "data": {
+                "user": {
+                    "user_id": user_info.get("user_id"),
+                    "email": user_info.get("email"),
+                    "selected_folder": user_info.get("selected_root_folder"),
+                    "has_completed_setup": user_info.get("has_completed_setup", False),
+                    "created_at": user_info.get("created_at")
+                },
+                "interests": interest_summary,
+                "activity": activity_summary
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"대시보드 요약 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/interests")
+async def get_dashboard_interests(
+    user_id: int = Depends(get_current_user_id),
+    days: int = 30,
+    limit: int = 20
+):
+    """관심사 목록 및 트렌드 조회"""
+    try:
+        db = SQLite()
+        
+        # 현재 관심사 목록
+        interests = db.get_user_interests(user_id, limit=limit)
+        
+        # 관심사 트렌드
+        trend = db.get_interest_trend(user_id, days=days)
+        
+        return {
+            "success": True,
+            "data": {
+                "interests": interests,
+                "trend": trend
+            }
+        }
+    except Exception as e:
+        logger.error(f"관심사 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/notes")
+async def get_dashboard_notes(
+    user_id: int = Depends(get_current_user_id),
+    limit: int = 50
+):
+    """노트 목록 조회"""
+    try:
+        db = SQLite()
+        notes = db.get_notes(user_id, limit=limit)
+        
+        return {
+            "success": True,
+            "data": {"notes": notes}
+        }
+    except Exception as e:
+        logger.error(f"노트 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/dashboard/notes")
+async def create_dashboard_note(
+    request: Dict[str, Any],
+    user_id: int = Depends(get_current_user_id)
+):
+    """새 노트 생성"""
+    try:
+        db = SQLite()
+        
+        content = request.get("content", "")
+        title = request.get("title", "")
+        pinned = request.get("pinned", False)
+        tags = request.get("tags")
+        
+        if not content.strip():
+            raise HTTPException(status_code=400, detail="노트 내용이 비어있습니다.")
+        
+        note_id = db.create_note(user_id, content, title, pinned, tags)
+        
+        if note_id:
+            note = db.get_note_by_id(user_id, note_id)
+            return {
+                "success": True,
+                "data": {"note": note}
+            }
+        else:
+            raise HTTPException(status_code=500, detail="노트 생성에 실패했습니다.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"노트 생성 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/dashboard/notes/{note_id}")
+async def update_dashboard_note(
+    note_id: int,
+    request: Dict[str, Any],
+    user_id: int = Depends(get_current_user_id)
+):
+    """노트 업데이트"""
+    try:
+        db = SQLite()
+        
+        content = request.get("content")
+        title = request.get("title")
+        pinned = request.get("pinned")
+        tags = request.get("tags")
+        
+        success = db.update_note(user_id, note_id, content, title, pinned, tags)
+        
+        if success:
+            note = db.get_note_by_id(user_id, note_id)
+            return {
+                "success": True,
+                "data": {"note": note}
+            }
+        else:
+            raise HTTPException(status_code=500, detail="노트 업데이트에 실패했습니다.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"노트 업데이트 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/dashboard/notes/{note_id}")
+async def delete_dashboard_note(
+    note_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
+    """노트 삭제"""
+    try:
+        db = SQLite()
+        success = db.delete_note(user_id, note_id)
+        
+        if success:
+            return {"success": True, "message": "노트가 삭제되었습니다."}
+        else:
+            raise HTTPException(status_code=500, detail="노트 삭제에 실패했습니다.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"노트 삭제 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/activity")
+async def get_dashboard_activity(
+    user_id: int = Depends(get_current_user_id),
+    days: int = 7
+):
+    """활동 요약 조회"""
+    try:
+        db = SQLite()
+        activity = db.get_activity_summary(user_id, days=days)
+        
+        return {
+            "success": True,
+            "data": {"activity": activity}
+        }
+    except Exception as e:
+        logger.error(f"활동 요약 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

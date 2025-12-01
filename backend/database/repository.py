@@ -215,3 +215,43 @@ class Repository:
     def get_user_folder(self, user_id: int):
         """user_id로 selected_root_folder 경로를 조회"""
         return self.sqlite.get_user_folder(user_id)
+    
+    # === 대시보드 관련 메서드들 ===
+    
+    def create_note(self, user_id: int, content: str, title: str = "", 
+                    pinned: bool = False, tags: str = None):
+        """새 노트 생성"""
+        return self.sqlite.create_note(user_id, content, title, pinned, tags)
+    
+    def update_note(self, user_id: int, note_id: int, content: str = None,
+                    title: str = None, pinned: bool = None, tags: str = None):
+        """노트 업데이트"""
+        return self.sqlite.update_note(user_id, note_id, content, title, pinned, tags)
+    
+    def delete_note(self, user_id: int, note_id: int):
+        """노트 삭제"""
+        return self.sqlite.delete_note(user_id, note_id)
+    
+    def get_notes(self, user_id: int, limit: int = 50):
+        """노트 목록 조회"""
+        return self.sqlite.get_notes(user_id, limit)
+    
+    def get_note_by_id(self, user_id: int, note_id: int):
+        """특정 노트 조회"""
+        return self.sqlite.get_note_by_id(user_id, note_id)
+    
+    def get_interest_trend(self, user_id: int, days: int = 30, keyword: str = None):
+        """관심사 트렌드 조회"""
+        return self.sqlite.get_interest_trend(user_id, days, keyword)
+    
+    def get_interest_summary(self, user_id: int, days: int = 30):
+        """관심사 요약 통계"""
+        return self.sqlite.get_interest_summary(user_id, days)
+    
+    def get_activity_summary(self, user_id: int, days: int = 7):
+        """사용자 활동 요약"""
+        return self.sqlite.get_activity_summary(user_id, days)
+    
+    def record_interest_snapshot(self, user_id: int):
+        """관심사 스냅샷 기록"""
+        return self.sqlite.record_interest_snapshot(user_id)

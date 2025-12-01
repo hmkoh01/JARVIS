@@ -38,6 +38,18 @@ COLORS = {
     # Button states
     "button_disabled_bg": "#E5E7EB",
     "button_disabled_text": "#9CA3AF",
+    
+    # Dashboard specific colors
+    "dashboard_header": "#1E293B",
+    "dashboard_card": "#FFFFFF",
+    "dashboard_card_border": "#E2E8F0",
+    "chart_primary": "#6366F1",
+    "chart_secondary": "#8B5CF6",
+    "chart_tertiary": "#EC4899",
+    "chart_success": "#10B981",
+    "chart_warning": "#F59E0B",
+    "note_bg": "#FFFBEB",
+    "note_border": "#FCD34D",
 }
 
 # 상태 배지 스타일
@@ -53,10 +65,10 @@ STATUS_BADGE_STYLES = {
 # 버튼 스타일 variants
 BUTTON_STYLES = {
     "primary": {
-        "bg": COLORS["primary"],
+        "bg": COLORS["surface"],
         "fg": COLORS["text_inverse"],
         "active_bg": COLORS["primary_dark"],
-        "active_fg": COLORS["text_inverse"],
+        "active_fg": COLORS["text_primary"],
         "disabled_bg": COLORS["button_disabled_bg"],
         "disabled_fg": COLORS["button_disabled_text"],
     },

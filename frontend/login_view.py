@@ -276,6 +276,9 @@ def start_google_login():
                 else:
                     print("📋 신규 사용자 - 초기 설정 필요")
                 
+                # user_info에 토큰도 포함하여 반환 (FloatingChatApp에서 사용 가능)
+                user_info["jarvis_token"] = jarvis_token
+                
                 return user_info
             else:
                 raise Exception("인증 코드를 받지 못했습니다.")

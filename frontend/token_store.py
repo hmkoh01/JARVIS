@@ -73,3 +73,51 @@ def is_expiring(token: str, slack_seconds: int = 300) -> bool:
         return (exp - time.time()) <= slack_seconds
     except Exception:
         return True
+
+
+def decode_token_claims(token: str) -> Optional[dict]:
+    """Decode token and return claims without signature verification.
+    
+    Returns:
+        dict with claims (user_id, exp, iat, etc.) or None if invalid.
+    """
+    try:
+        from jose import jwt
+        claims = jwt.get_unverified_claims(token)
+        return claims
+    except Exception:
+        return None
+
+
+def get_user_id_from_token(token: str) -> Optional[int]:
+    """Extract user_id from token without signature verification.
+    
+    Returns:
+        user_id as int, or None if token is invalid or missing user_id.
+    """
+    claims = decode_token_claims(token)
+    if claims:
+        user_id = claims.get("user_id")
+        if user_id is not None:
+            return int(user_id)
+    return None
+
+
+def get_valid_token_and_user() -> tuple[Optional[str], Optional[int]]:
+    """Load token and extract user_id if token is valid and not expiring.
+    
+    Returns:
+        (token, user_id) tuple. Both are None if no valid token found.
+    """
+    token = load_token()
+    if not token:
+        return None, None
+    
+    if is_expiring(token):
+        return None, None
+    
+    user_id = get_user_id_from_token(token)
+    if user_id is None:
+        return None, None
+    
+    return token, user_id

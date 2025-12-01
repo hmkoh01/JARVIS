@@ -16,6 +16,15 @@ import platform
 import subprocess  # 파일/폴더 열기용
 import websocket  # WebSocket 클라이언트
 
+# Dashboard import
+from dashboard_view import DashboardWindow
+
+# Token management
+from token_store import (
+    load_token, save_token, delete_token, 
+    is_expiring, get_valid_token_and_user, get_user_id_from_token
+)
+
 # ---------------------------------------------------------------------------
 # Global theme configuration
 # ---------------------------------------------------------------------------
@@ -99,6 +108,13 @@ class FloatingChatApp:
         # API 설정
         self.API_BASE_URL = "http://localhost:8000"
         
+        # =========================================================================
+        # 토큰/유저 상태 초기화 (앱 시작 시 저장된 토큰 로드)
+        # =========================================================================
+        self.jwt_token = None
+        self.user_id = None
+        self._load_auth_state()
+        
         # 채팅 히스토리
         self.chat_history = []
         
@@ -143,6 +159,9 @@ class FloatingChatApp:
         self.report_notification_window = None
         self.report_notification_visible = False
         self.report_auto_close_id = None
+        
+        # 대시보드 창 인스턴스
+        self.dashboard_window = None
 
         # WebSocket 연결 변수
         self.ws = None
@@ -151,6 +170,73 @@ class FloatingChatApp:
         
         # WebSocket 연결 시작 (실시간 추천 알림용)
         self.connect_websocket()
+    
+    # =========================================================================
+    # 토큰/인증 상태 관리 메서드
+    # =========================================================================
+    
+    def _load_auth_state(self):
+        """저장된 토큰을 로드하고 user_id를 복원합니다."""
+        try:
+            token, user_id = get_valid_token_and_user()
+            if token and user_id:
+                self.jwt_token = token
+                self.user_id = user_id
+                print(f"[Auth] 저장된 토큰 로드 완료 (user_id={user_id})")
+            else:
+                print("[Auth] 유효한 저장된 토큰 없음")
+                self.jwt_token = None
+                self.user_id = None
+        except Exception as e:
+            print(f"[Auth] 토큰 로드 오류: {e}")
+            self.jwt_token = None
+            self.user_id = None
+    
+    def set_auth(self, token: str, user_id: int):
+        """로그인 성공 시 토큰과 user_id를 설정합니다."""
+        self.jwt_token = token
+        self.user_id = user_id
+        save_token(token)
+        print(f"[Auth] 인증 정보 설정 완료 (user_id={user_id})")
+    
+    def clear_auth(self):
+        """로그아웃 시 토큰과 user_id를 초기화합니다."""
+        self.jwt_token = None
+        self.user_id = None
+        delete_token()
+        print("[Auth] 인증 정보 초기화")
+    
+    def is_logged_in(self) -> bool:
+        """현재 로그인 상태인지 확인합니다."""
+        if not self.jwt_token or not self.user_id:
+            return False
+        # 토큰 만료 체크
+        if is_expiring(self.jwt_token):
+            print("[Auth] 토큰이 만료되었거나 곧 만료됩니다.")
+            return False
+        return True
+    
+    def ensure_logged_in(self) -> bool:
+        """로그인 상태를 확인하고, 미로그인 시 경고 메시지를 표시합니다.
+        
+        Returns:
+            True if logged in, False otherwise.
+        """
+        if self.is_logged_in():
+            return True
+        
+        # 토큰 재로드 시도 (다른 프로세스에서 로그인했을 수 있음)
+        self._load_auth_state()
+        if self.is_logged_in():
+            return True
+        
+        # 로그인 필요 메시지
+        from tkinter import messagebox
+        messagebox.showwarning(
+            "로그인 필요", 
+            "이 기능을 사용하려면 로그인이 필요합니다.\n앱을 재시작하여 로그인해주세요."
+        )
+        return False
     
     def setup_korean_fonts(self):
         """한글 폰트를 설정합니다."""
@@ -540,13 +626,28 @@ class FloatingChatApp:
         buttons_container = tk.Frame(header_frame, bg=COLORS["primary"])
         buttons_container.pack(side='right', padx=15, pady=25)
 
+        # 대시보드 버튼
+        dashboard_button = tk.Button(
+            buttons_container,
+            text="📊",
+            font=('Arial', 18),
+            bg=COLORS["primary"],
+            fg=COLORS["text_inverse"],
+            relief='flat',
+            cursor='hand2',
+            command=self.open_dashboard_window,
+            activebackground='#4338CA',
+            activeforeground='white'
+        )
+        dashboard_button.pack(side='left', padx=(0, 5))
+
         # 추천 내역 버튼
         recommendation_button = tk.Button(
             buttons_container,
             text="💡",
             font=('Arial', 18),
             bg=COLORS["primary"],
-            fg=COLORS["text_primary"],
+            fg=COLORS["text_inverse"],
             relief='flat',
             cursor='hand2',
             command=self.open_recommendation_window,
@@ -561,7 +662,7 @@ class FloatingChatApp:
             text="⚙️",
             font=('Arial', 18),
             bg=COLORS["primary"],
-            fg=COLORS["text_primary"],
+            fg=COLORS["text_inverse"],
             relief='flat',
             cursor='hand2',
             command=self.show_settings_menu,
@@ -644,6 +745,24 @@ class FloatingChatApp:
         
         # 채팅창 닫기 이벤트 바인딩
         self.chat_window.protocol("WM_DELETE_WINDOW", self.close_chat_window)
+    
+    def open_dashboard_window(self):
+        """대시보드 창을 엽니다."""
+        # 이미 열려있으면 포커스
+        if self.dashboard_window and self.dashboard_window.is_open():
+            self.dashboard_window.show()
+            return
+        
+        # 로그인 상태 확인 (통합 헬퍼 사용)
+        if not self.ensure_logged_in():
+            return
+        
+        # 대시보드 창 생성
+        self.dashboard_window = DashboardWindow(
+            parent_app=self,
+            user_id=self.user_id,
+            jwt_token=self.jwt_token
+        )
         
     def open_recommendation_window(self):
         """추천 내역을 보여주는 새 창을 엽니다 (카드 기반 UI)."""
