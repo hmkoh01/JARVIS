@@ -178,13 +178,13 @@ class FileCollector:
         return f"file_{hashlib.md5(file_path.encode()).hexdigest()}"
 
     def is_file_modified(self, file_path: str, last_modified: datetime) -> bool:
-        stored_modified = self.sqlite.get_file_last_modified(file_path)
+        stored_modified = self.sqlite.get_file_last_modified(self.user_id, file_path)
         return stored_modified is None or last_modified > stored_modified
 
     def is_file_already_indexed(self, file_path: str) -> bool:
         """파일이 이미 인덱싱되었는지 확인"""
         doc_id = self._generate_doc_id(file_path)
-        return self.sqlite.is_file_exists(doc_id)
+        return self.sqlite.is_file_exists(self.user_id, doc_id)
 
     def get_user_folders(self, calculate_size: bool = True) -> List[Dict[str, Any]]:
         """사용자 홈 디렉토리의 모든 폴더를 스캔하고 크기를 계산하여 반환합니다."""
@@ -326,17 +326,20 @@ class FileCollector:
             
         saved_count, text_files = 0, []
         try:
-            self.sqlite.conn.execute("BEGIN TRANSACTION")
+            conn = self.sqlite.get_user_connection(self.user_id)
+            conn.execute("BEGIN TRANSACTION")
             for file_info in files:
                 if self.sqlite.insert_collected_file(file_info):
                     saved_count += 1
                     if file_info['file_category'] in ['document', 'spreadsheet', 'presentation', 'code', 'note']:
                         text_files.append(file_info)
-            self.sqlite.conn.commit()
+            conn.commit()
             self.logger.info("✅ SQLite 파일 메타데이터 저장: %d개, 텍스트 인덱싱 대상: %d개",
                              saved_count, len(text_files))
         except Exception as e: 
-            self.sqlite.conn.rollback()
+            conn = self.sqlite.get_user_connection(self.user_id)
+            if conn:
+                conn.rollback()
             self.logger.error("❌ SQLite 파일 저장 실패: %s", e, exc_info=True)
             return 0
         
@@ -717,7 +720,7 @@ class BrowserHistoryCollector:
             
             # 일괄 삽입
             if keyword_entries:
-                inserted = self.sqlite.insert_content_keywords_batch(keyword_entries)
+                inserted = self.sqlite.insert_content_keywords_batch(self.user_id, keyword_entries)
                 if inserted > 0:
                     self.logger.debug(f"🔑 웹 키워드 저장: {title[:30]}... - {inserted}개")
                     
@@ -966,7 +969,8 @@ class BrowserHistoryCollector:
         saved_items = []  # 저장된 항목 (log_id 포함)
         
         try:
-            self.sqlite.conn.execute("BEGIN TRANSACTION")
+            conn = self.sqlite.get_user_connection(self.user_id)
+            conn.execute("BEGIN TRANSACTION")
             for item in history_data:
                 log_id = self.sqlite.insert_collected_browser_history(item)
                 if log_id:
@@ -974,10 +978,12 @@ class BrowserHistoryCollector:
                     # log_id를 item에 추가
                     item['log_id'] = log_id
                     saved_items.append(item)
-            self.sqlite.conn.commit()
+            conn.commit()
             self.logger.info("✅ SQLite 브라우저 히스토리 저장: %d개", saved_count)
         except Exception as e:
-            self.sqlite.conn.rollback()
+            conn = self.sqlite.get_user_connection(self.user_id)
+            if conn:
+                conn.rollback()
             self.logger.error("❌ SQLite 히스토리 저장 실패: %s", e, exc_info=True)
             return 0
         

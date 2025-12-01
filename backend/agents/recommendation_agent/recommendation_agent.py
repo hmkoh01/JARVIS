@@ -216,8 +216,10 @@ class RecommendationAgent(BaseAgent):
                 ws_manager = get_websocket_manager()
                 
                 # 생성된 추천 정보 조회
-                recommendation = self.sqlite.get_recommendation(rec_id)
+                recommendation = self.sqlite.get_recommendation(user_id, rec_id)
                 if recommendation and ws_manager.is_user_connected(user_id):
+                    # user_id를 추천 객체에 추가 (WebSocket에서 사용)
+                    recommendation['user_id'] = user_id
                     await ws_manager.broadcast_recommendation(user_id, recommendation)
             except Exception:
                 pass  # WebSocket 알림 전송 실패 무시
@@ -532,11 +534,12 @@ class RecommendationAgent(BaseAgent):
     # Interaction Handling
     # ============================================================
     
-    async def handle_response(self, recommendation_id: int, action: str) -> Tuple[bool, str]:
+    async def handle_response(self, user_id: int, recommendation_id: int, action: str) -> Tuple[bool, str]:
         """
         UI에서 사용자가 추천에 응답했을 때 처리합니다.
         
         Args:
+            user_id: 사용자 ID
             recommendation_id: 추천 ID
             action: 'accept' 또는 'reject'
         
@@ -545,9 +548,12 @@ class RecommendationAgent(BaseAgent):
         """
         
         # 추천 정보 조회
-        recommendation = self.sqlite.get_recommendation(recommendation_id)
+        recommendation = self.sqlite.get_recommendation(user_id, recommendation_id)
         if not recommendation:
             return False, "추천을 찾을 수 없습니다."
+        
+        # user_id를 추천 객체에 추가
+        recommendation['user_id'] = user_id
         
         if action == 'accept':
             return await self._handle_accept(recommendation)
@@ -564,7 +570,7 @@ class RecommendationAgent(BaseAgent):
         related_keywords = recommendation.get('related_keywords', [])
         
         # 상태 업데이트
-        self.sqlite.update_recommendation_status(rec_id, 'accepted')
+        self.sqlite.update_recommendation_status(user_id, rec_id, 'accepted')
         
         # LLM으로 요약 리포트 생성
         if self.llm_available:
@@ -577,7 +583,7 @@ class RecommendationAgent(BaseAgent):
             report_content = f"## {keyword} 관련 정보\n\n관심 키워드: {keyword}\n관련 키워드: {', '.join(related_keywords)}\n\n*LLM 서비스를 사용할 수 없어 상세 리포트를 생성하지 못했습니다.*"
         
         # 리포트 저장
-        self.sqlite.update_recommendation_report(rec_id, report_content)
+        self.sqlite.update_recommendation_report(user_id, rec_id, report_content)
         
         # 관심사 점수 상향 조정
         if keyword:
@@ -597,7 +603,7 @@ class RecommendationAgent(BaseAgent):
         keyword = recommendation.get('keyword', '')
         
         # 상태 업데이트
-        self.sqlite.update_recommendation_status(rec_id, 'rejected')
+        self.sqlite.update_recommendation_status(user_id, rec_id, 'rejected')
         
         # 키워드 블랙리스트에 추가
         if keyword:
@@ -730,10 +736,10 @@ class RecommendationAgent(BaseAgent):
             logger.error(f"대기 중 추천 조회 오류: {e}")
             return []
     
-    def get_recommendation(self, recommendation_id: int) -> Optional[Dict[str, Any]]:
+    def get_recommendation(self, user_id: int, recommendation_id: int) -> Optional[Dict[str, Any]]:
         """추천 상세 정보를 조회합니다."""
         try:
-            return self.sqlite.get_recommendation(recommendation_id)
+            return self.sqlite.get_recommendation(user_id, recommendation_id)
         except Exception as e:
             logger.error(f"추천 조회 오류: {e}")
             return None

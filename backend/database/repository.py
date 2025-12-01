@@ -143,11 +143,11 @@ class Repository:
             logger.error(f"하이브리드 검색 오류: {e}")
             return []
     
-    def resolve_metadata(self, hit: Hit) -> Hit:
+    def resolve_metadata(self, hit: Hit, user_id: int = None) -> Hit:
         """SQLite에서 메타데이터를 조합하여 Hit 완성"""
         try:
-            if hit.source == 'file':
-                file_info = self.sqlite.get_file(hit.doc_id)
+            if hit.source == 'file' and user_id:
+                file_info = self.sqlite.get_file(user_id, hit.doc_id)
                 if file_info:
                     hit.path = file_info.get('file_path', hit.path)
                     if not hit.snippet:
@@ -174,14 +174,14 @@ class Repository:
     def upsert_interest(self, user_id: int, keyword: str, score: float = 0.5, source: str = 'manual') -> bool:
         return self.sqlite.upsert_interest(user_id, keyword, score, source)
     
-    def get_file(self, doc_id: str):
-        return self.sqlite.get_file(doc_id)
+    def get_file(self, user_id: int, doc_id: str):
+        return self.sqlite.get_file(user_id, doc_id)
     
     def get_user_interests(self, user_id: int, limit: int = 20):
         return self.sqlite.get_user_interests(user_id, limit)
     
-    def find_file_by_path(self, path: str):
-        return self.sqlite.find_file_by_path(path)
+    def find_file_by_path(self, user_id: int, path: str):
+        return self.sqlite.find_file_by_path(user_id, path)
     
     # === 사용자 관리 메서드들 ===
     

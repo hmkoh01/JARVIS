@@ -103,8 +103,9 @@ class WebSocketManager:
                 from database.sqlite import SQLite
                 db = SQLite()
                 rec_id = recommendation.get('id')
+                rec_user_id = recommendation.get('user_id', user_id)
                 if rec_id:
-                    db.update_recommendation_status(rec_id, 'shown')
+                    db.update_recommendation_status(rec_user_id, rec_id, 'shown')
                     logger.info(f"💡 추천 상태 변경: id={rec_id}, status='shown'")
             except Exception as e:
                 logger.warning(f"추천 상태 업데이트 실패: {e}")

@@ -673,8 +673,7 @@ async def mark_recommendation_read(
     """추천을 읽음으로 표시합니다."""
     try:
         db = SQLite()
-        # TODO: A better check to ensure user owns the recommendation
-        success = db.mark_recommendation_as_read(recommendation_id)
+        success = db.mark_recommendation_as_read(user_id, recommendation_id)
         if success:
             return {"success": True, "message": "Recommendation marked as read."}
         else:
@@ -718,16 +717,14 @@ async def respond_to_recommendation(
         
         # 추천 소유권 확인
         db = SQLite()
-        recommendation = db.get_recommendation(recommendation_id)
+        recommendation = db.get_recommendation(user_id, recommendation_id)
         if not recommendation:
             raise HTTPException(status_code=404, detail="추천을 찾을 수 없습니다.")
-        if recommendation.get("user_id") != user_id:
-            raise HTTPException(status_code=403, detail="해당 추천에 대한 권한이 없습니다.")
         
         keyword = recommendation.get("keyword", "")
         
         # handle_response 호출 (비동기)
-        success, result_message = await recommendation_agent.handle_response(recommendation_id, action)
+        success, result_message = await recommendation_agent.handle_response(user_id, recommendation_id, action)
         
         if action == "accept" and success:
             # 수락 시: 심층 보고서 제안 포함
@@ -849,6 +846,7 @@ async def _create_report_background_task(
             if recommendation_id:
                 db = SQLite()
                 db.update_recommendation_report_path(
+                    user_id,
                     recommendation_id, 
                     pdf_path
                 )
@@ -980,22 +978,26 @@ async def update_folder(
             manager = data_collection_managers[user_id]
             manager.stop_collection()
         
-        # 2. SQLite에서 user_id 관련 데이터 삭제
+        # 2. SQLite에서 user_id 관련 데이터 삭제 (사용자 DB 파일)
         logger.info(f"SQLite에서 사용자 {user_id}의 데이터 삭제 중...")
         try:
+            # 사용자별 DB 연결
+            conn = db.get_user_connection(user_id)
             # files 테이블 삭제
-            db.conn.execute("DELETE FROM files WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM files")
             # browser_logs 테이블 삭제
-            db.conn.execute("DELETE FROM browser_logs WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM browser_logs")
             # content_keywords 테이블 삭제
-            db.conn.execute("DELETE FROM content_keywords WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM content_keywords")
             # chat_messages 테이블 삭제
-            db.conn.execute("DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
-            db.conn.commit()
+            conn.execute("DELETE FROM chat_messages")
+            conn.commit()
             logger.info("SQLite 데이터 삭제 완료")
         except Exception as e:
             logger.error(f"SQLite 데이터 삭제 오류: {e}")
-            db.conn.rollback()
+            conn = db.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
         
         # 3. Qdrant에서 user_id 관련 벡터 삭제
         logger.info(f"Qdrant에서 사용자 {user_id}의 벡터 삭제 중...")

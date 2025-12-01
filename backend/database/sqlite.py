@@ -1,14 +1,15 @@
 #sqlite.py
 """
-SQLite 데이터베이스 관리 모듈 (Refactored for Keyword-Centric Recommendation)
-- 불필요한 테이블 제거: app_logs
-- 간소화된 테이블: browser_logs (id, url, title, visit_time), files (doc_id, file_path, processed_at)
-- 새로운 핵심 테이블: content_keywords (KeyBERT 등 키워드 추출 결과 저장)
+SQLite 데이터베이스 관리 모듈 (User-Per-File Architecture)
+- 물리적 데이터 격리: 각 사용자마다 별도의 DB 파일 (db/user_{user_id}.db)
+- 중앙 마스터 DB: 사용자 인증 정보만 저장 (db/master.db)
+- 마이그레이션: PRAGMA user_version 기반 스키마 버전 관리
 """
 import sqlite3
 import os
 import re
 import json
+import glob
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -17,66 +18,165 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# Schema Version & Migration Scripts
+# =============================================================================
+CURRENT_DB_VERSION = 1
+
+# 마이그레이션 스크립트: version -> (description, [sql_statements])
+# 버전은 해당 버전으로 업그레이드할 때 실행할 SQL들
+MIGRATION_SCRIPTS: Dict[int, tuple] = {
+    # Version 1: Initial schema (이 버전에서는 CREATE TABLE만 하므로 마이그레이션 불필요)
+    # 향후 버전 추가 예시:
+    # 2: ("Add new column to recommendations", [
+    #     "ALTER TABLE recommendations ADD COLUMN priority INTEGER DEFAULT 0",
+    # ]),
+}
+
 
 class SQLite:
-    """SQLite 데이터베이스 관리 클래스 (Keyword-Centric Architecture)"""
+    """SQLite 데이터베이스 관리 클래스 (User-Per-File Architecture)
+    
+    Architecture:
+        - db/master.db: 중앙 사용자 테이블 (인증용)
+        - db/user_{user_id}.db: 사용자별 데이터 파일
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls, *args, **kwargs):
+        """싱글톤 패턴 구현"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        
+        self._thread_local = threading.local()
+        self._user_connections: Dict[int, threading.local] = {}
+        self._ensure_db_dir()
+        self._init_master_db()
+        self._initialized = True
+    
+    # =========================================================================
+    # Path Helpers
+    # =========================================================================
     
     def _sanitize_path(self, path: str) -> str:
-        """경로에서 유효하지 않은 문자들을 '_'로 대체하여 안전하게 만듭니다."""
+        """경로에서 유효하지 않은 문자들을 '_'로 대체"""
         directory = os.path.dirname(path)
         filename = os.path.basename(path)
         sanitized_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
         if directory:
             return os.path.join(directory, sanitized_filename)
         return sanitized_filename
-
-    def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            backend_dir = Path(__file__).resolve().parents[1]
-            db_path = backend_dir / "sqlite" / "sqlite.db"
-        self.db_path = self._sanitize_path(str(db_path))
-        self._ensure_db_dir()
-        self._thread_local = threading.local()
-        self._init_db()
+    
+    def _get_db_dir(self) -> Path:
+        """데이터베이스 디렉토리 경로 반환 (db/)"""
+        # 프로젝트 루트의 db/ 폴더 사용 (Docker 볼륨 마운트 대응)
+        project_root = Path(__file__).resolve().parents[2]
+        return project_root / "db"
+    
+    def _get_master_db_path(self) -> str:
+        """마스터 DB 경로 반환 (db/master.db)"""
+        return str(self._get_db_dir() / "master.db")
+    
+    def _get_user_db_path(self, user_id: int) -> str:
+        """사용자별 DB 경로 반환 (db/user_{user_id}.db)"""
+        return str(self._get_db_dir() / f"user_{user_id}.db")
+    
+    def _ensure_db_dir(self):
+        """데이터베이스 디렉토리 생성"""
+        db_dir = self._get_db_dir()
+        if not db_dir.exists():
+            db_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"데이터베이스 디렉토리 생성: {db_dir}")
+    
+    # =========================================================================
+    # Connection Management
+    # =========================================================================
+    
+    def _create_connection(self, db_path: str) -> sqlite3.Connection:
+        """SQLite 연결 생성 (공통 설정 적용)"""
+        connection = sqlite3.connect(db_path, check_same_thread=False)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.row_factory = sqlite3.Row
+        return connection
+    
+    def get_master_connection(self) -> sqlite3.Connection:
+        """마스터 DB 연결 반환 (스레드별 연결)"""
+        if not hasattr(self._thread_local, 'master_conn') or self._thread_local.master_conn is None:
+            try:
+                self._thread_local.master_conn = self._create_connection(self._get_master_db_path())
+            except Exception as e:
+                logger.error(f"마스터 DB 연결 오류: {e}")
+                return None
+        return self._thread_local.master_conn
+    
+    def get_user_connection(self, user_id: int) -> sqlite3.Connection:
+        """사용자별 DB 연결 반환 (스레드별 연결)"""
+        conn_key = f'user_conn_{user_id}'
+        if not hasattr(self._thread_local, conn_key) or getattr(self._thread_local, conn_key) is None:
+            try:
+                db_path = self._get_user_db_path(user_id)
+                conn = self._create_connection(db_path)
+                setattr(self._thread_local, conn_key, conn)
+                
+                # 새 연결 시 사용자 DB 초기화 및 마이그레이션 확인
+                self._init_user_db(conn)
+                self._migrate_user_db_internal(conn, user_id)
+            except Exception as e:
+                logger.error(f"사용자 {user_id} DB 연결 오류: {e}")
+                return None
+        return getattr(self._thread_local, conn_key)
     
     @property
     def conn(self) -> sqlite3.Connection:
-        """현재 스레드에 맞는 DB 연결을 가져오거나 새로 생성합니다."""
-        if not hasattr(self._thread_local, 'conn') or self._thread_local.conn is None:
-            try:
-                connection = sqlite3.connect(self.db_path)
-                connection.execute("PRAGMA journal_mode=DELETE")
-                connection.execute("PRAGMA synchronous=NORMAL")
-                connection.execute("PRAGMA foreign_keys=ON")
-                connection.row_factory = sqlite3.Row
-                self._thread_local.conn = connection
-            except Exception as e:
-                logger.error(f"SQLite 연결 생성 오류: {e}")
-                return None
-        return self._thread_local.conn
-
+        """기존 코드 호환용: 마스터 DB 연결 반환"""
+        return self.get_master_connection()
+    
     def close_connection(self):
-        if hasattr(self._thread_local, 'conn') and self._thread_local.conn:
-            self._thread_local.conn.close()
-            self._thread_local.conn = None
+        """현재 스레드의 모든 연결 종료"""
+        # 마스터 연결 종료
+        if hasattr(self._thread_local, 'master_conn') and self._thread_local.master_conn:
+            self._thread_local.master_conn.close()
+            self._thread_local.master_conn = None
+        
+        # 사용자 연결들 종료
+        for attr in dir(self._thread_local):
+            if attr.startswith('user_conn_'):
+                conn = getattr(self._thread_local, attr)
+                if conn:
+                    conn.close()
+                    setattr(self._thread_local, attr, None)
+    
+    def close_user_connection(self, user_id: int):
+        """특정 사용자의 DB 연결 종료"""
+        conn_key = f'user_conn_{user_id}'
+        if hasattr(self._thread_local, conn_key):
+            conn = getattr(self._thread_local, conn_key)
+            if conn:
+                conn.close()
+                setattr(self._thread_local, conn_key, None)
     
     def __del__(self):
         """소멸자에서 연결 정리"""
         self.close_connection()
     
-    def _ensure_db_dir(self):
-        """데이터베이스 디렉토리 생성"""
-        if os.path.dirname(self.db_path):
-            db_dir = os.path.dirname(self.db_path)
-            if not os.path.exists(db_dir):
-                os.makedirs(db_dir, exist_ok=True)
+    # =========================================================================
+    # Database Initialization
+    # =========================================================================
     
-    def _init_db(self):
-        """데이터베이스 초기화 및 테이블 생성"""
-        with sqlite3.connect(self.db_path) as conn:
-            # ============================================================
-            # 1. Users & Profile
-            # ============================================================
+    def _init_master_db(self):
+        """마스터 데이터베이스 초기화 (사용자 테이블만)"""
+        with sqlite3.connect(self._get_master_db_path()) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,175 +188,261 @@ class SQLite:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_interests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    keyword TEXT NOT NULL,
-                    score REAL DEFAULT 0.5,
-                    source TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_survey_responses (
-                    user_id INTEGER PRIMARY KEY,
-                    response_json TEXT,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            
-            # ============================================================
-            # 2. Data Logs (Simplified)
-            # ============================================================
-            # browser_logs: 세션 분석용 최소 정보만 저장
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS browser_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    url TEXT,
-                    title TEXT,
-                    visit_time DATETIME NOT NULL,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            
-            # ============================================================
-            # 3. Files (Simplified)
-            # ============================================================
-            # files: 핵심 메타데이터만 저장 (키워드는 content_keywords에서 관리)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS files (
-                    doc_id TEXT PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    file_path TEXT NOT NULL,
-                    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            
-            # ============================================================
-            # 4. Content Keywords (NEW - Core Table for Recommendations)
-            # ============================================================
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS content_keywords (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    source_type TEXT NOT NULL,
-                    source_id TEXT NOT NULL,
-                    keyword TEXT NOT NULL,
-                    original_text TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            
-            # ============================================================
-            # 5. Recommendations (Active Agent Core)
-            # ============================================================
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS recommendation_blacklist (
-                    user_id INTEGER NOT NULL,
-                    keyword TEXT NOT NULL,
-                    blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (user_id, keyword)
-                )
-            """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS recommendations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    trigger_type TEXT,
-                    keyword TEXT,
-                    related_keywords TEXT,
-                    bubble_message TEXT,
-                    report_content TEXT,
-                    status TEXT DEFAULT 'pending',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    responded_at DATETIME,
-                    generated_report_file_id TEXT,
-                    report_file_path TEXT,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            
-            # Migration: Add report_file_path column if it doesn't exist
-            self._migrate_add_column_if_not_exists(
-                conn, 'recommendations', 'report_file_path', 'TEXT'
-            )
-            
-            # ============================================================
-            # Indexes
-            # ============================================================
             conn.execute("CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_user_interests_user_id ON user_interests(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_logs_user_id ON browser_logs(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_logs_visit_time ON browser_logs(visit_time)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_user_id_status ON recommendations(user_id, status)")
-            # content_keywords indexes
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_user_id ON content_keywords(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_created_at ON content_keywords(created_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_source ON content_keywords(source_type, source_id)")
-            
-            # ============================================================
-            # 6. Chat Messages (Short-term Memory for Chatbot)
-            # ============================================================
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created ON chat_messages(user_id, created_at DESC)")
-            
             conn.commit()
+            logger.info("마스터 데이터베이스 초기화 완료")
     
-    def _migrate_add_column_if_not_exists(
-        self, conn: sqlite3.Connection, table: str, column: str, column_type: str
-    ):
-        """테이블에 컬럼이 없으면 추가합니다 (마이그레이션용).
+    def _init_user_db(self, conn: sqlite3.Connection):
+        """사용자별 데이터베이스 테이블 초기화"""
+        # ============================================================
+        # 1. User Profile & Interests
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_interests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL,
+                score REAL DEFAULT 0.5,
+                source TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_detected_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_survey_responses (
+                id INTEGER PRIMARY KEY,
+                response_json TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ============================================================
+        # 2. Data Logs
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS browser_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT,
+                title TEXT,
+                visit_time DATETIME NOT NULL
+            )
+        """)
+        
+        # ============================================================
+        # 3. Files
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS files (
+                doc_id TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ============================================================
+        # 4. Content Keywords
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS content_keywords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                keyword TEXT NOT NULL,
+                original_text TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ============================================================
+        # 5. Recommendations
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS recommendation_blacklist (
+                keyword TEXT PRIMARY KEY,
+                blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigger_type TEXT,
+                keyword TEXT,
+                related_keywords TEXT,
+                bubble_message TEXT,
+                report_content TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                responded_at DATETIME,
+                generated_report_file_id TEXT,
+                report_file_path TEXT
+            )
+        """)
+        
+        # ============================================================
+        # 6. Chat Messages
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ============================================================
+        # Indexes
+        # ============================================================
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_user_interests_keyword ON user_interests(keyword)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_logs_visit_time ON browser_logs(visit_time)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_file_path ON files(file_path)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_recommendations_status ON recommendations(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_created_at ON content_keywords(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_source ON content_keywords(source_type, source_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC)")
+        
+        conn.commit()
+    
+    # =========================================================================
+    # Migration Logic
+    # =========================================================================
+    
+    def _get_user_version(self, conn: sqlite3.Connection) -> int:
+        """현재 DB의 user_version 조회"""
+        cursor = conn.execute("PRAGMA user_version")
+        return cursor.fetchone()[0]
+    
+    def _set_user_version(self, conn: sqlite3.Connection, version: int):
+        """DB의 user_version 설정"""
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+    
+    def _migrate_user_db_internal(self, conn: sqlite3.Connection, user_id: int):
+        """사용자 DB 마이그레이션 실행 (내부용)"""
+        current_version = self._get_user_version(conn)
+        
+        if current_version >= CURRENT_DB_VERSION:
+            return  # 이미 최신 버전
+        
+        logger.info(f"사용자 {user_id} DB 마이그레이션 시작: v{current_version} -> v{CURRENT_DB_VERSION}")
+        
+        try:
+            for version in range(current_version + 1, CURRENT_DB_VERSION + 1):
+                if version in MIGRATION_SCRIPTS:
+                    description, sql_statements = MIGRATION_SCRIPTS[version]
+                    logger.info(f"  마이그레이션 v{version}: {description}")
+                    
+                    for sql in sql_statements:
+                        try:
+                            conn.execute(sql)
+                        except Exception as e:
+                            logger.warning(f"  SQL 실행 경고 (무시됨): {e}")
+                    
+                    conn.commit()
+            
+            # 최종 버전으로 업데이트
+            self._set_user_version(conn, CURRENT_DB_VERSION)
+            logger.info(f"사용자 {user_id} DB 마이그레이션 완료: v{CURRENT_DB_VERSION}")
+            
+        except Exception as e:
+            logger.error(f"사용자 {user_id} DB 마이그레이션 오류: {e}")
+            conn.rollback()
+            raise
+    
+    def migrate_user_db(self, user_id: int) -> bool:
+        """특정 사용자 DB에 대해 마이그레이션 실행 (외부 호출용)
         
         Args:
-            conn: SQLite 연결 객체
-            table: 테이블 이름
-            column: 추가할 컬럼 이름
-            column_type: 컬럼 타입 (예: TEXT, INTEGER, REAL)
+            user_id: 사용자 ID
+            
+        Returns:
+            성공 여부
         """
         try:
-            # 컬럼 존재 여부 확인
-            cursor = conn.execute(f"PRAGMA table_info({table})")
-            columns = [row[1] for row in cursor.fetchall()]
+            db_path = self._get_user_db_path(user_id)
+            if not os.path.exists(db_path):
+                logger.info(f"사용자 {user_id} DB 파일이 없습니다. 마이그레이션 스킵.")
+                return True
             
-            if column not in columns:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-                logger.info(f"마이그레이션: {table}.{column} 컬럼 추가됨")
+            with sqlite3.connect(db_path) as conn:
+                self._init_user_db(conn)  # 테이블 존재 확인
+                self._migrate_user_db_internal(conn, user_id)
+            
+            return True
         except Exception as e:
-            logger.warning(f"마이그레이션 오류 (무시됨): {table}.{column} - {e}")
+            logger.error(f"사용자 {user_id} 마이그레이션 실패: {e}")
+            return False
+    
+    def migrate_all_user_dbs(self) -> Dict[str, Any]:
+        """모든 사용자 DB 파일에 대해 마이그레이션 실행 (서버 시작 시)
+        
+        Returns:
+            {'success': int, 'failed': int, 'total': int, 'errors': []}
+        """
+        result = {'success': 0, 'failed': 0, 'total': 0, 'errors': []}
+        
+        db_dir = self._get_db_dir()
+        user_db_pattern = str(db_dir / "user_*.db")
+        user_db_files = glob.glob(user_db_pattern)
+        
+        result['total'] = len(user_db_files)
+        logger.info(f"마이그레이션 대상 DB 파일: {result['total']}개")
+        
+        for db_path in user_db_files:
+            try:
+                # 파일명에서 user_id 추출: user_123.db -> 123
+                filename = os.path.basename(db_path)
+                user_id_str = filename.replace('user_', '').replace('.db', '')
+                user_id = int(user_id_str)
+                
+                if self.migrate_user_db(user_id):
+                    result['success'] += 1
+                else:
+                    result['failed'] += 1
+                    result['errors'].append(f"user_{user_id}: 마이그레이션 실패")
+                    
+            except ValueError as e:
+                result['failed'] += 1
+                result['errors'].append(f"{db_path}: 잘못된 파일명 형식")
+            except Exception as e:
+                result['failed'] += 1
+                result['errors'].append(f"{db_path}: {str(e)}")
+        
+        logger.info(f"마이그레이션 완료: 성공 {result['success']}, 실패 {result['failed']}")
+        return result
+    
+    def get_all_user_ids_from_files(self) -> List[int]:
+        """db/ 폴더에서 모든 user_*.db 파일의 user_id 목록 반환"""
+        db_dir = self._get_db_dir()
+        user_db_pattern = str(db_dir / "user_*.db")
+        user_db_files = glob.glob(user_db_pattern)
+        
+        user_ids = []
+        for db_path in user_db_files:
+            try:
+                filename = os.path.basename(db_path)
+                user_id_str = filename.replace('user_', '').replace('.db', '')
+                user_ids.append(int(user_id_str))
+            except ValueError:
+                continue
+        
+        return user_ids
 
-    # ============================================================
-    # User Management Methods
-    # ============================================================
+    # =========================================================================
+    # User Management Methods (Master DB)
+    # =========================================================================
     
     def get_or_create_user_by_google(self, google_id: str, email: str, refresh_token: str = None) -> Optional[Dict[str, Any]]:
         """Google ID로 사용자를 조회하고, 없으면 새로 생성 후 user 객체를 반환"""
         try:
-            self.conn.row_factory = sqlite3.Row
+            conn = self.get_master_connection()
+            conn.row_factory = sqlite3.Row
             
             # 기존 사용자 조회
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 "SELECT * FROM users WHERE google_user_id = ?", (google_id,)
             )
             row = cursor.fetchone()
@@ -264,41 +450,56 @@ class SQLite:
             if row:
                 # 사용자 존재 - refresh_token 업데이트 (제공된 경우)
                 if refresh_token:
-                    self.conn.execute(
+                    conn.execute(
                         "UPDATE users SET refresh_token = ? WHERE google_user_id = ?",
                         (refresh_token, google_id)
                     )
-                    self.conn.commit()
-                    cursor = self.conn.execute(
+                    conn.commit()
+                    cursor = conn.execute(
                         "SELECT * FROM users WHERE google_user_id = ?", (google_id,)
                     )
                     row = cursor.fetchone()
-                return dict(row) if row else None
+                
+                user_dict = dict(row) if row else None
+                
+                # 사용자 DB 초기화 확인
+                if user_dict:
+                    self.get_user_connection(user_dict['user_id'])
+                
+                return user_dict
             else:
                 # 새 사용자 생성
-                cursor = self.conn.execute("""
+                cursor = conn.execute("""
                     INSERT INTO users (google_user_id, email, refresh_token, has_completed_setup)
                     VALUES (?, ?, ?, 0)
                 """, (google_id, email, refresh_token))
-                self.conn.commit()
+                conn.commit()
                 
-                cursor = self.conn.execute(
+                cursor = conn.execute(
                     "SELECT * FROM users WHERE google_user_id = ?", (google_id,)
                 )
                 row = cursor.fetchone()
-                return dict(row) if row else None
+                user_dict = dict(row) if row else None
+                
+                # 새 사용자 DB 초기화
+                if user_dict:
+                    self.get_user_connection(user_dict['user_id'])
+                
+                return user_dict
                 
         except Exception as e:
             logger.error(f"사용자 조회/생성 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_master_connection()
+            if conn:
+                conn.rollback()
             return None
     
     def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
         """user_id로 사용자 정보 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            conn = self.get_master_connection()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
         except Exception as e:
@@ -308,8 +509,9 @@ class SQLite:
     def get_user_by_google_id(self, google_id: str) -> Optional[Dict[str, Any]]:
         """google_user_id로 사용자 정보 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute(
+            conn = self.get_master_connection()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
                 "SELECT * FROM users WHERE google_user_id = ?", (google_id,)
             )
             row = cursor.fetchone()
@@ -321,37 +523,42 @@ class SQLite:
     def update_user_setup_status(self, user_id: int, status: int) -> bool:
         """has_completed_setup 값을 업데이트"""
         try:
-            self.conn.execute(
+            conn = self.get_master_connection()
+            conn.execute(
                 "UPDATE users SET has_completed_setup = ? WHERE user_id = ?",
                 (status, user_id)
             )
-            self.conn.commit()
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"사용자 설정 상태 업데이트 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_master_connection()
+            if conn:
+                conn.rollback()
             return False
     
     def update_user_folder(self, user_id: int, folder_path: str) -> bool:
         """selected_root_folder 경로를 업데이트"""
         try:
-            self.conn.execute(
+            conn = self.get_master_connection()
+            conn.execute(
                 "UPDATE users SET selected_root_folder = ? WHERE user_id = ?",
                 (folder_path, user_id)
             )
-            self.conn.commit()
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"사용자 폴더 경로 업데이트 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_master_connection()
+            if conn:
+                conn.rollback()
             return False
     
     def get_user_folder(self, user_id: int) -> Optional[str]:
         """user_id로 selected_root_folder 경로를 조회"""
         try:
-            cursor = self.conn.execute(
+            conn = self.get_master_connection()
+            cursor = conn.execute(
                 "SELECT selected_root_folder FROM users WHERE user_id = ?", (user_id,)
             )
             row = cursor.fetchone()
@@ -363,60 +570,61 @@ class SQLite:
     def get_all_users(self) -> List[Dict[str, Any]]:
         """모든 사용자 목록을 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("SELECT user_id, email FROM users")
+            conn = self.get_master_connection()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT user_id, email FROM users")
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"모든 사용자 조회 오류: {e}")
             return []
 
-    # ============================================================
-    # User Interests Methods
-    # ============================================================
+    # =========================================================================
+    # User Interests Methods (User DB)
+    # =========================================================================
     
     def upsert_interest(self, user_id: int, keyword: str, score: float = 0.5, source: str = 'manual') -> bool:
         """관심사 업서트"""
         try:
-            # 기존 관심사 조회
-            cursor = self.conn.execute(
-                "SELECT id, score FROM user_interests WHERE user_id = ? AND keyword = ?",
-                (user_id, keyword)
+            conn = self.get_user_connection(user_id)
+            
+            cursor = conn.execute(
+                "SELECT id, score FROM user_interests WHERE keyword = ?",
+                (keyword,)
             )
             row = cursor.fetchone()
             
             if row:
-                # 기존 관심사 업데이트 (점수 가중 평균)
                 new_score = min(1.0, (row[1] + score) / 2 + 0.1)
-                self.conn.execute("""
+                conn.execute("""
                     UPDATE user_interests 
                     SET score = ?, last_detected_at = CURRENT_TIMESTAMP 
                     WHERE id = ?
                 """, (new_score, row[0]))
             else:
-                # 새 관심사 추가
-                self.conn.execute("""
-                    INSERT INTO user_interests (user_id, keyword, score, source)
-                    VALUES (?, ?, ?, ?)
-                """, (user_id, keyword, score, source))
+                conn.execute("""
+                    INSERT INTO user_interests (keyword, score, source)
+                    VALUES (?, ?, ?)
+                """, (keyword, score, source))
             
-            self.conn.commit()
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"관심사 업서트 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
     
     def get_user_interests(self, user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
         """사용자 관심사 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
                 SELECT * FROM user_interests 
-                WHERE user_id = ? 
                 ORDER BY score DESC, last_detected_at DESC 
                 LIMIT ?
-            """, (user_id, limit))
+            """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"관심사 조회 오류: {e}")
@@ -425,46 +633,44 @@ class SQLite:
     def delete_interest(self, user_id: int, keyword: str) -> bool:
         """관심사 삭제"""
         try:
-            self.conn.execute(
-                "DELETE FROM user_interests WHERE user_id = ? AND keyword = ?",
-                (user_id, keyword)
-            )
-            self.conn.commit()
+            conn = self.get_user_connection(user_id)
+            conn.execute("DELETE FROM user_interests WHERE keyword = ?", (keyword,))
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"관심사 삭제 오류: {e}")
             return False
 
-    # ============================================================
-    # Survey Response Methods
-    # ============================================================
+    # =========================================================================
+    # Survey Response Methods (User DB)
+    # =========================================================================
     
     def upsert_survey_response(self, user_id: int, response_data: Dict[str, Any]) -> bool:
         """설문지 응답 저장 (업서트)"""
         try:
+            conn = self.get_user_connection(user_id)
             response_json = json.dumps(response_data, ensure_ascii=False)
-            self.conn.execute("""
-                INSERT INTO user_survey_responses (user_id, response_json, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE SET
+            conn.execute("""
+                INSERT INTO user_survey_responses (id, response_json, updated_at)
+                VALUES (1, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
                     response_json = excluded.response_json,
                     updated_at = CURRENT_TIMESTAMP
-            """, (user_id, response_json))
-            self.conn.commit()
+            """, (response_json,))
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"설문지 응답 저장 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
     
     def get_survey_response(self, user_id: int) -> Optional[Dict[str, Any]]:
         """사용자 설문지 응답 조회"""
         try:
-            cursor = self.conn.execute(
-                "SELECT response_json FROM user_survey_responses WHERE user_id = ?",
-                (user_id,)
-            )
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("SELECT response_json FROM user_survey_responses WHERE id = 1")
             row = cursor.fetchone()
             if row and row[0]:
                 return json.loads(row[0])
@@ -476,55 +682,55 @@ class SQLite:
     def has_user_completed_survey(self, user_id: int) -> bool:
         """사용자가 설문지를 완료했는지 확인"""
         try:
-            cursor = self.conn.execute(
-                "SELECT 1 FROM user_survey_responses WHERE user_id = ? LIMIT 1",
-                (user_id,)
-            )
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("SELECT 1 FROM user_survey_responses WHERE id = 1 LIMIT 1")
             return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"설문지 완료 여부 확인 오류: {e}")
             return False
 
-    # ============================================================
-    # Browser Logs Methods (Simplified)
-    # ============================================================
+    # =========================================================================
+    # Browser Logs Methods (User DB)
+    # =========================================================================
     
     def insert_browser_log(self, user_id: int, url: str, title: str = None, 
                            visit_time: datetime = None) -> Optional[int]:
-        """브라우저 로그 삽입 (간소화: id, url, title, visit_time만 저장)"""
+        """브라우저 로그 삽입"""
         try:
+            conn = self.get_user_connection(user_id)
             if visit_time is None:
                 visit_time = datetime.now()
             
-            cursor = self.conn.execute("""
-                INSERT INTO browser_logs (user_id, url, title, visit_time)
-                VALUES (?, ?, ?, ?)
-            """, (user_id, url, title, visit_time))
-            self.conn.commit()
+            cursor = conn.execute("""
+                INSERT INTO browser_logs (url, title, visit_time)
+                VALUES (?, ?, ?)
+            """, (url, title, visit_time))
+            conn.commit()
             return cursor.lastrowid
         except Exception as e:
             logger.error(f"브라우저 로그 삽입 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return None
     
     def get_browser_logs(self, user_id: int, limit: int = 100, 
                          since: datetime = None) -> List[Dict[str, Any]]:
         """브라우저 로그 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
             if since:
-                cursor = self.conn.execute("""
+                cursor = conn.execute("""
                     SELECT * FROM browser_logs 
-                    WHERE user_id = ? AND visit_time >= ?
+                    WHERE visit_time >= ?
                     ORDER BY visit_time DESC LIMIT ?
-                """, (user_id, since, limit))
+                """, (since, limit))
             else:
-                cursor = self.conn.execute("""
+                cursor = conn.execute("""
                     SELECT * FROM browser_logs 
-                    WHERE user_id = ?
                     ORDER BY visit_time DESC LIMIT ?
-                """, (user_id, limit))
+                """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"브라우저 로그 조회 오류: {e}")
@@ -533,77 +739,79 @@ class SQLite:
     def is_browser_log_duplicate(self, user_id: int, url: str, visit_time: datetime) -> bool:
         """브라우저 로그 중복 확인"""
         try:
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("""
                 SELECT 1 FROM browser_logs 
-                WHERE user_id = ? AND url = ? AND visit_time = ? 
+                WHERE url = ? AND visit_time = ? 
                 LIMIT 1
-            """, (user_id, url, visit_time))
+            """, (url, visit_time))
             return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"브라우저 로그 중복 체크 오류: {e}")
             return False
 
-    # ============================================================
-    # Files Methods (Simplified)
-    # ============================================================
+    # =========================================================================
+    # Files Methods (User DB)
+    # =========================================================================
     
     def upsert_file(self, doc_id: str, user_id: int, file_path: str) -> bool:
-        """파일 정보 업서트 (간소화: doc_id, user_id, file_path, processed_at만 저장)"""
+        """파일 정보 업서트"""
         try:
-            self.conn.execute("""
-                INSERT INTO files (doc_id, user_id, file_path, processed_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            conn = self.get_user_connection(user_id)
+            conn.execute("""
+                INSERT INTO files (doc_id, file_path, processed_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(doc_id) DO UPDATE SET
                     file_path = excluded.file_path,
                     processed_at = CURRENT_TIMESTAMP
-            """, (doc_id, user_id, file_path))
-            self.conn.commit()
+            """, (doc_id, file_path))
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"파일 업서트 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
     
-    def get_file(self, doc_id: str) -> Optional[Dict[str, Any]]:
+    def get_file(self, user_id: int, doc_id: str) -> Optional[Dict[str, Any]]:
         """파일 정보 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("SELECT * FROM files WHERE doc_id = ?", (doc_id,))
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM files WHERE doc_id = ?", (doc_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
         except Exception as e:
             logger.error(f"파일 조회 오류: {e}")
             return None
     
-    def find_file_by_path(self, file_path: str) -> Optional[str]:
+    def find_file_by_path(self, user_id: int, file_path: str) -> Optional[str]:
         """경로로 파일 doc_id 찾기"""
         try:
-            cursor = self.conn.execute(
-                "SELECT doc_id FROM files WHERE file_path = ?", (file_path,)
-            )
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("SELECT doc_id FROM files WHERE file_path = ?", (file_path,))
             row = cursor.fetchone()
             return row[0] if row else None
         except Exception as e:
             logger.error(f"파일 경로 조회 오류: {e}")
             return None
     
-    def is_file_exists(self, doc_id: str) -> bool:
+    def is_file_exists(self, user_id: int, doc_id: str) -> bool:
         """파일이 이미 존재하는지 확인"""
         try:
-            cursor = self.conn.execute(
-                "SELECT 1 FROM files WHERE doc_id = ? LIMIT 1",
-                (doc_id,)
-            )
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("SELECT 1 FROM files WHERE doc_id = ? LIMIT 1", (doc_id,))
             return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"파일 존재 확인 오류: {e}")
             return False
     
-    def get_file_last_modified(self, file_path: str) -> Optional[datetime]:
+    def get_file_last_modified(self, user_id: int, file_path: str) -> Optional[datetime]:
         """파일의 마지막 처리 시간 조회"""
         try:
-            cursor = self.conn.execute(
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute(
                 "SELECT processed_at FROM files WHERE file_path = ? ORDER BY processed_at DESC LIMIT 1",
                 (file_path,)
             )
@@ -618,102 +826,77 @@ class SQLite:
     def get_user_files(self, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
         """사용자 파일 목록 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
                 SELECT * FROM files 
-                WHERE user_id = ? 
                 ORDER BY processed_at DESC 
                 LIMIT ?
-            """, (user_id, limit))
+            """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"파일 조회 오류: {e}")
             return []
 
-    # ============================================================
-    # Content Keywords Methods (NEW - Core for Recommendations)
-    # ============================================================
+    # =========================================================================
+    # Content Keywords Methods (User DB)
+    # =========================================================================
     
     def insert_content_keyword(self, user_id: int, source_type: str, source_id: str,
                                 keyword: str, original_text: str = None) -> Optional[int]:
-        """콘텐츠 키워드 삽입
-        
-        Args:
-            user_id: 사용자 ID
-            source_type: 'file', 'web', 'chat' 중 하나
-            source_id: files.doc_id, browser_logs.id, 또는 chat_session_id
-            keyword: 추출된 핵심 키워드
-            original_text: 문맥 파악을 위한 짧은 원문 조각 (선택)
-        
-        Returns:
-            삽입된 키워드의 ID, 실패 시 None
-        """
+        """콘텐츠 키워드 삽입"""
         try:
-            cursor = self.conn.execute("""
-                INSERT INTO content_keywords (user_id, source_type, source_id, keyword, original_text)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, source_type, source_id, keyword, original_text))
-            self.conn.commit()
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("""
+                INSERT INTO content_keywords (source_type, source_id, keyword, original_text)
+                VALUES (?, ?, ?, ?)
+            """, (source_type, source_id, keyword, original_text))
+            conn.commit()
             return cursor.lastrowid
         except Exception as e:
             logger.error(f"콘텐츠 키워드 삽입 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return None
     
-    def insert_content_keywords_batch(self, keywords: List[Dict[str, Any]]) -> int:
-        """콘텐츠 키워드 일괄 삽입
-        
-        Args:
-            keywords: 키워드 딕셔너리 리스트
-                각 항목: {'user_id', 'source_type', 'source_id', 'keyword', 'original_text'(선택)}
-        
-        Returns:
-            삽입된 키워드 수
-        """
+    def insert_content_keywords_batch(self, user_id: int, keywords: List[Dict[str, Any]]) -> int:
+        """콘텐츠 키워드 일괄 삽입"""
         if not keywords:
             return 0
         
         try:
+            conn = self.get_user_connection(user_id)
             inserted = 0
-            self.conn.execute("BEGIN TRANSACTION")
+            conn.execute("BEGIN TRANSACTION")
             for kw in keywords:
-                self.conn.execute("""
-                    INSERT INTO content_keywords (user_id, source_type, source_id, keyword, original_text)
-                    VALUES (?, ?, ?, ?, ?)
+                conn.execute("""
+                    INSERT INTO content_keywords (source_type, source_id, keyword, original_text)
+                    VALUES (?, ?, ?, ?)
                 """, (
-                    kw['user_id'],
                     kw['source_type'],
                     kw['source_id'],
                     kw['keyword'],
                     kw.get('original_text')
                 ))
                 inserted += 1
-            self.conn.commit()
+            conn.commit()
             return inserted
         except Exception as e:
             logger.error(f"콘텐츠 키워드 일괄 삽입 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return 0
     
     def get_content_keywords(self, user_id: int, source_type: str = None,
                               limit: int = 100, since: datetime = None) -> List[Dict[str, Any]]:
-        """콘텐츠 키워드 조회
-        
-        Args:
-            user_id: 사용자 ID
-            source_type: 필터링할 소스 타입 ('file', 'web', 'chat'), None이면 전체
-            limit: 최대 반환 개수
-            since: 이 시간 이후의 키워드만 조회
-        
-        Returns:
-            키워드 딕셔너리 리스트
-        """
+        """콘텐츠 키워드 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            query = "SELECT * FROM content_keywords WHERE user_id = ?"
-            params = [user_id]
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            query = "SELECT * FROM content_keywords WHERE 1=1"
+            params = []
             
             if source_type:
                 query += " AND source_type = ?"
@@ -726,17 +909,18 @@ class SQLite:
             query += " ORDER BY created_at DESC LIMIT ?"
             params.append(limit)
             
-            cursor = self.conn.execute(query, params)
+            cursor = conn.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"콘텐츠 키워드 조회 오류: {e}")
             return []
     
-    def get_keywords_by_source(self, source_type: str, source_id: str) -> List[Dict[str, Any]]:
+    def get_keywords_by_source(self, user_id: int, source_type: str, source_id: str) -> List[Dict[str, Any]]:
         """특정 소스의 키워드 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
                 SELECT * FROM content_keywords 
                 WHERE source_type = ? AND source_id = ?
                 ORDER BY created_at DESC
@@ -748,18 +932,15 @@ class SQLite:
     
     def get_keyword_frequency(self, user_id: int, limit: int = 50,
                                since: datetime = None) -> List[Dict[str, Any]]:
-        """키워드 빈도 분석 (추천 시스템용)
-        
-        Returns:
-            [{'keyword': str, 'count': int, 'sources': int}, ...]
-        """
+        """키워드 빈도 분석"""
         try:
+            conn = self.get_user_connection(user_id)
             query = """
                 SELECT keyword, COUNT(*) as count, COUNT(DISTINCT source_id) as sources
                 FROM content_keywords 
-                WHERE user_id = ?
+                WHERE 1=1
             """
-            params = [user_id]
+            params = []
             
             if since:
                 query += " AND created_at >= ?"
@@ -768,40 +949,43 @@ class SQLite:
             query += " GROUP BY keyword ORDER BY count DESC LIMIT ?"
             params.append(limit)
             
-            cursor = self.conn.execute(query, params)
+            cursor = conn.execute(query, params)
             return [{'keyword': row[0], 'count': row[1], 'sources': row[2]} 
                     for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"키워드 빈도 분석 오류: {e}")
             return []
     
-    def delete_keywords_by_source(self, source_type: str, source_id: str) -> bool:
-        """특정 소스의 키워드 삭제 (재처리 시 사용)"""
+    def delete_keywords_by_source(self, user_id: int, source_type: str, source_id: str) -> bool:
+        """특정 소스의 키워드 삭제"""
         try:
-            self.conn.execute(
+            conn = self.get_user_connection(user_id)
+            conn.execute(
                 "DELETE FROM content_keywords WHERE source_type = ? AND source_id = ?",
                 (source_type, source_id)
             )
-            self.conn.commit()
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"키워드 삭제 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
 
-    # ============================================================
-    # Recommendation Blacklist Methods
-    # ============================================================
+    # =========================================================================
+    # Recommendation Blacklist Methods (User DB)
+    # =========================================================================
     
     def add_to_blacklist(self, user_id: int, keyword: str) -> bool:
         """키워드를 블랙리스트에 추가"""
         try:
-            self.conn.execute("""
-                INSERT OR IGNORE INTO recommendation_blacklist (user_id, keyword)
-                VALUES (?, ?)
-            """, (user_id, keyword))
-            self.conn.commit()
+            conn = self.get_user_connection(user_id)
+            conn.execute("""
+                INSERT OR IGNORE INTO recommendation_blacklist (keyword)
+                VALUES (?)
+            """, (keyword,))
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"블랙리스트 추가 오류: {e}")
@@ -810,11 +994,9 @@ class SQLite:
     def remove_from_blacklist(self, user_id: int, keyword: str) -> bool:
         """키워드를 블랙리스트에서 제거"""
         try:
-            self.conn.execute(
-                "DELETE FROM recommendation_blacklist WHERE user_id = ? AND keyword = ?",
-                (user_id, keyword)
-            )
-            self.conn.commit()
+            conn = self.get_user_connection(user_id)
+            conn.execute("DELETE FROM recommendation_blacklist WHERE keyword = ?", (keyword,))
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"블랙리스트 제거 오류: {e}")
@@ -823,10 +1005,8 @@ class SQLite:
     def get_blacklist(self, user_id: int) -> List[str]:
         """사용자의 블랙리스트 조회"""
         try:
-            cursor = self.conn.execute(
-                "SELECT keyword FROM recommendation_blacklist WHERE user_id = ?",
-                (user_id,)
-            )
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("SELECT keyword FROM recommendation_blacklist")
             return [row[0] for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"블랙리스트 조회 오류: {e}")
@@ -835,45 +1015,47 @@ class SQLite:
     def is_keyword_blacklisted(self, user_id: int, keyword: str) -> bool:
         """키워드가 블랙리스트에 있는지 확인"""
         try:
-            cursor = self.conn.execute(
-                "SELECT 1 FROM recommendation_blacklist WHERE user_id = ? AND keyword = ? LIMIT 1",
-                (user_id, keyword)
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute(
+                "SELECT 1 FROM recommendation_blacklist WHERE keyword = ? LIMIT 1",
+                (keyword,)
             )
             return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"블랙리스트 확인 오류: {e}")
             return False
 
-    # ============================================================
-    # Recommendations Methods
-    # ============================================================
+    # =========================================================================
+    # Recommendations Methods (User DB)
+    # =========================================================================
     
     def create_recommendation(self, user_id: int, trigger_type: str, keyword: str,
                               bubble_message: str, related_keywords: List[str] = None,
                               report_content: str = None) -> int:
         """새로운 추천 생성"""
         try:
+            conn = self.get_user_connection(user_id)
             related_json = json.dumps(related_keywords or [], ensure_ascii=False)
-            cursor = self.conn.execute("""
+            cursor = conn.execute("""
                 INSERT INTO recommendations 
-                (user_id, trigger_type, keyword, related_keywords, bubble_message, report_content, status)
-                VALUES (?, ?, ?, ?, ?, ?, 'pending')
-            """, (user_id, trigger_type, keyword, related_json, bubble_message, report_content))
-            self.conn.commit()
+                (trigger_type, keyword, related_keywords, bubble_message, report_content, status)
+                VALUES (?, ?, ?, ?, ?, 'pending')
+            """, (trigger_type, keyword, related_json, bubble_message, report_content))
+            conn.commit()
             return cursor.lastrowid
         except Exception as e:
             logger.error(f"추천 생성 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return -1
     
-    def get_recommendation(self, recommendation_id: int) -> Optional[Dict[str, Any]]:
+    def get_recommendation(self, user_id: int, recommendation_id: int) -> Optional[Dict[str, Any]]:
         """추천 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute(
-                "SELECT * FROM recommendations WHERE id = ?", (recommendation_id,)
-            )
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM recommendations WHERE id = ?", (recommendation_id,))
             row = cursor.fetchone()
             if row:
                 result = dict(row)
@@ -888,12 +1070,13 @@ class SQLite:
     def get_pending_recommendations(self, user_id: int) -> List[Dict[str, Any]]:
         """대기 중인 추천 목록 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
                 SELECT * FROM recommendations 
-                WHERE user_id = ? AND status = 'pending'
+                WHERE status = 'pending'
                 ORDER BY created_at DESC
-            """, (user_id,))
+            """)
             results = []
             for row in cursor.fetchall():
                 item = dict(row)
@@ -908,13 +1091,13 @@ class SQLite:
     def get_all_recommendations(self, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         """사용자의 모든 추천 내역 조회"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
                 SELECT * FROM recommendations 
-                WHERE user_id = ?
                 ORDER BY created_at DESC
                 LIMIT ?
-            """, (user_id, limit))
+            """, (limit,))
             results = []
             for row in cursor.fetchall():
                 item = dict(row)
@@ -926,146 +1109,126 @@ class SQLite:
             logger.error(f"모든 추천 조회 오류: {e}")
             return []
     
-    def update_recommendation_status(self, recommendation_id: int, status: str) -> bool:
-        """추천 상태 업데이트 (pending -> shown -> accepted/rejected -> completed)"""
+    def update_recommendation_status(self, user_id: int, recommendation_id: int, status: str) -> bool:
+        """추천 상태 업데이트"""
         try:
-            self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.execute("""
                 UPDATE recommendations 
                 SET status = ?, responded_at = CURRENT_TIMESTAMP 
                 WHERE id = ?
             """, (status, recommendation_id))
-            self.conn.commit()
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"추천 상태 업데이트 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
     
-    def update_recommendation_report(self, recommendation_id: int, 
+    def update_recommendation_report(self, user_id: int, recommendation_id: int, 
                                       report_content: str, report_file_id: str = None) -> bool:
         """추천 보고서 업데이트"""
         try:
-            self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.execute("""
                 UPDATE recommendations 
                 SET report_content = ?, generated_report_file_id = ?
                 WHERE id = ?
             """, (report_content, report_file_id, recommendation_id))
-            self.conn.commit()
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"추천 보고서 업데이트 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
     
-    def update_recommendation_report_path(self, recommendation_id: int, 
+    def update_recommendation_report_path(self, user_id: int, recommendation_id: int, 
                                           report_file_path: str) -> bool:
-        """추천의 보고서 파일 경로 업데이트
-        
-        Args:
-            recommendation_id: 추천 ID
-            report_file_path: 생성된 보고서 파일 경로
-        
-        Returns:
-            성공 여부
-        """
+        """추천의 보고서 파일 경로 업데이트"""
         try:
-            self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.execute("""
                 UPDATE recommendations 
                 SET report_file_path = ?
                 WHERE id = ?
             """, (report_file_path, recommendation_id))
-            self.conn.commit()
+            conn.commit()
             return True
         except Exception as e:
             logger.error(f"추천 보고서 경로 업데이트 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
     
     def get_recent_recommendation_count(self, user_id: int, trigger_type: str = None, 
                                          hours: int = 1) -> int:
         """지정된 시간 내에 생성된 추천 개수 조회"""
         try:
+            conn = self.get_user_connection(user_id)
             since = datetime.now() - timedelta(hours=hours)
             if trigger_type:
-                cursor = self.conn.execute("""
+                cursor = conn.execute("""
                     SELECT COUNT(*) FROM recommendations
-                    WHERE user_id = ? AND trigger_type = ? AND created_at >= ?
-                """, (user_id, trigger_type, since))
+                    WHERE trigger_type = ? AND created_at >= ?
+                """, (trigger_type, since))
             else:
-                cursor = self.conn.execute("""
+                cursor = conn.execute("""
                     SELECT COUNT(*) FROM recommendations
-                    WHERE user_id = ? AND created_at >= ?
-                """, (user_id, since))
+                    WHERE created_at >= ?
+                """, (since,))
             row = cursor.fetchone()
             return row[0] if row else 0
         except Exception as e:
             logger.error(f"최근 추천 횟수 조회 오류: {e}")
             return 0
 
-    # ============================================================
-    # Chat Messages Methods (Short-term Memory)
-    # ============================================================
+    # =========================================================================
+    # Chat Messages Methods (User DB)
+    # =========================================================================
     
     def log_chat_message(self, user_id: int, role: str, content: str, 
                          metadata: Optional[Dict[str, Any]] = None) -> int:
-        """채팅 메시지 저장 (최대 4000자로 truncate)
-        
-        Args:
-            user_id: 사용자 ID
-            role: 'user' 또는 'assistant'
-            content: 메시지 내용
-            metadata: 추가 메타데이터 (JSON으로 저장)
-        
-        Returns:
-            삽입된 메시지의 ID, 실패 시 -1
-        """
+        """채팅 메시지 저장 (최대 4000자로 truncate)"""
         try:
-            # 4000자로 truncate
+            conn = self.get_user_connection(user_id)
             truncated_content = content[:4000] if content else ""
             metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
             
-            cursor = self.conn.execute("""
-                INSERT INTO chat_messages (user_id, role, content, metadata)
-                VALUES (?, ?, ?, ?)
-            """, (user_id, role, truncated_content, metadata_json))
-            self.conn.commit()
+            cursor = conn.execute("""
+                INSERT INTO chat_messages (role, content, metadata)
+                VALUES (?, ?, ?)
+            """, (role, truncated_content, metadata_json))
+            conn.commit()
             return cursor.lastrowid
         except Exception as e:
             logger.error(f"채팅 메시지 저장 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return -1
     
     def get_recent_chat_messages(self, user_id: int, limit: int = 12) -> List[Dict[str, Any]]:
-        """최근 채팅 메시지 조회 (oldest→newest 순서로 반환)
-        
-        Args:
-            user_id: 사용자 ID
-            limit: 최대 반환 개수
-        
-        Returns:
-            채팅 메시지 리스트 (시간순 정렬)
-        """
+        """최근 채팅 메시지 조회 (oldest→newest 순서로 반환)"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            # 최신순으로 limit개 가져온 후 역순으로 정렬하여 oldest→newest
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
                 SELECT * FROM (
                     SELECT * FROM chat_messages 
-                    WHERE user_id = ? 
                     ORDER BY created_at DESC 
                     LIMIT ?
                 ) ORDER BY created_at ASC
-            """, (user_id, limit))
+            """, (limit,))
             rows = cursor.fetchall()
             
             result = []
             for row in rows:
                 msg = dict(row)
-                # metadata JSON 파싱
                 if msg.get('metadata'):
                     try:
                         msg['metadata'] = json.loads(msg['metadata'])
@@ -1078,98 +1241,93 @@ class SQLite:
             return []
     
     def delete_chat_messages_for_user(self, user_id: int) -> bool:
-        """사용자의 모든 채팅 메시지 삭제
-        
-        Args:
-            user_id: 사용자 ID
-        
-        Returns:
-            성공 여부
-        """
+        """사용자의 모든 채팅 메시지 삭제"""
         try:
-            self.conn.execute("DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
-            self.conn.commit()
+            conn = self.get_user_connection(user_id)
+            conn.execute("DELETE FROM chat_messages")
+            conn.commit()
             logger.info(f"사용자 {user_id}의 채팅 메시지가 삭제되었습니다.")
             return True
         except Exception as e:
             logger.error(f"채팅 메시지 삭제 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
+            conn = self.get_user_connection(user_id)
+            if conn:
+                conn.rollback()
             return False
 
-    # ============================================================
+    # =========================================================================
     # Statistics Methods
-    # ============================================================
+    # =========================================================================
     
     def get_collection_stats(self, user_id: int = None) -> Dict[str, int]:
         """데이터 수집 통계 조회"""
         try:
             stats = {}
             if user_id:
-                cursor = self.conn.execute(
-                    "SELECT COUNT(*) FROM files WHERE user_id = ?", (user_id,)
-                )
+                conn = self.get_user_connection(user_id)
+                cursor = conn.execute("SELECT COUNT(*) FROM files")
                 stats['files'] = cursor.fetchone()[0]
-                cursor = self.conn.execute(
-                    "SELECT COUNT(*) FROM browser_logs WHERE user_id = ?", (user_id,)
-                )
+                cursor = conn.execute("SELECT COUNT(*) FROM browser_logs")
                 stats['browser_logs'] = cursor.fetchone()[0]
-                cursor = self.conn.execute(
-                    "SELECT COUNT(*) FROM content_keywords WHERE user_id = ?", (user_id,)
-                )
+                cursor = conn.execute("SELECT COUNT(*) FROM content_keywords")
                 stats['content_keywords'] = cursor.fetchone()[0]
-                cursor = self.conn.execute(
-                    "SELECT COUNT(*) FROM chat_messages WHERE user_id = ?", (user_id,)
-                )
+                cursor = conn.execute("SELECT COUNT(*) FROM chat_messages")
                 stats['chat_messages'] = cursor.fetchone()[0]
             else:
-                cursor = self.conn.execute("SELECT COUNT(*) FROM files")
-                stats['files'] = cursor.fetchone()[0]
-                cursor = self.conn.execute("SELECT COUNT(*) FROM browser_logs")
-                stats['browser_logs'] = cursor.fetchone()[0]
-                cursor = self.conn.execute("SELECT COUNT(*) FROM content_keywords")
-                stats['content_keywords'] = cursor.fetchone()[0]
-                cursor = self.conn.execute("SELECT COUNT(*) FROM chat_messages")
-                stats['chat_messages'] = cursor.fetchone()[0]
+                # 전체 통계: 모든 사용자 DB 합산
+                stats = {'files': 0, 'browser_logs': 0, 'content_keywords': 0, 'chat_messages': 0}
+                for uid in self.get_all_user_ids_from_files():
+                    user_stats = self.get_collection_stats(uid)
+                    for key in stats:
+                        stats[key] += user_stats.get(key, 0)
             return stats
         except Exception as e:
             logger.error(f"수집 통계 조회 오류: {e}")
             return {}
 
-    # ============================================================
+    # =========================================================================
     # Data Cleanup Methods
-    # ============================================================
+    # =========================================================================
     
     def delete_user_data(self, user_id: int) -> bool:
-        """사용자 관련 모든 데이터 삭제"""
+        """사용자 관련 모든 데이터 삭제 (DB 파일 삭제)"""
         try:
-            tables = [
-                'recommendations', 'recommendation_blacklist', 
-                'browser_logs', 'files', 'content_keywords',
-                'user_interests', 'user_survey_responses', 'chat_messages'
-            ]
-            for table in tables:
-                self.conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
-            self.conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-            self.conn.commit()
+            # 사용자 DB 연결 종료
+            self.close_user_connection(user_id)
+            
+            # 사용자 DB 파일 삭제
+            db_path = self._get_user_db_path(user_id)
+            if os.path.exists(db_path):
+                os.remove(db_path)
+                logger.info(f"사용자 {user_id} DB 파일 삭제됨: {db_path}")
+            
+            # WAL 파일도 삭제
+            wal_path = db_path + "-wal"
+            shm_path = db_path + "-shm"
+            for path in [wal_path, shm_path]:
+                if os.path.exists(path):
+                    os.remove(path)
+            
+            # 마스터 DB에서 사용자 삭제
+            conn = self.get_master_connection()
+            conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            conn.commit()
+            
             logger.info(f"사용자 {user_id}의 모든 데이터가 삭제되었습니다.")
             return True
         except Exception as e:
             logger.error(f"사용자 데이터 삭제 오류: {e}")
-            if self.conn:
-                self.conn.rollback()
             return False
 
-    # ============================================================
-    # Legacy Compatibility Methods (for data_collector.py)
-    # ============================================================
+    # =========================================================================
+    # Legacy Compatibility Methods
+    # =========================================================================
     
     def get_last_browser_collection_time(self, user_id: int, browser_name: str = None) -> Optional[datetime]:
         """마지막 브라우저 히스토리 수집 시간 조회"""
         try:
-            cursor = self.conn.execute("""
-                SELECT MAX(visit_time) FROM browser_logs WHERE user_id = ?
-            """, (user_id,))
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("SELECT MAX(visit_time) FROM browser_logs")
             row = cursor.fetchone()
             if row and row[0]:
                 return datetime.fromisoformat(row[0]) if isinstance(row[0], str) else row[0]
@@ -1179,7 +1337,7 @@ class SQLite:
             return None
     
     def insert_collected_file(self, file_info: Dict[str, Any]) -> bool:
-        """수집된 파일 정보 저장 (Legacy 호환 - 간소화)"""
+        """수집된 파일 정보 저장 (Legacy 호환)"""
         try:
             import hashlib
             file_path = file_info['file_path']
@@ -1194,7 +1352,7 @@ class SQLite:
             return False
     
     def insert_collected_browser_history(self, history_info: Dict[str, Any]) -> Optional[int]:
-        """수집된 브라우저 히스토리 저장 (Legacy 호환 - 간소화)"""
+        """수집된 브라우저 히스토리 저장 (Legacy 호환)"""
         return self.insert_browser_log(
             user_id=history_info['user_id'],
             url=history_info.get('url', ''),
@@ -1203,20 +1361,20 @@ class SQLite:
         )
     
     def get_user_survey_response(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """사용자 설문지 응답 조회 (Legacy 호환 - get_survey_response 래핑)"""
+        """사용자 설문지 응답 조회 (Legacy 호환)"""
         return self.get_survey_response(user_id)
     
     def insert_survey_response(self, user_id: int, survey_data: Dict[str, Any]) -> bool:
-        """설문지 응답 저장 (Legacy 호환 - upsert_survey_response 래핑)"""
+        """설문지 응답 저장 (Legacy 호환)"""
         return self.upsert_survey_response(user_id, survey_data)
     
     def get_unread_recommendations(self, user_id: int) -> List[Dict[str, Any]]:
         """읽지 않은(pending) 추천 목록 조회 (Legacy 호환)"""
         return self.get_pending_recommendations(user_id)
     
-    def mark_recommendation_as_read(self, recommendation_id: int) -> bool:
-        """추천을 읽음으로 표시 (Legacy 호환 - status를 'shown'으로 변경)"""
-        return self.update_recommendation_status(recommendation_id, 'shown')
+    def mark_recommendation_as_read(self, user_id: int, recommendation_id: int) -> bool:
+        """추천을 읽음으로 표시 (Legacy 호환)"""
+        return self.update_recommendation_status(user_id, recommendation_id, 'shown')
     
     def insert_recommendation(self, user_id: int, title: str, content: str, 
                               recommendation_type: str = 'periodic') -> bool:
@@ -1245,12 +1403,13 @@ class SQLite:
     def get_collected_files_since(self, user_id: int, since: datetime) -> List[Dict[str, Any]]:
         """특정 시간 이후의 사용자 파일 목록 조회 (Legacy 호환)"""
         try:
-            self.conn.row_factory = sqlite3.Row
-            cursor = self.conn.execute("""
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
                 SELECT * FROM files
-                WHERE user_id = ? AND processed_at >= ?
+                WHERE processed_at >= ?
                 ORDER BY processed_at DESC
-            """, (user_id, since))
+            """, (since,))
             return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"시간 기반 파일 조회 오류: {e}")

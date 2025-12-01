@@ -80,10 +80,24 @@ async def lifespan(app: FastAPI):
     
     logger.info("🚀 JARVIS Multi-Agent System 시작")
     
-    # 1. SQLite 데이터베이스 초기화
+    # 1. SQLite 데이터베이스 초기화 및 마이그레이션
     try:
-        SQLite()
-        logger.info("✅ SQLite 데이터베이스 초기화 완료")
+        db = SQLite()
+        logger.info("✅ SQLite 마스터 데이터베이스 초기화 완료")
+        
+        # 1-1. 기존 사용자 DB 파일들에 대해 마이그레이션 실행
+        logger.info("📦 기존 사용자 DB 마이그레이션 시작...")
+        migration_result = db.migrate_all_user_dbs()
+        logger.info(
+            f"✅ DB 마이그레이션 완료: "
+            f"총 {migration_result['total']}개, "
+            f"성공 {migration_result['success']}개, "
+            f"실패 {migration_result['failed']}개"
+        )
+        if migration_result['errors']:
+            for error in migration_result['errors']:
+                logger.warning(f"  - {error}")
+                
     except Exception as e:
         logger.error(f"⚠️ 데이터베이스 초기화 오류: {e}")
     
