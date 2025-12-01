@@ -11,6 +11,9 @@ import sys
 import os
 from datetime import datetime
 
+# Theme 임포트
+from theme import COLORS, style_button
+
 # Add the backend directory to Python path for database access
 backend_path = os.path.join(os.path.dirname(__file__), '..', 'backend')
 if backend_path not in sys.path:
@@ -27,7 +30,7 @@ class SurveyDialog:
         self.user_id = user_id
         self.root = tk.Tk()
         self.root.title("JARVIS 초기 설정")
-        self.root.configure(bg='#f8fafc')
+        self.root.configure(bg=COLORS["panel_bg"])
         self.root.resizable(False, False)
         
         # 창을 화면 중앙에 배치 (geometry 설정 전에)
@@ -117,13 +120,13 @@ class SurveyDialog:
     def create_ui(self):
         """UI를 생성합니다."""
         # 메인 컨테이너
-        main_container = tk.Frame(self.root, bg='#f8fafc')
+        main_container = tk.Frame(self.root, bg=COLORS["panel_bg"])
         main_container.pack(fill='both', expand=True, padx=20, pady=20)
         
         # 스크롤 가능한 프레임
-        self.canvas = tk.Canvas(main_container, bg='#f8fafc', highlightthickness=0)
+        self.canvas = tk.Canvas(main_container, bg=COLORS["panel_bg"], highlightthickness=0)
         scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = tk.Frame(self.canvas, bg='#f8fafc')
+        self.scrollable_frame = tk.Frame(self.canvas, bg=COLORS["panel_bg"])
         
         # 스크롤 영역 설정
         self.scrollable_frame.bind(
@@ -141,24 +144,24 @@ class SurveyDialog:
         scrollbar.pack(side="right", fill="y")
         
         # 헤더
-        header_frame = tk.Frame(self.scrollable_frame, bg='white', relief='flat', bd=1)
+        header_frame = tk.Frame(self.scrollable_frame, bg=COLORS["surface"], relief='flat', bd=1)
         header_frame.pack(fill='x', pady=(0, 20))
         
         # 제목
-        title_frame = tk.Frame(header_frame, bg='white')
+        title_frame = tk.Frame(header_frame, bg=COLORS["surface"])
         title_frame.pack(fill='x', padx=30, pady=30)
         
-        icon_label = tk.Label(title_frame, text="🤖", font=('Arial', 32), bg='white', fg='#4f46e5')
+        icon_label = tk.Label(title_frame, text="🤖", font=('Arial', 32), bg=COLORS["surface"], fg=COLORS["primary"])
         icon_label.pack(side='left', padx=(0, 15))
         
-        text_frame = tk.Frame(title_frame, bg='white')
+        text_frame = tk.Frame(title_frame, bg=COLORS["surface"])
         text_frame.pack(side='left', fill='x', expand=True)
         
-        title_label = tk.Label(text_frame, text="JARVIS 초기 설정", font=self.title_font, bg='white', fg='#1f2937')
+        title_label = tk.Label(text_frame, text="JARVIS 초기 설정", font=self.title_font, bg=COLORS["surface"], fg=COLORS["text_primary"])
         title_label.pack(anchor='w')
         
         subtitle_label = tk.Label(text_frame, text="안녕하세요! JARVIS가 당신에게 꼭 맞는 비서가 될 수 있도록 몇 가지만 알려주시겠어요?", 
-                                font=self.subtitle_font, bg='white', fg='#6b7280', wraplength=500, justify='left')
+                                font=self.subtitle_font, bg=COLORS["surface"], fg=COLORS["text_muted"], wraplength=500, justify='left')
         subtitle_label.pack(anchor='w', pady=(5, 0))
         
         # 설문지 내용
@@ -174,27 +177,27 @@ class SurveyDialog:
         
         # 건너뛰기 버튼
         skip_button = tk.Button(button_container, text="건너뛰기", font=self.button_font, 
-                       bg='#e2e8f0', fg='black', relief='flat', bd=0, cursor='hand2',
+                       bg=COLORS["surface_alt"], fg=COLORS["text_primary"], relief='flat', bd=0, cursor='hand2',
                        command=self.skip_survey, width=12, pady=10)
         skip_button.pack(side='left', padx=(0, 10))
 
         # 제출 버튼
         submit_button = tk.Button(button_container, text="제출하기", font=self.button_font,
-                                 bg='#4f46e5', fg='white', relief='flat', bd=0, cursor='hand2',
+                                 bg=COLORS["primary"], fg=COLORS["text_primary"], relief='flat', bd=0, cursor='hand2',
                                  command=self.submit_survey, width=12, pady=10)
         submit_button.pack(side='left', padx=(10, 0))
     
     def create_survey_content(self, parent):
             """설문지 내용을 생성합니다."""
             # 질문 1: 직업/활동 분야
-            q1_frame = tk.Frame(parent, bg='white', relief='flat', bd=1)
+            q1_frame = tk.Frame(parent, bg=COLORS["surface"], relief='flat', bd=1)
             q1_frame.pack(fill='x', pady=(0, 20))
             
-            q1_content = tk.Frame(q1_frame, bg='white')
+            q1_content = tk.Frame(q1_frame, bg=COLORS["surface"])
             q1_content.pack(fill='x', padx=30, pady=20)
             
             q1_label = tk.Label(q1_content, text="1. 현재 당신의 직업 또는 주된 활동 분야는 무엇인가요? (단일 선택)", 
-                                font=self.message_font, bg='white', fg='#1f2937', wraplength=500, justify='left')
+                                font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_primary"], wraplength=500, justify='left')
             q1_label.pack(anchor='w', pady=(0, 15))
             
             # 직업 선택 라디오 버튼들
@@ -210,7 +213,7 @@ class SurveyDialog:
             
             for i, (text, value) in enumerate(job_options):
                 radio = tk.Radiobutton(q1_content, text=text, variable=self.job_var, value=value,
-                                    font=self.message_font, bg='white', fg='#374151',
+                                    font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_secondary"],
                                     selectcolor='#ffffff', # 라디오 버튼은 그대로 두거나 흰색으로 변경
                                     activebackground='white',
                                     activeforeground='#374151', indicatoron=True, 
@@ -219,21 +222,21 @@ class SurveyDialog:
             
             # 기타 직접 입력 필드
             self.job_other_entry = tk.Entry(q1_content, font=self.message_font, relief='solid', 
-                                            borderwidth=1, bg='#f9fafb')
+                                            borderwidth=1, bg=COLORS["surface_alt"])
             # Initially hidden using pack_forget()
             self.job_other_entry.pack(fill='x', pady=(10, 0))
             self.job_other_entry.config(state='disabled')
             self.job_other_entry.pack_forget()
             
             # 질문 2: 관심 주제
-            q2_frame = tk.Frame(parent, bg='white', relief='flat', bd=1)
+            q2_frame = tk.Frame(parent, bg=COLORS["surface"], relief='flat', bd=1)
             q2_frame.pack(fill='x', pady=(0, 20))
             
-            q2_content = tk.Frame(q2_frame, bg='white')
+            q2_content = tk.Frame(q2_frame, bg=COLORS["surface"])
             q2_content.pack(fill='x', padx=30, pady=20)
             
             q2_label = tk.Label(q2_content, text="2. 요즘 가장 흥미를 느끼는 주제는 무엇인가요? (최대 3개 선택)", 
-                                font=self.message_font, bg='white', fg='#1f2937', wraplength=500, justify='left')
+                                font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_primary"], wraplength=500, justify='left')
             q2_label.pack(anchor='w', pady=(0, 15))
             
             # 관심 주제 체크박스들
@@ -253,20 +256,20 @@ class SurveyDialog:
                 var = tk.BooleanVar()
                 self.interest_vars[value] = var
                 checkbox = tk.Checkbutton(q2_content, text=text, variable=var,
-                                        font=self.message_font, bg='white', fg='#374151',
+                                        font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_secondary"],
                                         activebackground='white',
                                         activeforeground='#374151', indicatoron=True) # selectcolor 제거
                 checkbox.pack(anchor='w', pady=2)
             
             # 질문 3: 도움 받고 싶은 영역
-            q3_frame = tk.Frame(parent, bg='white', relief='flat', bd=1)
+            q3_frame = tk.Frame(parent, bg=COLORS["surface"], relief='flat', bd=1)
             q3_frame.pack(fill='x', pady=(0, 20))
             
-            q3_content = tk.Frame(q3_frame, bg='white')
+            q3_content = tk.Frame(q3_frame, bg=COLORS["surface"])
             q3_content.pack(fill='x', padx=30, pady=20)
             
             q3_label = tk.Label(q3_content, text="3. JARVIS를 통해 주로 어떤 도움을 받고 싶으신가요? (최대 2개 선택)", 
-                                font=self.message_font, bg='white', fg='#1f2937', wraplength=500, justify='left')
+                                font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_primary"], wraplength=500, justify='left')
             q3_label.pack(anchor='w', pady=(0, 15))
             
             # 도움 영역 체크박스들
@@ -282,28 +285,28 @@ class SurveyDialog:
                 var = tk.BooleanVar()
                 self.help_vars[value] = var
                 checkbox = tk.Checkbutton(q3_content, text=text, variable=var,
-                                        font=self.message_font, bg='white', fg='#374151',
+                                        font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_secondary"],
                                         activebackground='white',
                                         activeforeground='#374151', indicatoron=True) # selectcolor 제거
                 checkbox.pack(anchor='w', pady=2)
             
             # 질문 4: 사용자 정의 키워드
-            q4_frame = tk.Frame(parent, bg='white', relief='flat', bd=1)
+            q4_frame = tk.Frame(parent, bg=COLORS["surface"], relief='flat', bd=1)
             q4_frame.pack(fill='x', pady=(0, 20))
             
-            q4_content = tk.Frame(q4_frame, bg='white')
+            q4_content = tk.Frame(q4_frame, bg=COLORS["surface"])
             q4_content.pack(fill='x', padx=30, pady=20)
             
             q4_label = tk.Label(q4_content, text="4. 그 외에 특별히 자주 찾아보거나 배우고 싶은 키워드가 있다면 자유롭게 알려주세요. (선택 사항)", 
-                                font=self.message_font, bg='white', fg='#1f2937', wraplength=500, justify='left')
+                                font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_primary"], wraplength=500, justify='left')
             q4_label.pack(anchor='w', pady=(0, 10))
             
             example_label = tk.Label(q4_content, text="(예: 딥러닝, NFT, 행동경제학, 클린 아키텍처)", 
-                                    font=self.message_font, bg='white', fg='#6b7280', wraplength=500, justify='left')
+                                    font=self.message_font, bg=COLORS["surface"], fg=COLORS["text_muted"], wraplength=500, justify='left')
             example_label.pack(anchor='w', pady=(0, 10))
             
             self.custom_keywords_entry = tk.Entry(q4_content, font=self.message_font, relief='solid', 
-                                                borderwidth=1, bg='#f9fafb')
+                                                borderwidth=1, bg=COLORS["surface_alt"])
             self.custom_keywords_entry.pack(fill='x')
     
     def _on_frame_configure(self, event):

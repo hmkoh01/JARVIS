@@ -15,6 +15,9 @@ import time
 import sys
 import os
 
+# Theme 임포트
+from theme import COLORS, style_button
+
 # keyring 라이브러리 임포트
 try:
     import keyring
@@ -295,7 +298,7 @@ class LoginWindow:
         self.root = tk.Tk()
         self.root.title("JARVIS 로그인")
         self.root.geometry("600x400")
-        self.root.configure(bg='white')
+        self.root.configure(bg=COLORS["surface"])
         
         # 화면 중앙에 배치
         self.center_window()
@@ -358,7 +361,7 @@ class LoginWindow:
     def create_widgets(self):
         """UI 위젯 생성"""
         # 헤더
-        header_frame = tk.Frame(self.root, bg='#4f46e5', height=80)
+        header_frame = tk.Frame(self.root, bg=COLORS["primary"], height=80)
         header_frame.pack(fill='x')
         header_frame.pack_propagate(False)
         
@@ -366,13 +369,13 @@ class LoginWindow:
             header_frame,
             text="JARVIS",
             font=self.title_font,
-            bg='#4f46e5',
-            fg='white'
+            bg=COLORS["primary"],
+            fg=COLORS["text_inverse"]
         )
         title_label.pack(pady=20)
         
         # 본문
-        content_frame = tk.Frame(self.root, bg='white')
+        content_frame = tk.Frame(self.root, bg=COLORS["surface"])
         content_frame.pack(fill='both', expand=True, padx=40, pady=40)
         
         # 안내 텍스트
@@ -380,8 +383,8 @@ class LoginWindow:
             content_frame,
             text="Google 계정으로 로그인하여\nJARVIS를 사용하세요",
             font=self.subtitle_font,
-            bg='white',
-            fg='#666',
+            bg=COLORS["surface"],
+            fg=COLORS["text_secondary"],
             justify='center'
         )
         info_label.pack(pady=(20, 40))
@@ -407,8 +410,8 @@ class LoginWindow:
             content_frame,
             text="",
             font=self.status_font,
-            bg='white',
-            fg='#666'
+            bg=COLORS["surface"],
+            fg=COLORS["text_muted"]
         )
         self.status_label.pack(pady=10)
     

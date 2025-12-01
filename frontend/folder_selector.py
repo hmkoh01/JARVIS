@@ -8,6 +8,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import requests
 import threading
+
+# Theme 임포트
+from theme import COLORS, style_button
 import time
 import logging
 import queue  # 1. 스레드 간 안전한 통신을 위해 queue 모듈 추가
@@ -22,7 +25,7 @@ class FolderSelector:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("JARVIS - 폴더 선택")
-        self.root.configure(bg='#f8fafc')
+        self.root.configure(bg=COLORS["panel_bg"])
         self.root.resizable(True, True)
         self.root.minsize(750, 650)
         
@@ -123,46 +126,46 @@ class FolderSelector:
         # ======================================================================
         # 이 함수는 사용자가 제공한 원본 UI 코드와 100% 동일합니다.
         # ======================================================================
-        main_container = tk.Frame(self.root, bg='#f8fafc')
+        main_container = tk.Frame(self.root, bg=COLORS["panel_bg"])
         main_container.pack(fill='both', expand=True)
-        center_frame = tk.Frame(main_container, bg='#f8fafc')
+        center_frame = tk.Frame(main_container, bg=COLORS["panel_bg"])
         center_frame.pack(expand=True, fill='both')
-        main_frame = tk.Frame(center_frame, bg='white', relief='flat', bd=0)
+        main_frame = tk.Frame(center_frame, bg=COLORS["surface"], relief='flat', bd=0)
         main_frame.pack(expand=True, fill='both', padx=40, pady=40)
-        shadow_frame = tk.Frame(main_frame, bg='#e2e8f0', height=2)
+        shadow_frame = tk.Frame(main_frame, bg=COLORS["border"], height=2)
         shadow_frame.pack(fill='x', side='bottom')
-        header_frame = tk.Frame(main_frame, bg='white')
+        header_frame = tk.Frame(main_frame, bg=COLORS["surface"])
         header_frame.pack(fill='x', padx=30, pady=(30, 20))
-        title_frame = tk.Frame(header_frame, bg='white')
+        title_frame = tk.Frame(header_frame, bg=COLORS["surface"])
         title_frame.pack(fill='x')
-        icon_label = tk.Label(title_frame, text="📁", font=('Arial', 32), bg='white', fg='#4f46e5')
+        icon_label = tk.Label(title_frame, text="📁", font=('Arial', 32), bg=COLORS["surface"], fg=COLORS["primary"])
         icon_label.pack(side='left', padx=(0, 15))
-        text_frame = tk.Frame(title_frame, bg='white')
+        text_frame = tk.Frame(title_frame, bg=COLORS["surface"])
         text_frame.pack(side='left', fill='x', expand=True)
-        title_label = tk.Label(text_frame, text="JARVIS 파일 수집", font=(self.default_font, 24, 'bold'), bg='white', fg='#1f2937')
+        title_label = tk.Label(text_frame, text="JARVIS 파일 수집", font=(self.default_font, 24, 'bold'), bg=COLORS["surface"], fg=COLORS["text_primary"])
         title_label.pack(anchor='w')
-        subtitle_label = tk.Label(text_frame, text="폴더 선택", font=(self.default_font, 16), bg='white', fg='#6b7280')
+        subtitle_label = tk.Label(text_frame, text="폴더 선택", font=(self.default_font, 16), bg=COLORS["surface"], fg=COLORS["text_muted"])
         subtitle_label.pack(anchor='w')
-        desc_frame = tk.Frame(main_frame, bg='white')
+        desc_frame = tk.Frame(main_frame, bg=COLORS["surface"])
         desc_frame.pack(fill='x', padx=30, pady=(0, 25))
-        desc_label = tk.Label(main_frame, text="파일 수집할 폴더를 선택하세요.\n사용자 폴더 내의 주요 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=(self.default_font, 12), bg='white', fg='#6b7280', wraplength=650, justify='left')
+        desc_label = tk.Label(main_frame, text="파일 수집할 폴더를 선택하세요.\n사용자 폴더 내의 주요 폴더들이 표시됩니다.\n선택하지 않으면 전체 폴더를 스캔합니다.", font=(self.default_font, 12), bg=COLORS["surface"], fg=COLORS["text_muted"], wraplength=650, justify='left')
         desc_label.pack(anchor='w', in_=desc_frame)
-        list_container = tk.Frame(main_frame, bg='white')
+        list_container = tk.Frame(main_frame, bg=COLORS["surface"])
         list_container.pack(fill='both', expand=True, padx=30, pady=(0, 25))
-        list_header = tk.Frame(list_container, bg='#f8fafc', relief='flat', bd=1)
+        list_header = tk.Frame(list_container, bg=COLORS["panel_bg"], relief='flat', bd=1)
         list_header.pack(fill='x', pady=(0, 10))
-        header_label = tk.Label(list_header, text="📂 사용 가능한 폴더", font=(self.default_font, 14, 'bold'), bg='#f8fafc', fg='#374151', pady=10)
+        header_label = tk.Label(list_header, text="📂 사용 가능한 폴더", font=(self.default_font, 14, 'bold'), bg=COLORS["panel_bg"], fg=COLORS["text_secondary"], pady=10)
         header_label.pack(side='left', padx=15)
-        list_frame = tk.Frame(list_container, bg='#f8fafc', relief='flat', bd=1)
+        list_frame = tk.Frame(list_container, bg=COLORS["panel_bg"], relief='flat', bd=1)
         list_frame.pack(fill='both', expand=True)
         scrollbar = ttk.Scrollbar(list_frame, orient='vertical')
         scrollbar.pack(side='right', fill='y', padx=(0, 5), pady=5)
-        self.folder_listbox = tk.Listbox(list_frame, font=(self.default_font, 11), selectmode='multiple', yscrollcommand=scrollbar.set, bg='white', fg='#1f2937', selectbackground='#4f46e5', selectforeground='white', relief='flat', bd=0, highlightthickness=0, activestyle='none', height=12)
+        self.folder_listbox = tk.Listbox(list_frame, font=(self.default_font, 11), selectmode='multiple', yscrollcommand=scrollbar.set, bg=COLORS["surface"], fg=COLORS["text_primary"], selectbackground=COLORS["primary"], selectforeground=COLORS["text_inverse"], relief='flat', bd=0, highlightthickness=0, activestyle='none', height=12)
         self.folder_listbox.pack(side='left', fill='both', expand=True, padx=5, pady=5)
         scrollbar.config(command=self.folder_listbox.yview)
 
         # --- 버튼 UI 개선 ---
-        button_container = tk.Frame(main_frame, bg='white')
+        button_container = tk.Frame(main_frame, bg=COLORS["surface"])
         button_container.pack(fill='x', padx=30, pady=(0, 30))
         button_container.columnconfigure([0, 1, 2, 3, 4], weight=1)
 
@@ -177,38 +180,33 @@ class FolderSelector:
         }
         
         # 1. 새로고침
-        refresh_button = tk.Button(button_container, text="🔄 새로고침", **button_style,
-                                    bg='#e2e8f0', fg='#334155', activebackground='#cbd5e1', activeforeground='#334155',
-                                    command=self.load_folders)
+        refresh_button = tk.Button(button_container, text="🔄 새로고침", **button_style, command=self.load_folders)
+        style_button(refresh_button, variant="secondary")
         refresh_button.grid(row=0, column=0, sticky='ew', padx=4)
 
         # 2. 전체 선택
-        select_all_button = tk.Button(button_container, text="✅ 전체 선택", **button_style,
-                                       bg='#3b82f6', fg='white', activebackground='#2563eb', activeforeground='white',
-                                       command=self.select_all_folders)
+        select_all_button = tk.Button(button_container, text="✅ 전체 선택", **button_style, command=self.select_all_folders)
+        style_button(select_all_button, variant="primary")
         select_all_button.grid(row=0, column=1, sticky='ew', padx=4)
 
         # 3. 선택 해제
-        deselect_all_button = tk.Button(button_container, text="❌ 선택 해제", **button_style,
-                                         bg='#e2e8f0', fg='#334155', activebackground='#cbd5e1', activeforeground='#334155',
-                                         command=self.deselect_all_folders)
+        deselect_all_button = tk.Button(button_container, text="❌ 선택 해제", **button_style, command=self.deselect_all_folders)
+        style_button(deselect_all_button, variant="ghost")
         deselect_all_button.grid(row=0, column=2, sticky='ew', padx=4)
 
         # 4. 전체 스캔
-        full_scan_button = tk.Button(button_container, text="💾 전체 스캔", **button_style,
-                                     bg='#8b5cf6', fg='white', activebackground='#7c3aed', activeforeground='white',
-                                     command=self.select_full_drive)
+        full_scan_button = tk.Button(button_container, text="💾 전체 스캔", **button_style, command=self.select_full_drive)
+        style_button(full_scan_button, variant="primary")
         full_scan_button.grid(row=0, column=3, sticky='ew', padx=4)
 
         # 5. 시작하기 (메인 액션)
-        confirm_button = tk.Button(button_container, text="🚀 시작하기", **button_style,
-                                    bg='#4f46e5', fg='white', activebackground='#4338ca', activeforeground='white',
-                                    command=self.confirm_selection)
+        confirm_button = tk.Button(button_container, text="🚀 시작하기", **button_style, command=self.confirm_selection)
+        style_button(confirm_button, variant="primary")
         confirm_button.grid(row=0, column=4, sticky='ew', padx=4)
         
-        status_frame = tk.Frame(main_frame, bg='#f0f9ff', relief='flat', bd=1)
+        status_frame = tk.Frame(main_frame, bg=COLORS["info_bg"], relief='flat', bd=1)
         status_frame.pack(fill='x', padx=30, pady=(20, 30))
-        self.status_label = tk.Label(status_frame, text="⏳ 폴더 목록을 불러오는 중...", font=(self.default_font, 11), bg='#f0f9ff', fg='#0369a1', pady=12)
+        self.status_label = tk.Label(status_frame, text="⏳ 폴더 목록을 불러오는 중...", font=(self.default_font, 11), bg=COLORS["info_bg"], fg=COLORS["info_text"], pady=12)
         self.status_label.pack()
 
     def load_folders(self):

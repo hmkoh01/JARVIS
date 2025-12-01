@@ -16,6 +16,78 @@ import platform
 import subprocess  # 파일/폴더 열기용
 import websocket  # WebSocket 클라이언트
 
+# ---------------------------------------------------------------------------
+# Global theme configuration
+# ---------------------------------------------------------------------------
+COLORS = {
+    "surface": "#FFFFFF",
+    "surface_alt": "#F9FAFB",
+    "panel_bg": "#F3F4F6",
+    "primary": "#4F46E5",
+    "primary_dark": "#4338CA",
+    "primary_soft": "#EEF2FF",
+    "text_primary": "#111827",
+    "text_secondary": "#374151",
+    "text_muted": "#6B7280",
+    "text_inverse": "#FFFFFF",
+    "border": "#E5E7EB",
+    "info_bg": "#E0F2FE",
+    "info_text": "#0F172A",
+    "success_bg": "#ECFDF5",
+    "success_text": "#166534",
+    "danger_bg": "#FEE2E2",
+    "danger_text": "#B91C1C",
+    "button_disabled_bg": "#E5E7EB",
+    "button_disabled_text": "#9CA3AF",
+}
+
+STATUS_BADGE_STYLES = {
+    "pending": {"bg": "#FEF3C7", "fg": "#92400E"},
+    "accepted": {"bg": COLORS["success_bg"], "fg": COLORS["success_text"]},
+    "rejected": {"bg": "#E5E7EB", "fg": COLORS["text_secondary"]},
+    "shown": {"bg": "#DBEAFE", "fg": "#1D4ED8"},
+    "completed": {"bg": COLORS["success_bg"], "fg": COLORS["success_text"]},
+    "default": {"bg": COLORS["border"], "fg": COLORS["text_secondary"]},
+}
+
+BUTTON_STYLES = {
+    "primary": {
+        "bg": COLORS["primary"],
+        "fg": COLORS["text_inverse"],
+        "active_bg": COLORS["primary_dark"],
+        "active_fg": COLORS["text_inverse"],
+        "disabled_bg": COLORS["button_disabled_bg"],
+        "disabled_fg": COLORS["button_disabled_text"],
+    },
+    "secondary": {
+        "bg": COLORS["surface_alt"],
+        "fg": COLORS["text_primary"],
+        "active_bg": COLORS["border"],
+        "active_fg": COLORS["text_primary"],
+        "border_color": COLORS["border"],
+        "disabled_bg": COLORS["button_disabled_bg"],
+        "disabled_fg": COLORS["button_disabled_text"],
+    },
+    "ghost": {
+        "bg": COLORS["surface"],
+        "fg": COLORS["text_secondary"],
+        "active_bg": COLORS["surface_alt"],
+        "active_fg": COLORS["text_primary"],
+        "border_color": COLORS["border"],
+        "disabled_bg": COLORS["button_disabled_bg"],
+        "disabled_fg": COLORS["button_disabled_text"],
+    },
+    "danger": {
+        "bg": COLORS["danger_bg"],
+        "fg": COLORS["danger_text"],
+        "active_bg": "#FCA5A5",
+        "active_fg": COLORS["danger_text"],
+        "border_color": COLORS["danger_bg"],
+        "disabled_bg": COLORS["button_disabled_bg"],
+        "disabled_fg": COLORS["button_disabled_text"],
+    },
+}
+
 class FloatingChatApp:
     def __init__(self):
         self.root = tk.Tk()
@@ -150,6 +222,47 @@ class FloatingChatApp:
             window.attributes('-topmost', True)
             # 추가로 윈도우를 다시 올림
             window.after(100, lambda: window.lift() if window.winfo_exists() else None)
+
+    def _get_status_badge_style(self, status: str) -> dict:
+        """상태별 배지 색상을 반환합니다."""
+        return STATUS_BADGE_STYLES.get(status, STATUS_BADGE_STYLES["default"])
+
+    def _style_button(self, button: tk.Button, variant: str = "primary", disabled: bool = False):
+        """버튼에 일관된 테마 스타일을 적용합니다."""
+        style = BUTTON_STYLES.get(variant, BUTTON_STYLES["primary"]).copy()
+        config = {
+            "relief": 'flat',
+            "bd": 0,
+        }
+        border_color = style.get("border_color")
+        border_width = style.get("border_width", 1 if border_color else 0)
+        if border_color:
+            config.update({
+                "highlightbackground": border_color,
+                "highlightcolor": border_color,
+                "highlightthickness": border_width,
+            })
+        else:
+            config["highlightthickness"] = 0
+        
+        if disabled:
+            config.update({
+                "bg": style.get("disabled_bg", COLORS["button_disabled_bg"]),
+                "fg": style.get("disabled_fg", COLORS["button_disabled_text"]),
+                "state": 'disabled',
+                "cursor": 'arrow',
+            })
+        else:
+            config.update({
+                "bg": style.get("bg", COLORS["primary"]),
+                "fg": style.get("fg", COLORS["text_inverse"]),
+                "activebackground": style.get("active_bg", style.get("bg", COLORS["primary"])),
+                "activeforeground": style.get("active_fg", style.get("fg", COLORS["text_inverse"])),
+                "state": 'normal',
+                "cursor": 'hand2',
+            })
+        
+        button.configure(**config)
     
     def process_message_queue(self):
         """메시지 큐를 처리합니다. - 메인 스레드에서만 GUI 업데이트"""
@@ -269,8 +382,8 @@ class FloatingChatApp:
         # 동그란 버튼 그리기 (더 크게)
         self.button_canvas.create_oval(
             3, 3, 67, 67,
-            fill='#4f46e5',
-            outline='#4f46e5',
+            fill=COLORS["primary"],
+            outline=COLORS["primary"],
             tags='button'
         )
         
@@ -304,11 +417,11 @@ class FloatingChatApp:
         
     def on_hover(self, event):
         """호버 효과"""
-        self.button_canvas.itemconfig('button', fill='#4338ca')
+        self.button_canvas.itemconfig('button', fill=COLORS["primary_dark"])
         
     def on_leave(self, event):
         """호버 해제"""
-        self.button_canvas.itemconfig('button', fill='#4f46e5')
+        self.button_canvas.itemconfig('button', fill=COLORS["primary"])
         
     def on_drag(self, event):
         """드래그 중"""
@@ -395,12 +508,12 @@ class FloatingChatApp:
     
         
         # 헤더 (높이 증가)
-        header_frame = tk.Frame(self.chat_window, bg='#4f46e5', height=100)
+        header_frame = tk.Frame(self.chat_window, bg=COLORS["primary"], height=100)
         header_frame.pack(fill='x', padx=0, pady=0)
         header_frame.pack_propagate(False)
         
         # 제목과 부제목을 담을 프레임
-        title_container = tk.Frame(header_frame, bg='#4f46e5')
+        title_container = tk.Frame(header_frame, bg=COLORS["primary"])
         title_container.pack(side='left', fill='both', expand=True, padx=20, pady=15)
         
         # 제목
@@ -408,8 +521,8 @@ class FloatingChatApp:
             title_container,
             text="JARVIS AI Assistant",
             font=self.title_font,
-            bg='#4f46e5',
-            fg='white'
+            bg=COLORS["primary"],
+            fg=COLORS["text_inverse"]
         )
         title_label.pack(anchor='w')
         
@@ -419,12 +532,12 @@ class FloatingChatApp:
             text="Multi-Agent System",
             font=self.subtitle_font,
             bg='#4f46e5',
-            fg='#e0e7ff'
+            fg=COLORS["primary_soft"]
         )
         subtitle_label.pack(anchor='w', pady=(5, 0))
         
         # --- 버튼 컨테이너 ---
-        buttons_container = tk.Frame(header_frame, bg='#4f46e5')
+        buttons_container = tk.Frame(header_frame, bg=COLORS["primary"])
         buttons_container.pack(side='right', padx=15, pady=25)
 
         # 추천 내역 버튼
@@ -432,8 +545,8 @@ class FloatingChatApp:
             buttons_container,
             text="💡",
             font=('Arial', 18),
-            bg='#4f46e5',
-            fg='white',
+            bg=COLORS["primary"],
+            fg=COLORS["text_primary"],
             relief='flat',
             cursor='hand2',
             command=self.open_recommendation_window,
@@ -447,8 +560,8 @@ class FloatingChatApp:
             buttons_container,
             text="⚙️",
             font=('Arial', 18),
-            bg='#4f46e5',
-            fg='white',
+            bg=COLORS["primary"],
+            fg=COLORS["text_primary"],
             relief='flat',
             cursor='hand2',
             command=self.show_settings_menu,
@@ -505,7 +618,7 @@ class FloatingChatApp:
             font=self.input_font,
             relief='solid',
             borderwidth=2,
-            bg='#f9fafb',
+            bg=COLORS["surface_alt"],
             fg='black'  # 글자색을 검은색으로 설정
         )
         self.message_input.pack(side='left', fill='x', expand=True, padx=(0, 15))
@@ -516,16 +629,11 @@ class FloatingChatApp:
             input_frame,
             text="전송",
             font=self.button_font,
-            bg='#4F46E5',
-            fg='white',
-            activebackground='#4338CA',
-            activeforeground='white',
-            relief='flat',
-            cursor='hand2',
             command=self.send_message,
             width=8,
             height=2
         )
+        self._style_button(send_button, variant="primary")
         send_button.pack(side='right')
         
         # 초기 메시지
@@ -542,7 +650,7 @@ class FloatingChatApp:
         rec_window = tk.Toplevel(self.chat_window)
         rec_window.title("JARVIS 추천 내역")
         rec_window.geometry("650x600")
-        rec_window.configure(bg='white')
+        rec_window.configure(bg=COLORS["surface"])
         rec_window.attributes('-topmost', True)
         
         # 페이지네이션 상태 저장
@@ -551,7 +659,7 @@ class FloatingChatApp:
         rec_window.items_per_page = 5
 
         # --- 상단 프레임: 제목 ---
-        top_frame = tk.Frame(rec_window, bg='#4f46e5', height=60)
+        top_frame = tk.Frame(rec_window, bg=COLORS["primary"], height=60)
         top_frame.pack(fill='x')
         top_frame.pack_propagate(False)
 
@@ -559,19 +667,19 @@ class FloatingChatApp:
             top_frame, 
             text="💡 추천 히스토리", 
             font=(self.default_font, 16, 'bold'), 
-            bg='#4f46e5', 
-            fg='white'
+            bg=COLORS["primary"], 
+            fg=COLORS["text_inverse"]
         )
         title_label.pack(side='left', padx=20, pady=15)
 
         # --- 카드 목록 영역 (Canvas + Frame + Scrollbar) ---
-        cards_container = tk.Frame(rec_window, bg='#f9fafb')
+        cards_container = tk.Frame(rec_window, bg=COLORS["panel_bg"])
         cards_container.pack(fill='both', expand=True, padx=15, pady=10)
         
         # Canvas와 Scrollbar 설정
-        cards_canvas = tk.Canvas(cards_container, bg='#f9fafb', highlightthickness=0)
+        cards_canvas = tk.Canvas(cards_container, bg=COLORS["panel_bg"], highlightthickness=0)
         cards_scrollbar = ttk.Scrollbar(cards_container, orient="vertical", command=cards_canvas.yview)
-        cards_frame = tk.Frame(cards_canvas, bg='#f9fafb')
+        cards_frame = tk.Frame(cards_canvas, bg=COLORS["panel_bg"])
         
         cards_canvas_window = cards_canvas.create_window((0, 0), window=cards_frame, anchor="nw")
         
@@ -629,7 +737,7 @@ class FloatingChatApp:
         rec_window.on_cards_mousewheel = on_cards_mousewheel
 
         # --- 하단 페이지네이션 프레임 ---
-        pagination_frame = tk.Frame(rec_window, bg='white', height=50)
+        pagination_frame = tk.Frame(rec_window, bg=COLORS["surface"], height=50)
         pagination_frame.pack(fill='x', padx=15, pady=(0, 10))
         pagination_frame.pack_propagate(False)
         
@@ -638,15 +746,11 @@ class FloatingChatApp:
             pagination_frame,
             text="◀ 이전",
             font=(self.default_font, 10),
-            bg='#e5e7eb',
-            fg='#374151',
-            relief='flat',
-            cursor='hand2',
             padx=15,
             pady=5,
-            state='disabled',
             command=lambda: self._change_recommendation_page(rec_window, -1)
         )
+        self._style_button(prev_btn, variant="secondary", disabled=True)
         prev_btn.pack(side='left', padx=(0, 10))
         rec_window.prev_btn = prev_btn
         
@@ -655,8 +759,8 @@ class FloatingChatApp:
             pagination_frame,
             text="",
             font=(self.default_font, 10),
-            bg='white',
-            fg='#6b7280'
+            bg=COLORS["surface"],
+            fg=COLORS["text_muted"]
         )
         page_label.pack(side='left', expand=True)
         rec_window.page_label = page_label
@@ -666,15 +770,11 @@ class FloatingChatApp:
             pagination_frame,
             text="다음 ▶",
             font=(self.default_font, 10),
-            bg='#e5e7eb',
-            fg='#374151',
-            relief='flat',
-            cursor='hand2',
             padx=15,
             pady=5,
-            state='disabled',
             command=lambda: self._change_recommendation_page(rec_window, 1)
         )
+        self._style_button(next_btn, variant="secondary", disabled=True)
         next_btn.pack(side='right', padx=(10, 0))
         rec_window.next_btn = next_btn
 
@@ -727,23 +827,29 @@ class FloatingChatApp:
         for widget in cards_frame.winfo_children():
             widget.destroy()
         
-        loading_frame = tk.Frame(cards_frame, bg='#f9fafb')
+        loading_frame = tk.Frame(cards_frame, bg=COLORS["panel_bg"])
         loading_frame.pack(fill='both', expand=True, pady=100)
         
         tk.Label(
             loading_frame,
             text="⏳",
             font=('Arial', 32),
-            bg='#f9fafb'
+            bg=COLORS["panel_bg"]
         ).pack()
         
         tk.Label(
             loading_frame,
             text="추천 내역을 불러오는 중...",
             font=(self.default_font, 12),
-            bg='#f9fafb',
-            fg='#6b7280'
+            bg=COLORS["panel_bg"],
+            fg=COLORS["text_muted"]
         ).pack(pady=(10, 0))
+
+        rec_window.page_label.config(text="")
+        rec_window.prev_btn.config(state='disabled')
+        rec_window.next_btn.config(state='disabled')
+        self._style_button(rec_window.prev_btn, variant="secondary", disabled=True)
+        self._style_button(rec_window.next_btn, variant="secondary", disabled=True)
 
     def _show_recommendation_empty(self, rec_window):
         """빈 상태를 표시합니다."""
@@ -751,36 +857,38 @@ class FloatingChatApp:
         for widget in cards_frame.winfo_children():
             widget.destroy()
         
-        empty_frame = tk.Frame(cards_frame, bg='#f9fafb')
+        empty_frame = tk.Frame(cards_frame, bg=COLORS["panel_bg"])
         empty_frame.pack(fill='both', expand=True, pady=100)
         
         tk.Label(
             empty_frame,
             text="💭",
             font=('Arial', 48),
-            bg='#f9fafb'
+            bg=COLORS["panel_bg"]
         ).pack()
         
         tk.Label(
             empty_frame,
             text="아직 추천이 없어요",
             font=(self.default_font, 14, 'bold'),
-            bg='#f9fafb',
-            fg='#374151'
+            bg=COLORS["panel_bg"],
+            fg=COLORS["text_secondary"]
         ).pack(pady=(15, 5))
         
         tk.Label(
             empty_frame,
             text="활동을 계속하면 맞춤형 추천을 준비해 드릴게요!",
             font=(self.default_font, 11),
-            bg='#f9fafb',
-            fg='#9ca3af'
+            bg=COLORS["panel_bg"],
+            fg=COLORS["text_muted"]
         ).pack()
         
         # 페이지네이션 숨기기
         rec_window.page_label.config(text="")
         rec_window.prev_btn.config(state='disabled')
         rec_window.next_btn.config(state='disabled')
+        self._style_button(rec_window.prev_btn, variant="secondary", disabled=True)
+        self._style_button(rec_window.next_btn, variant="secondary", disabled=True)
 
     def _show_recommendation_error(self, rec_window, error_msg):
         """에러 상태를 표시합니다."""
@@ -788,30 +896,30 @@ class FloatingChatApp:
         for widget in cards_frame.winfo_children():
             widget.destroy()
         
-        error_frame = tk.Frame(cards_frame, bg='#fef2f2', padx=20, pady=20)
+        error_frame = tk.Frame(cards_frame, bg=COLORS["danger_bg"], padx=20, pady=20)
         error_frame.pack(fill='x', padx=20, pady=50)
         
         tk.Label(
             error_frame,
             text="❌",
             font=('Arial', 24),
-            bg='#fef2f2'
+            bg=COLORS["danger_bg"]
         ).pack()
         
         tk.Label(
             error_frame,
             text="오류가 발생했습니다",
             font=(self.default_font, 12, 'bold'),
-            bg='#fef2f2',
-            fg='#991b1b'
+            bg=COLORS["danger_bg"],
+            fg=COLORS["danger_text"]
         ).pack(pady=(10, 5))
         
         tk.Label(
             error_frame,
             text=error_msg,
             font=(self.default_font, 10),
-            bg='#fef2f2',
-            fg='#dc2626',
+            bg=COLORS["danger_bg"],
+            fg=COLORS["danger_text"],
             wraplength=400
         ).pack()
         
@@ -819,6 +927,8 @@ class FloatingChatApp:
         rec_window.page_label.config(text="")
         rec_window.prev_btn.config(state='disabled')
         rec_window.next_btn.config(state='disabled')
+        self._style_button(rec_window.prev_btn, variant="secondary", disabled=True)
+        self._style_button(rec_window.next_btn, variant="secondary", disabled=True)
 
     def _render_recommendation_cards(self, rec_window, recommendations):
         """추천 카드들을 렌더링합니다."""
@@ -852,8 +962,12 @@ class FloatingChatApp:
         
         # 페이지네이션 업데이트
         rec_window.page_label.config(text=f"{current_page + 1} / {total_pages} 페이지 (총 {total_items}개)")
-        rec_window.prev_btn.config(state='normal' if current_page > 0 else 'disabled')
-        rec_window.next_btn.config(state='normal' if current_page < total_pages - 1 else 'disabled')
+        prev_enabled = current_page > 0
+        next_enabled = current_page < total_pages - 1
+        rec_window.prev_btn.config(state='normal' if prev_enabled else 'disabled')
+        rec_window.next_btn.config(state='normal' if next_enabled else 'disabled')
+        self._style_button(rec_window.prev_btn, variant="secondary", disabled=not prev_enabled)
+        self._style_button(rec_window.next_btn, variant="secondary", disabled=not next_enabled)
         
         # 스크롤 맨 위로
         rec_window.cards_canvas.yview_moveto(0)
@@ -882,25 +996,32 @@ class FloatingChatApp:
         date_str = dt.strftime('%Y-%m-%d %H:%M')
         
         # 상태 텍스트/색상
-        status_config = {
-            'pending': ('대기', '#f59e0b', '#fef3c7'),
-            'accepted': ('수락', '#10b981', '#d1fae5'),
-            'rejected': ('거절', '#6b7280', '#e5e7eb'),
-            'shown': ('표시됨', '#3b82f6', '#dbeafe'),
-            'completed': ('완료', '#10b981', '#d1fae5'),
+        status_texts = {
+            'pending': '대기',
+            'accepted': '수락',
+            'rejected': '거절',
+            'shown': '표시됨',
+            'completed': '완료',
         }
-        status_text, status_fg, status_bg = status_config.get(status, ('알 수 없음', '#6b7280', '#e5e7eb'))
+        status_text = status_texts.get(status, '알 수 없음')
         
         # 카드 프레임
-        card = tk.Frame(parent, bg='white', relief='solid', borderwidth=1)
+        card = tk.Frame(
+            parent,
+            bg=COLORS["surface"],
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
         card.pack(fill='x', padx=10, pady=8)
         
         # 카드 내부 패딩
-        card_inner = tk.Frame(card, bg='white', padx=15, pady=12)
+        card_inner = tk.Frame(card, bg=COLORS["surface"], padx=15, pady=12)
         card_inner.pack(fill='x')
         
         # --- 헤더: 키워드 + 상태 배지 ---
-        header_frame = tk.Frame(card_inner, bg='white')
+        header_frame = tk.Frame(card_inner, bg=COLORS["surface"])
         header_frame.pack(fill='x')
         
         # 키워드
@@ -908,18 +1029,19 @@ class FloatingChatApp:
             header_frame,
             text=f"🔑 {keyword}",
             font=(self.default_font, 12, 'bold'),
-            bg='white',
-            fg='#1f2937'
+            bg=COLORS["surface"],
+            fg=COLORS["text_primary"]
         )
         keyword_label.pack(side='left')
         
         # 상태 배지
+        status_style = self._get_status_badge_style(status)
         status_badge = tk.Label(
             header_frame,
             text=status_text,
             font=(self.default_font, 9),
-            bg=status_bg,
-            fg=status_fg,
+            bg=status_style["bg"],
+            fg=status_style["fg"],
             padx=8,
             pady=2
         )
@@ -930,13 +1052,13 @@ class FloatingChatApp:
             card_inner,
             text=f"📅 {date_str}",
             font=(self.default_font, 9),
-            bg='white',
-            fg='#9ca3af'
+            bg=COLORS["surface"],
+            fg=COLORS["text_muted"]
         )
         date_label.pack(anchor='w', pady=(5, 0))
         
         # --- 요약 + 툴팁 아이콘 ---
-        summary_frame = tk.Frame(card_inner, bg='white')
+        summary_frame = tk.Frame(card_inner, bg=COLORS["surface"])
         summary_frame.pack(fill='x', pady=(8, 0))
         
         # 요약 텍스트 (최대 100자)
@@ -947,8 +1069,8 @@ class FloatingChatApp:
             summary_frame,
             text=summary_text,
             font=(self.default_font, 10),
-            bg='white',
-            fg='#4b5563',
+            bg=COLORS["surface"],
+            fg=COLORS["text_secondary"],
             wraplength=450,
             justify='left',
             anchor='w'
@@ -961,7 +1083,7 @@ class FloatingChatApp:
                 summary_frame,
                 text="ℹ️",
                 font=('Arial', 12),
-                bg='white',
+                bg=COLORS["surface"],
                 cursor='hand2'
             )
             info_icon.pack(side='right', padx=(5, 0))
@@ -972,7 +1094,7 @@ class FloatingChatApp:
             info_icon.bind("<Leave>", lambda e: self._hide_recommendation_tooltip(rec_window))
         
         # --- 액션 버튼 ---
-        button_frame = tk.Frame(card_inner, bg='white')
+        button_frame = tk.Frame(card_inner, bg=COLORS["surface"])
         button_frame.pack(fill='x', pady=(12, 0))
         
         # 보고서 열기 버튼 (report_file_path가 있을 때만 활성)
@@ -980,15 +1102,11 @@ class FloatingChatApp:
             button_frame,
             text="📄 보고서 열기",
             font=(self.default_font, 9),
-            bg='#4f46e5' if report_file_path else '#e5e7eb',
-            fg='white' if report_file_path else '#9ca3af',
-            relief='flat',
-            cursor='hand2' if report_file_path else 'arrow',
             padx=10,
             pady=4,
-            state='normal' if report_file_path else 'disabled',
             command=lambda path=report_file_path: self._open_report_file(path) if path else None
         )
+        self._style_button(open_btn, variant="primary", disabled=not bool(report_file_path))
         open_btn.pack(side='left', padx=(0, 8))
         
         # 관심 없음 버튼 (이미 거절된 상태가 아닐 때만)
@@ -997,14 +1115,11 @@ class FloatingChatApp:
                 button_frame,
                 text="🚫 관심 없음",
                 font=(self.default_font, 9),
-                bg='#fee2e2',
-                fg='#dc2626',
-                relief='flat',
-                cursor='hand2',
                 padx=10,
                 pady=4,
                 command=lambda rid=rec_id, win=rec_window: self._reject_from_history(rid, win)
             )
+            self._style_button(reject_btn, variant="danger")
             reject_btn.pack(side='left')
         
         # 카드와 모든 자식 위젯에 스크롤 이벤트 바인딩
@@ -1038,7 +1153,7 @@ class FloatingChatApp:
         ).pack(anchor='w')
         
         # 구분선
-        tk.Frame(frame, height=1, bg='#e5e7eb').pack(fill='x', pady=8)
+        tk.Frame(frame, height=1, bg=COLORS["border"]).pack(fill='x', pady=8)
         
         # 본문 (스크롤 가능)
         body_frame = tk.Frame(frame, bg='white')
@@ -1471,7 +1586,7 @@ class FloatingChatApp:
         user_text = tk.Text(
             user_container,
             font=self.message_font,
-            bg='#eef2ff',
+            bg=COLORS["primary_soft"],
             fg='black',
             wrap='word',
             width=35,
@@ -1520,10 +1635,10 @@ class FloatingChatApp:
         bot_text = tk.Text(
             bot_container,
             font=self.message_font,
-            bg='#f3f4f6',
+            bg=COLORS["panel_bg"],
             fg='black',
             wrap='word',
-            width=35,
+            width=50,
             height=1,
             relief='flat',
             borderwidth=0,
@@ -1877,7 +1992,7 @@ class FloatingChatApp:
         loading_text = tk.Text(
             loading_container,
             font=self.message_font,
-            bg='#f3f4f6',
+            bg=COLORS["panel_bg"],
             fg='black',
             wrap='word',
             width=35,
@@ -2074,7 +2189,7 @@ class FloatingChatApp:
         bot_text = tk.Text(
             bot_container,
             font=self.message_font,
-            bg='#f3f4f6',
+            bg=COLORS["panel_bg"],
             fg='black',
             wrap='word',
             width=35,
@@ -2388,11 +2503,11 @@ class FloatingChatApp:
         main_frame.pack(fill='both', expand=True)
         
         # 내부 컨테이너
-        inner_frame = tk.Frame(main_frame, bg='#f8fafc', padx=15, pady=12)
+        inner_frame = tk.Frame(main_frame, bg=COLORS["panel_bg"], padx=15, pady=12)
         inner_frame.pack(fill='both', expand=True)
         
         # 상단: 아이콘과 닫기 버튼
-        header_frame = tk.Frame(inner_frame, bg='#f8fafc')
+        header_frame = tk.Frame(inner_frame, bg=COLORS["panel_bg"])
         header_frame.pack(fill='x', pady=(0, 8))
         
         # 💡 아이콘
@@ -2400,7 +2515,7 @@ class FloatingChatApp:
             header_frame,
             text="💡",
             font=('Arial', 16),
-            bg='#f8fafc'
+            bg=COLORS["panel_bg"]
         )
         icon_label.pack(side='left')
         
@@ -2410,7 +2525,7 @@ class FloatingChatApp:
                 header_frame,
                 text=keyword,
                 font=(self.default_font, 10, 'bold'),
-                bg='#f8fafc',
+                bg=COLORS["panel_bg"],
                 fg='#4f46e5'
             )
             keyword_label.pack(side='left', padx=(8, 0))
@@ -2420,12 +2535,12 @@ class FloatingChatApp:
             header_frame,
             text="✕",
             font=(self.default_font, 10),
-            bg='#f8fafc',
+            bg=COLORS["panel_bg"],
             fg='#9ca3af',
             relief='flat',
             cursor='hand2',
-            command=self.close_recommendation_bubble,
-            activebackground='#f1f5f9'
+            command=lambda: self.close_recommendation_bubble(auto_reject=False),
+            activebackground=COLORS["surface_alt"]
         )
         close_btn.pack(side='right')
         
@@ -2434,7 +2549,7 @@ class FloatingChatApp:
             inner_frame,
             text=bubble_message,
             font=(self.default_font, 11),
-            bg='#f8fafc',
+            bg=COLORS["panel_bg"],
             fg='#1f2937',
             wraplength=250,
             justify='left'
@@ -2450,8 +2565,8 @@ class FloatingChatApp:
             button_frame,
             text="네, 궁금해요 👀",
             font=(self.default_font, 10, 'bold'),
-            bg='#4f46e5',
-            fg='white',
+            bg=COLORS["primary"],
+            fg=COLORS["text_primary"],
             relief='flat',
             cursor='hand2',
             padx=12,
@@ -2467,7 +2582,7 @@ class FloatingChatApp:
             button_frame,
             text="관심 없음",
             font=(self.default_font, 10),
-            bg='#e5e7eb',
+            bg=COLORS["border"],
             fg='#4b5563',
             relief='flat',
             cursor='hand2',
@@ -2491,13 +2606,13 @@ class FloatingChatApp:
             0, 0,
             10, 10,
             20, 0,
-            fill='#f8fafc',
-            outline='#f8fafc'
+            fill=COLORS["panel_bg"],
+            outline=COLORS["panel_bg"]
         )
         
         # 그림자 효과 (테두리로 대체)
         self.recommendation_bubble.configure(
-            highlightbackground='#e5e7eb',
+            highlightbackground=COLORS["border"],
             highlightthickness=1
         )
         
@@ -2536,23 +2651,19 @@ class FloatingChatApp:
         """말풍선을 닫습니다.
         
         Args:
-            auto_reject: True면 현재 추천을 자동으로 거절 처리 (기본값: True)
+            auto_reject: True면 무응답으로 인해 자동 닫힘임을 의미 (블랙리스트 처리 X)
         """
         # 자동 닫기 타이머 취소
         if self.bubble_auto_close_id:
             self.root.after_cancel(self.bubble_auto_close_id)
             self.bubble_auto_close_id = None
         
-        # 자동 거절 처리 (수락/거절 버튼을 누르지 않고 닫힌 경우)
+        # 무응답 자동 닫힘 안내 (블랙리스트 처리 X)
         if auto_reject and self.current_recommendation:
             rec_id = self.current_recommendation.get('id')
             if rec_id:
-                print(f"[UI] 추천 {rec_id} 자동 거절 (무응답)")
-                threading.Thread(
-                    target=self._call_recommendation_respond_api,
-                    args=(rec_id, 'reject', None),
-                    daemon=True
-                ).start()
+                keyword = self.current_recommendation.get('keyword', '')
+                print(f"[UI] 추천 {rec_id} 무응답으로 말풍선만 닫힘 (추천 유지) — keyword='{keyword}'")
         
         # 말풍선 파괴
         if self.recommendation_bubble and self.recommendation_bubble.winfo_exists():
@@ -2689,7 +2800,15 @@ class FloatingChatApp:
             return
         
         # 제안 메시지 프레임 생성
-        offer_frame = tk.Frame(self.scrollable_frame, bg='#f0f9ff', padx=10, pady=8)
+        offer_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["info_bg"],
+            padx=12,
+            pady=10,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
         offer_frame.pack(fill='x', padx=10, pady=(5, 10))
         
         # 제안 메시지
@@ -2697,15 +2816,15 @@ class FloatingChatApp:
             offer_frame,
             text=f"📄 '{keyword}'에 대한 심층 보고서를 PDF로 작성해 드릴까요?",
             font=(self.default_font, 10),
-            bg='#f0f9ff',
-            fg='#0369a1',
+            bg=COLORS["info_bg"],
+            fg=COLORS["info_text"],
             wraplength=350,
             justify='left'
         )
         offer_label.pack(anchor='w', pady=(0, 8))
         
         # 버튼 컨테이너 (별도 Frame)
-        button_container = tk.Frame(offer_frame, bg='#f0f9ff')
+        button_container = tk.Frame(offer_frame, bg=COLORS["info_bg"])
         button_container.pack(anchor='w')
         
         # "응" 버튼
@@ -2713,16 +2832,11 @@ class FloatingChatApp:
             button_container,
             text="응, 작성해줘 📝",
             font=(self.default_font, 9, 'bold'),
-            bg='#0284c7',
-            fg='white',
-            relief='flat',
-            cursor='hand2',
             padx=10,
             pady=4,
             command=lambda: self._handle_deep_dive_yes(keyword, recommendation_id, offer_frame),
-            activebackground='#0369a1',
-            activeforeground='white'
         )
+        self._style_button(yes_btn, variant="primary")
         yes_btn.pack(side='left', padx=(0, 8))
         
         # "아니" 버튼
@@ -2730,15 +2844,11 @@ class FloatingChatApp:
             button_container,
             text="아니, 괜찮아",
             font=(self.default_font, 9),
-            bg='#e0e7ff',
-            fg='#4338ca',
-            relief='flat',
-            cursor='hand2',
             padx=10,
             pady=4,
-            command=lambda: self._handle_deep_dive_no(offer_frame),
-            activebackground='#c7d2fe'
+            command=lambda: self._handle_deep_dive_no(offer_frame)
         )
+        self._style_button(no_btn, variant="ghost")
         no_btn.pack(side='left')
         
         # 스크롤을 맨 아래로
@@ -2754,15 +2864,23 @@ class FloatingChatApp:
             offer_frame.destroy()
         
         # 확인 메시지 표시
-        confirm_frame = tk.Frame(self.scrollable_frame, bg='#f0fdf4', padx=10, pady=8)
+        confirm_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["success_bg"],
+            padx=12,
+            pady=8,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
         confirm_frame.pack(fill='x', padx=10, pady=(0, 10))
         
         confirm_label = tk.Label(
             confirm_frame,
             text=f"✅ '{keyword}' 보고서 생성을 시작했어요. 완료되면 알려드릴게요!",
             font=(self.default_font, 10),
-            bg='#f0fdf4',
-            fg='#166534',
+            bg=COLORS["success_bg"],
+            fg=COLORS["success_text"],
             wraplength=350,
             justify='left'
         )
@@ -2893,11 +3011,11 @@ class FloatingChatApp:
         main_frame.pack(fill='both', expand=True)
         
         # 내부 컨테이너 (성공: 녹색 계열)
-        inner_frame = tk.Frame(main_frame, bg='#f0fdf4', padx=15, pady=12)
+        inner_frame = tk.Frame(main_frame, bg=COLORS["success_bg"], padx=15, pady=12)
         inner_frame.pack(fill='both', expand=True)
         
         # 상단: 아이콘과 닫기 버튼
-        header_frame = tk.Frame(inner_frame, bg='#f0fdf4')
+        header_frame = tk.Frame(inner_frame, bg=COLORS["success_bg"])
         header_frame.pack(fill='x', pady=(0, 8))
         
         # 📄 아이콘
@@ -2914,7 +3032,7 @@ class FloatingChatApp:
             header_frame,
             text=f"'{keyword}' 보고서",
             font=(self.default_font, 10, 'bold'),
-            bg='#f0fdf4',
+            bg=COLORS["success_bg"],
             fg='#166534'
         )
         keyword_label.pack(side='left', padx=(8, 0))
@@ -2924,7 +3042,7 @@ class FloatingChatApp:
             header_frame,
             text="✕",
             font=(self.default_font, 10),
-            bg='#f0fdf4',
+            bg=COLORS["success_bg"],
             fg='#9ca3af',
             relief='flat',
             cursor='hand2',
@@ -2938,7 +3056,7 @@ class FloatingChatApp:
             inner_frame,
             text=f"보고서를 PDF로 저장했어요! 열어볼까요?",
             font=(self.default_font, 11),
-            bg='#f0fdf4',
+            bg=COLORS["success_bg"],
             fg='#1f2937',
             wraplength=250,
             justify='left'
@@ -2951,7 +3069,7 @@ class FloatingChatApp:
                 inner_frame,
                 text=f"📁 {file_name}",
                 font=(self.default_font, 9),
-                bg='#f0fdf4',
+                bg=COLORS["success_bg"],
                 fg='#6b7280',
                 wraplength=250,
                 justify='left'
@@ -2984,7 +3102,7 @@ class FloatingChatApp:
             button_frame,
             text="닫기",
             font=(self.default_font, 10),
-            bg='#e5e7eb',
+            bg=COLORS["border"],
             fg='#4b5563',
             relief='flat',
             cursor='hand2',
@@ -3103,7 +3221,7 @@ class FloatingChatApp:
             button_frame,
             text="확인",
             font=(self.default_font, 10),
-            bg='#e5e7eb',
+            bg=COLORS["border"],
             fg='#4b5563',
             relief='flat',
             cursor='hand2',

@@ -7,7 +7,7 @@ import logging
 from .qdrant_client import QdrantManager
 from .sqlite import SQLite
 from pathlib import Path
-from utils.path_utils import get_config_path, get_db_path
+from utils.path_utils import get_config_path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 logger = logging.getLogger(__name__)
@@ -29,13 +29,20 @@ class Hit:
 class Repository:
     """Qdrant + SQLite 통합 Repository (하이브리드 검색 지원)"""
     
-    def __init__(self, config_path: str = "configs.yaml"):
+    def __init__(
+        self,
+        config_path: str = "configs.yaml",
+        sqlite_instance: Optional["SQLite"] = None,
+    ):
         config_file_path = get_config_path(config_path)
         self.config = self._load_config(config_file_path)
         self.qdrant = QdrantManager(config_path)
-        # EXE 환경 호환 DB 경로 사용
-        db_path = get_db_path(self.config.get('sqlite', {}).get('path', 'sqlite.db'))
-        self.sqlite = SQLite(str(db_path))
+        configured_path = self.config.get('sqlite', {}).get('path')
+        if configured_path and configured_path not in ("sqlite.db", "db/master.db"):
+            logger.warning(
+                "sqlite.path 설정은 더 이상 사용되지 않습니다. 프로젝트 루트의 db/ 디렉터리를 사용합니다."
+            )
+        self.sqlite = sqlite_instance or SQLite()
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """설정 파일 로드"""
