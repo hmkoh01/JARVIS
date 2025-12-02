@@ -7,11 +7,19 @@ Docling 기반 문서 파서
 import os
 import yaml
 import re
+import warnings
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+# PyTorch CUDA 관련 경고 억제 (Docling 모델 로딩 시 발생)
+warnings.filterwarnings(
+    'ignore', 
+    message='.*Attempting to deserialize object on.*CUDA.*',
+    category=UserWarning
+)
 
 try:
     from docling.document_converter import DocumentConverter

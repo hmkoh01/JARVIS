@@ -133,14 +133,14 @@ async def lifespan(app: FastAPI):
         logger.info("📦 싱글톤 리소스 초기화 시작...")
         embedder, repository, react_agent, profile_indexer = _initialize_singletons(CONFIG_PATH)
         logger.info("--- ✅ Singleton Resources Initialized Successfully ---")
-    except Exception:
-        logger.error("❌ 싱글톤 리소스 초기화 실패", exc_info=True)
-        raise
-    else:
-        global_embedder = embedder
-        global_repository = repository
-        global_react_agent = react_agent
-        global_profile_indexer = profile_indexer
+        
+    except Exception as e:
+        logger.error(f"❌ 싱글톤 리소스 초기화 실패: {e}", exc_info=True)
+        # 실제 운영 시에는 여기서 앱을 종료시킬 수도 있음
+        global_react_agent = None
+        global_embedder = None
+        global_repository = None
+        global_profile_indexer = None
     
     # 3. 스케줄러 작업 추가 및 시작
     # 10분 간격으로 반복 실행 (실시간성 확보)

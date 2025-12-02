@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = BASE_DIR / ".env"
+        extra = "ignore"  # 정의되지 않은 환경 변수 무시
 
 settings = Settings()
 

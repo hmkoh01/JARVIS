@@ -149,7 +149,10 @@ uploads/
 downloads/
 
 # Database files
+db/
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 

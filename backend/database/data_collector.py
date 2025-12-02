@@ -7,6 +7,7 @@ Data Collector Module (Keyword-Centric Architecture)
 """
 import os
 import sys
+import warnings
 from pathlib import Path
 import aiohttp
 from bs4 import BeautifulSoup
@@ -17,6 +18,11 @@ import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import logging
+
+# PDF 라이브러리 관련 경고 억제 (pypdfium2 메모리 정리 경고)
+warnings.filterwarnings('ignore', message='.*Cannot close object.*library is destroyed.*')
+# PyTorch CUDA 경고 억제 (Docling 모델 로딩 시)
+warnings.filterwarnings('ignore', message='.*Attempting to deserialize object on.*CUDA.*')
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import asyncio
@@ -433,7 +439,7 @@ class FileCollector:
             
             # 일괄 삽입
             if keyword_entries:
-                inserted = self.sqlite.insert_content_keywords_batch(keyword_entries)
+                inserted = self.sqlite.insert_content_keywords_batch(self.user_id, keyword_entries)
                 if inserted > 0:
                     self.logger.debug(f"🔑 파일 키워드 저장: {Path(file_path).name} - {inserted}개")
                     
@@ -1091,6 +1097,15 @@ class DataCollectionManager:
                 # 진행률 100% 유지 (백그라운드 스케줄러 시작 시 덮어쓰지 않도록)
                 self.progress = 100.0
                 self.progress_message = "✅ 수집 완료 - 백그라운드 동기화 중"
+                
+                # 초기 데이터 수집 완료 후 추천 분석 즉시 트리거
+                try:
+                    from main import trigger_recommendation_analysis
+                    asyncio.create_task(trigger_recommendation_analysis(force_recommend=True))
+                    self.logger.info("🎯 초기 추천 분석이 트리거되었습니다.")
+                except Exception as e:
+                    self.logger.warning(f"추천 분석 트리거 실패 (무시됨): {e}")
+                
                 self.logger.info("백그라운드 데이터 수집 스케줄러를 시작합니다.")
                 self.start_collection(selected_folders)
     

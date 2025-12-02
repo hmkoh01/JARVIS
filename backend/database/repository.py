@@ -37,12 +37,8 @@ class Repository:
         config_file_path = get_config_path(config_path)
         self.config = self._load_config(config_file_path)
         self.qdrant = QdrantManager(config_path)
-        configured_path = self.config.get('sqlite', {}).get('path')
-        if configured_path and configured_path not in ("sqlite.db", "db/master.db"):
-            logger.warning(
-                "sqlite.path 설정은 더 이상 사용되지 않습니다. 프로젝트 루트의 db/ 디렉터리를 사용합니다."
-            )
-        self.sqlite = sqlite_instance or SQLite()
+        # SQLite 싱글톤 인스턴스 사용 (User-Per-File Architecture)
+        self.sqlite = SQLite()
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """설정 파일 로드"""

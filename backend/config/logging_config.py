@@ -83,6 +83,23 @@ def setup_logging():
         logger = logging.getLogger(logger_name)
         logger.setLevel(log_level)
     
+    # 외부 라이브러리 로거 억제 (불필요한 경고/디버그 메시지 숨김)
+    noisy_loggers = [
+        'trafilatura',           # "discarding data: None" 경고 억제
+        'trafilatura.core',
+        'trafilatura.utils',
+        'courlan',               # trafilatura 관련
+        'htmldate',              # trafilatura 관련
+        'justext',               # trafilatura 관련
+        'httpx',                 # HTTP 클라이언트 로그
+        'httpcore',              # HTTP 코어 로그
+        'charset_normalizer',    # 인코딩 관련 로그
+        'PIL',                   # 이미지 처리 로그
+    ]
+    
+    for logger_name in noisy_loggers:
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
+    
     # 시작 로그
     logger = logging.getLogger(__name__)
     logger.info("=" * 80)
