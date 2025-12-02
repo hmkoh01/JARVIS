@@ -1099,9 +1099,10 @@ class DataCollectionManager:
                 self.progress_message = "✅ 수집 완료 - 백그라운드 동기화 중"
                 
                 # 초기 데이터 수집 완료 후 추천 분석 즉시 트리거
+                # (별도 스레드에서 실행되므로 asyncio.run() 사용)
                 try:
                     from main import trigger_recommendation_analysis
-                    asyncio.create_task(trigger_recommendation_analysis(force_recommend=True))
+                    asyncio.run(trigger_recommendation_analysis(force_recommend=True))
                     self.logger.info("🎯 초기 추천 분석이 트리거되었습니다.")
                 except Exception as e:
                     self.logger.warning(f"추천 분석 트리거 실패 (무시됨): {e}")
