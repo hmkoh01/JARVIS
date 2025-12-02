@@ -93,8 +93,9 @@ class DashboardWindow:
             self.canvas.itemconfig(self.canvas_window, width=event.width)
         self.canvas.bind("<Configure>", on_canvas_configure)
         
-        # 마우스 휠 스크롤
-        self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        # 마우스 휠 스크롤 바인딩
+        self._bind_scroll_events(self.canvas)
+        self._bind_scroll_events(self.scrollable_frame)
         
         self.canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -152,18 +153,22 @@ class DashboardWindow:
             highlightbackground=COLORS["dashboard_card_border"],
             highlightthickness=1
         )
+        self._bind_scroll_events(card)
         
         # 카드 헤더
         header = tk.Frame(card, bg=COLORS["dashboard_card"])
         header.pack(fill='x', padx=15, pady=(15, 10))
+        self._bind_scroll_events(header)
         
-        tk.Label(
+        title_label = tk.Label(
             header,
             text=f"{icon} {title}" if icon else title,
             font=self.subtitle_font,
             bg=COLORS["dashboard_card"],
             fg=COLORS["text_primary"]
-        ).pack(anchor='w')
+        )
+        title_label.pack(anchor='w')
+        self._bind_scroll_events(title_label)
         
         # 구분선
         tk.Frame(card, bg=COLORS["border"], height=1).pack(fill='x', padx=15)
@@ -171,6 +176,7 @@ class DashboardWindow:
         # 콘텐츠 영역
         content = tk.Frame(card, bg=COLORS["dashboard_card"])
         content.pack(fill='both', expand=True, padx=15, pady=15)
+        self._bind_scroll_events(content)
         
         return content
     
@@ -221,6 +227,7 @@ class DashboardWindow:
         """노트 섹션"""
         notes_container = tk.Frame(self.scrollable_frame, bg=COLORS["surface_alt"])
         notes_container.pack(fill='x', pady=(0, 15))
+        self._bind_scroll_events(notes_container)
         
         # 노트 카드
         self.notes_card = self._create_card(notes_container, "아이디어 노트", "📝")
@@ -229,15 +236,18 @@ class DashboardWindow:
         # 노트 입력 영역
         input_frame = tk.Frame(self.notes_card, bg=COLORS["dashboard_card"])
         input_frame.pack(fill='x', pady=(0, 10))
+        self._bind_scroll_events(input_frame)
         
         # 제목 입력
-        tk.Label(
+        title_label = tk.Label(
             input_frame,
             text="제목",
             font=self.small_font,
             bg=COLORS["dashboard_card"],
             fg=COLORS["text_secondary"]
-        ).pack(anchor='w')
+        )
+        title_label.pack(anchor='w')
+        self._bind_scroll_events(title_label)
         
         self.note_title_entry = tk.Entry(
             input_frame,
@@ -249,15 +259,18 @@ class DashboardWindow:
             highlightthickness=1
         )
         self.note_title_entry.pack(fill='x', pady=(2, 10))
+        self._bind_scroll_events(self.note_title_entry)
         
         # 내용 입력
-        tk.Label(
+        content_label = tk.Label(
             input_frame,
             text="내용",
             font=self.small_font,
             bg=COLORS["dashboard_card"],
             fg=COLORS["text_secondary"]
-        ).pack(anchor='w')
+        )
+        content_label.pack(anchor='w')
+        self._bind_scroll_events(content_label)
         
         self.note_content_text = scrolledtext.ScrolledText(
             input_frame,
@@ -271,10 +284,13 @@ class DashboardWindow:
             highlightthickness=1
         )
         self.note_content_text.pack(fill='x', pady=(2, 10))
+        # ScrolledText 내부 위젯들에도 스크롤 바인딩 (부모 캔버스로 전파)
+        self._bind_scrolled_text_to_canvas(self.note_content_text)
         
         # 버튼 영역
         btn_frame = tk.Frame(input_frame, bg=COLORS["dashboard_card"])
         btn_frame.pack(fill='x')
+        self._bind_scroll_events(btn_frame)
         
         save_btn = tk.Button(
             btn_frame,
@@ -282,7 +298,7 @@ class DashboardWindow:
             font=self.small_font,
             command=self._save_note
         )
-        style_button(save_btn, variant="primary")
+        style_button(save_btn, variant="secondary")
         save_btn.pack(side='left', padx=(0, 5))
         
         clear_btn = tk.Button(
@@ -291,22 +307,25 @@ class DashboardWindow:
             font=self.small_font,
             command=self._clear_note_form
         )
-        style_button(clear_btn, variant="ghost")
+        style_button(clear_btn, variant="secondary")
         clear_btn.pack(side='left')
         
         # 노트 목록 영역
         tk.Frame(self.notes_card, bg=COLORS["border"], height=1).pack(fill='x', pady=15)
         
-        tk.Label(
+        saved_notes_label = tk.Label(
             self.notes_card,
             text="저장된 노트",
             font=self.small_font,
             bg=COLORS["dashboard_card"],
             fg=COLORS["text_secondary"]
-        ).pack(anchor='w', pady=(0, 10))
+        )
+        saved_notes_label.pack(anchor='w', pady=(0, 10))
+        self._bind_scroll_events(saved_notes_label)
         
         self.notes_list_frame = tk.Frame(self.notes_card, bg=COLORS["dashboard_card"])
         self.notes_list_frame.pack(fill='x')
+        self._bind_scroll_events(self.notes_list_frame)
         
         self.notes_loading = tk.Label(
             self.notes_list_frame,
@@ -316,6 +335,7 @@ class DashboardWindow:
             fg=COLORS["text_muted"]
         )
         self.notes_loading.pack(pady=10)
+        self._bind_scroll_events(self.notes_loading)
     
     def _load_dashboard_data(self):
         """대시보드 데이터 로드 (비동기)"""
@@ -367,26 +387,30 @@ class DashboardWindow:
         
         # 이메일
         email = user_data.get("email", "알 수 없음")
-        tk.Label(
+        email_label = tk.Label(
             self.profile_card,
             text=f"📧 {email}",
             font=self.body_font,
             bg=COLORS["dashboard_card"],
             fg=COLORS["text_primary"]
-        ).pack(anchor='w', pady=2)
+        )
+        email_label.pack(anchor='w', pady=2)
+        self._bind_scroll_events(email_label)
         
         # 선택된 폴더
         folder = user_data.get("selected_folder", "설정 안됨")
         folder_display = folder if folder else "설정 안됨"
         if len(folder_display) > 50:
             folder_display = "..." + folder_display[-47:]
-        tk.Label(
+        folder_label = tk.Label(
             self.profile_card,
             text=f"📁 {folder_display}",
             font=self.body_font,
             bg=COLORS["dashboard_card"],
             fg=COLORS["text_secondary"]
-        ).pack(anchor='w', pady=2)
+        )
+        folder_label.pack(anchor='w', pady=2)
+        self._bind_scroll_events(folder_label)
         
         # 가입일
         created = user_data.get("created_at", "")
@@ -396,13 +420,15 @@ class DashboardWindow:
                 created_str = dt.strftime("%Y년 %m월 %d일")
             except:
                 created_str = created
-            tk.Label(
+            created_label = tk.Label(
                 self.profile_card,
                 text=f"📅 가입일: {created_str}",
                 font=self.small_font,
                 bg=COLORS["dashboard_card"],
                 fg=COLORS["text_muted"]
-            ).pack(anchor='w', pady=2)
+            )
+            created_label.pack(anchor='w', pady=2)
+            self._bind_scroll_events(created_label)
     
     def _update_activity_ui(self):
         """활동 UI 업데이트"""
@@ -415,6 +441,7 @@ class DashboardWindow:
         # 활동 통계 그리드
         stats_frame = tk.Frame(self.activity_card, bg=COLORS["dashboard_card"])
         stats_frame.pack(fill='x')
+        self._bind_scroll_events(stats_frame)
         
         stats = [
             ("💬", "채팅", activity.get("chat_messages", 0)),
@@ -426,42 +453,52 @@ class DashboardWindow:
             stat_frame = tk.Frame(stats_frame, bg=COLORS["surface_alt"], padx=15, pady=10)
             stat_frame.grid(row=0, column=i, padx=5, pady=5, sticky='ew')
             stats_frame.columnconfigure(i, weight=1)
+            self._bind_scroll_events(stat_frame)
             
-            tk.Label(
+            icon_label = tk.Label(
                 stat_frame,
                 text=icon,
                 font=('Arial', 20),
                 bg=COLORS["surface_alt"]
-            ).pack()
+            )
+            icon_label.pack()
+            self._bind_scroll_events(icon_label)
             
-            tk.Label(
+            value_label = tk.Label(
                 stat_frame,
                 text=str(value),
                 font=(self.default_font, 16, 'bold'),
                 bg=COLORS["surface_alt"],
                 fg=COLORS["chart_primary"]
-            ).pack()
+            )
+            value_label.pack()
+            self._bind_scroll_events(value_label)
             
-            tk.Label(
+            text_label = tk.Label(
                 stat_frame,
                 text=label,
                 font=self.small_font,
                 bg=COLORS["surface_alt"],
                 fg=COLORS["text_muted"]
-            ).pack()
+            )
+            text_label.pack()
+            self._bind_scroll_events(text_label)
         
         # 추천 통계
         rec = activity.get("recommendations", {})
         rec_frame = tk.Frame(self.activity_card, bg=COLORS["dashboard_card"])
         rec_frame.pack(fill='x', pady=(10, 0))
+        self._bind_scroll_events(rec_frame)
         
-        tk.Label(
+        rec_label = tk.Label(
             rec_frame,
             text=f"💡 추천: {rec.get('total', 0)}건 (수락 {rec.get('accepted', 0)} / 거절 {rec.get('rejected', 0)})",
             font=self.body_font,
             bg=COLORS["dashboard_card"],
             fg=COLORS["text_secondary"]
-        ).pack(anchor='w')
+        )
+        rec_label.pack(anchor='w')
+        self._bind_scroll_events(rec_label)
     
     def _update_interests_ui(self):
         """관심사 UI 업데이트"""
@@ -473,13 +510,15 @@ class DashboardWindow:
         top_interests = interests_data.get("top_interests", [])
         
         if not top_interests:
-            tk.Label(
+            empty_label = tk.Label(
                 self.interests_card,
                 text="아직 관심사가 없습니다. 채팅을 통해 관심사를 쌓아보세요!",
                 font=self.body_font,
                 bg=COLORS["dashboard_card"],
                 fg=COLORS["text_muted"]
-            ).pack(pady=10)
+            )
+            empty_label.pack(pady=10)
+            self._bind_scroll_events(empty_label)
             return
         
         # 관심사 막대 그래프 (간단한 버전)
@@ -488,13 +527,14 @@ class DashboardWindow:
         for interest in top_interests:
             item_frame = tk.Frame(self.interests_card, bg=COLORS["dashboard_card"])
             item_frame.pack(fill='x', pady=3)
+            self._bind_scroll_events(item_frame)
             
             keyword = interest.get("keyword", "")
             score = interest.get("score", 0)
             bar_width = int((score / max_score) * 200) if max_score > 0 else 0
             
             # 키워드
-            tk.Label(
+            keyword_label = tk.Label(
                 item_frame,
                 text=keyword,
                 font=self.body_font,
@@ -502,24 +542,30 @@ class DashboardWindow:
                 fg=COLORS["text_primary"],
                 width=15,
                 anchor='w'
-            ).pack(side='left')
+            )
+            keyword_label.pack(side='left')
+            self._bind_scroll_events(keyword_label)
             
             # 막대
             bar_container = tk.Frame(item_frame, bg=COLORS["surface_alt"], width=200, height=20)
             bar_container.pack(side='left', padx=10)
             bar_container.pack_propagate(False)
+            self._bind_scroll_events(bar_container)
             
             bar = tk.Frame(bar_container, bg=COLORS["chart_primary"], width=bar_width, height=20)
             bar.pack(side='left')
+            self._bind_scroll_events(bar)
             
             # 점수
-            tk.Label(
+            score_label = tk.Label(
                 item_frame,
                 text=f"{score:.2f}",
                 font=self.small_font,
                 bg=COLORS["dashboard_card"],
                 fg=COLORS["text_muted"]
-            ).pack(side='left', padx=5)
+            )
+            score_label.pack(side='left', padx=5)
+            self._bind_scroll_events(score_label)
     
     def _update_notes_ui(self):
         """노트 목록 UI 업데이트 (페이지네이션 포함)"""
@@ -528,13 +574,15 @@ class DashboardWindow:
             widget.destroy()
         
         if not self.notes:
-            tk.Label(
+            empty_label = tk.Label(
                 self.notes_list_frame,
                 text="저장된 노트가 없습니다.",
                 font=self.body_font,
                 bg=COLORS["dashboard_card"],
                 fg=COLORS["text_muted"]
-            ).pack(pady=10)
+            )
+            empty_label.pack(pady=10)
+            self._bind_scroll_events(empty_label)
             return
         
         # 페이지네이션 계산
@@ -560,10 +608,12 @@ class DashboardWindow:
         """노트 페이지네이션 UI 생성"""
         pagination_frame = tk.Frame(self.notes_list_frame, bg=COLORS["dashboard_card"])
         pagination_frame.pack(fill='x', pady=(10, 0))
+        self._bind_scroll_events(pagination_frame)
         
         # 중앙 정렬을 위한 컨테이너
         center_frame = tk.Frame(pagination_frame, bg=COLORS["dashboard_card"])
         center_frame.pack(anchor='center')
+        self._bind_scroll_events(center_frame)
         
         # 이전 버튼
         prev_state = 'normal' if self.notes_page > 0 else 'disabled'
@@ -581,6 +631,7 @@ class DashboardWindow:
             state=prev_state
         )
         prev_btn.pack(side='left', padx=5)
+        self._bind_scroll_events(prev_btn)
         
         # 페이지 표시
         page_label = tk.Label(
@@ -591,6 +642,7 @@ class DashboardWindow:
             fg=COLORS["text_secondary"]
         )
         page_label.pack(side='left', padx=15)
+        self._bind_scroll_events(page_label)
         
         # 다음 버튼
         next_state = 'normal' if self.notes_page < total_pages - 1 else 'disabled'
@@ -608,6 +660,7 @@ class DashboardWindow:
             state=next_state
         )
         next_btn.pack(side='left', padx=5)
+        self._bind_scroll_events(next_btn)
     
     def _prev_notes_page(self):
         """이전 노트 페이지로 이동"""
@@ -637,25 +690,29 @@ class DashboardWindow:
             highlightthickness=1
         )
         item_frame.pack(fill='x', pady=3)
+        self._bind_scroll_events(item_frame)
         
         # 내용 영역
         content_frame = tk.Frame(item_frame, bg=item_frame.cget("bg"))
         content_frame.pack(fill='x', padx=10, pady=8)
+        self._bind_scroll_events(content_frame)
         
         # 제목 + 핀 아이콘
         title_text = f"📌 {title}" if pinned else title
-        tk.Label(
+        title_label = tk.Label(
             content_frame,
             text=title_text,
             font=(self.default_font, 11, 'bold'),
             bg=item_frame.cget("bg"),
             fg=COLORS["text_primary"],
             anchor='w'
-        ).pack(anchor='w')
+        )
+        title_label.pack(anchor='w')
+        self._bind_scroll_events(title_label)
         
         # 내용 미리보기
         preview = content[:100] + "..." if len(content) > 100 else content
-        tk.Label(
+        preview_label = tk.Label(
             content_frame,
             text=preview,
             font=self.small_font,
@@ -664,11 +721,14 @@ class DashboardWindow:
             anchor='w',
             wraplength=500,
             justify='left'
-        ).pack(anchor='w', pady=(3, 0))
+        )
+        preview_label.pack(anchor='w', pady=(3, 0))
+        self._bind_scroll_events(preview_label)
         
         # 버튼 영역
         btn_frame = tk.Frame(content_frame, bg=item_frame.cget("bg"))
         btn_frame.pack(anchor='e', pady=(5, 0))
+        self._bind_scroll_events(btn_frame)
         
         # 편집 버튼
         edit_btn = tk.Button(
@@ -682,6 +742,7 @@ class DashboardWindow:
             cursor='hand2'
         )
         edit_btn.pack(side='left', padx=2)
+        self._bind_scroll_events(edit_btn)
         
         # 삭제 버튼
         delete_btn = tk.Button(
@@ -695,6 +756,7 @@ class DashboardWindow:
             cursor='hand2'
         )
         delete_btn.pack(side='left', padx=2)
+        self._bind_scroll_events(delete_btn)
     
     def _save_note(self):
         """노트 저장"""
@@ -783,14 +845,57 @@ class DashboardWindow:
         """에러 메시지 표시"""
         messagebox.showerror("오류", message)
     
+    def _on_mousewheel(self, event):
+        """마우스 휠 스크롤 처리 (macOS/Windows/Linux 호환)"""
+        import platform
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            delta = -1 * event.delta
+        elif system == "Windows":
+            delta = -1 * (event.delta // 120)
+        else:  # Linux
+            if event.num == 4:
+                delta = -1
+            elif event.num == 5:
+                delta = 1
+            else:
+                delta = -1 * (event.delta // 120)
+        
+        self.canvas.yview_scroll(int(delta), "units")
+    
+    def _bind_scroll_events(self, widget):
+        """위젯에 스크롤 이벤트 바인딩"""
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        widget.bind("<Button-4>", self._on_mousewheel)  # Linux scroll up
+        widget.bind("<Button-5>", self._on_mousewheel)  # Linux scroll down
+    
+    def _bind_scroll_to_children(self, widget):
+        """위젯과 모든 자식 위젯에 스크롤 이벤트 바인딩"""
+        self._bind_scroll_events(widget)
+        for child in widget.winfo_children():
+            self._bind_scroll_to_children(child)
+    
+    def _bind_scrolled_text_to_canvas(self, scrolled_text_widget):
+        """ScrolledText 위젯의 스크롤을 부모 캔버스로 전파"""
+        # ScrolledText 내부의 Text 위젯에 바인딩
+        # 스크롤 이벤트를 부모 캔버스로 전파하되, 기본 동작은 막음
+        def on_scroll(event):
+            self._on_mousewheel(event)
+            return "break"  # 기본 Text 위젯 스크롤 동작 방지
+        
+        scrolled_text_widget.bind("<MouseWheel>", on_scroll)
+        scrolled_text_widget.bind("<Button-4>", on_scroll)
+        scrolled_text_widget.bind("<Button-5>", on_scroll)
+        
+        # ScrolledText의 프레임과 스크롤바에도 바인딩
+        for child in scrolled_text_widget.winfo_children():
+            child.bind("<MouseWheel>", on_scroll)
+            child.bind("<Button-4>", on_scroll)
+            child.bind("<Button-5>", on_scroll)
+    
     def _on_close(self):
         """창 닫기 처리"""
-        # 마우스 휠 바인딩 해제
-        try:
-            self.canvas.unbind_all("<MouseWheel>")
-        except:
-            pass
-        
         self.window.destroy()
         self.window = None
     

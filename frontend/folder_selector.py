@@ -147,6 +147,12 @@ class FolderSelector:
         self.request_queue = queue.Queue()
         self.response_queue = queue.Queue()
         
+        # 큐 폴링 타이머 ID (창 닫힐 때 취소용)
+        self._queue_poll_id = None
+        
+        # 창이 닫혔는지 여부
+        self._is_closing = False
+        
         # 백그라운드 스캐너 시작
         self.scanner = DirectoryScanner(self.request_queue, self.response_queue)
         self.scanner.start()
@@ -344,12 +350,8 @@ class FolderSelector:
         btn_container.place(relx=0.5, rely=0.5, anchor='center')
         
         add_btn = tk.Button(btn_container, text="▶ 추가", font=self.button_font,
-                           command=self._add_selected_to_basket, width=10,
-                           bg=COLORS["primary"],
-                           fg=COLORS["text_inverse"],
-                           activebackground=COLORS["primary_dark"],
-                           activeforeground=COLORS["text_inverse"],
-                           cursor='hand2')
+                            command=self._add_selected_to_basket, width=10)
+        style_button(add_btn, variant="outlined")
         add_btn.pack(pady=5)
         
         remove_btn = tk.Button(btn_container, text="◀ 제거", font=self.button_font,
@@ -443,7 +445,7 @@ class FolderSelector:
         # 선택 초기화
         clear_btn = tk.Button(btn_frame, text="🗑 선택 초기화", **btn_style,
                              command=self.clear_selection)
-        style_button(clear_btn, variant="ghost")
+        style_button(clear_btn, variant="secondary")
         clear_btn.pack(side='left', padx=3)
         
         # 전체 스캔 (홈 폴더)
@@ -452,13 +454,10 @@ class FolderSelector:
         style_button(full_scan_btn, variant="secondary")
         full_scan_btn.pack(side='left', padx=3)
         
-        # 시작하기 (확정) - 강조 색상으로 직접 설정
+        # 시작하기 (확정)
         start_btn = tk.Button(btn_frame, text="🚀 시작하기", **btn_style,
-                             command=self.confirm_selection,
-                             bg=COLORS["primary"],
-                             fg=COLORS["text_inverse"],
-                             activebackground=COLORS["primary_dark"],
-                             activeforeground=COLORS["text_inverse"])
+                             command=self.confirm_selection)
+        style_button(start_btn, variant="secondary")
         start_btn.pack(side='left', padx=3)
     
     def _on_breadcrumb_configure(self, event):
@@ -566,9 +565,13 @@ class FolderSelector:
     def refresh_current(self):
         """현재 폴더 새로고침"""
         self.navigate_to(self.current_path, add_to_history=False)
-    
+
     def process_queue(self):
         """큐를 주기적으로 확인하고 UI를 업데이트"""
+        # 창이 닫히는 중이면 더 이상 폴링하지 않음
+        if self._is_closing:
+            return
+        
         try:
             message = self.response_queue.get_nowait()
             
@@ -581,11 +584,17 @@ class FolderSelector:
                 self.explorer_listbox.delete(0, tk.END)
                 self.explorer_listbox.insert(tk.END, f"❌ {message['message']}")
                 self.status_label.config(text=f"⚠️ {message['message']}")
-                
+
         except queue.Empty:
             pass
         finally:
-            self.root.after(50, self.process_queue)
+            # 창이 닫히지 않았을 때만 다음 폴링 예약
+            if not self._is_closing:
+                try:
+                    self._queue_poll_id = self.root.after(50, self.process_queue)
+                except tk.TclError:
+                    # 창이 이미 파괴된 경우
+                    pass
     
     def _populate_explorer(self, entries: list):
         """탐색기 리스트박스에 항목들을 채움"""
@@ -771,25 +780,59 @@ class FolderSelector:
             )
             if result:
                 self.selected_items.add(Path.home())
-            else:
+        else:
                 return
         
-        self.root.destroy()
+        # 정리 후 창 닫기 (선택 결과 유지)
+        self._cleanup_and_close()
     
     def on_closing(self):
         """창 닫기 처리"""
         result = messagebox.askyesno("종료", "폴더 선택을 취소하시겠습니까?")
         if result:
-            self.selected_items = "cancelled"
-            self.scanner.stop()
+            self._cleanup_and_close("cancelled")
+    
+    def _cleanup_and_close(self, result_value=None):
+        """리소스 정리 및 창 닫기"""
+        # 닫힘 플래그 설정 (process_queue 중단)
+        self._is_closing = True
+        
+        # 예약된 after 콜백 취소
+        if self._queue_poll_id:
+            try:
+                self.root.after_cancel(self._queue_poll_id)
+            except tk.TclError:
+                pass
+            self._queue_poll_id = None
+        
+        if self.click_timer:
+            try:
+                self.root.after_cancel(self.click_timer)
+            except tk.TclError:
+                pass
+            self.click_timer = None
+        
+        # 결과 설정
+        if result_value is not None:
+            self.selected_items = result_value
+        
+        # 스캐너 중지
+        self.scanner.stop()
+        
+        # 창 파괴
+        try:
             self.root.destroy()
+        except tk.TclError:
+            pass
     
     def run(self):
         """UI 메인 루프 실행"""
         self.root.mainloop()
         
-        # 스캐너 정리
-        self.scanner.stop()
+        # 메인 루프 종료 후 정리 (아직 정리되지 않은 경우)
+        if not self._is_closing:
+            self._is_closing = True
+            self.scanner.stop()
         
         try:
             if self.root.winfo_exists():
