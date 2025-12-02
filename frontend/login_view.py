@@ -398,7 +398,7 @@ class LoginWindow:
             text="Google로 로그인",
             font=self.button_font,
             bg='#4285F4',
-            fg='white',
+            fg='black',
             activebackground='#357AE8',
             activeforeground='white',
             relief='flat',

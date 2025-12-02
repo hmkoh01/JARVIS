@@ -25,77 +25,8 @@ from token_store import (
     is_expiring, get_valid_token_and_user, get_user_id_from_token
 )
 
-# ---------------------------------------------------------------------------
-# Global theme configuration
-# ---------------------------------------------------------------------------
-COLORS = {
-    "surface": "#FFFFFF",
-    "surface_alt": "#F9FAFB",
-    "panel_bg": "#F3F4F6",
-    "primary": "#4F46E5",
-    "primary_dark": "#4338CA",
-    "primary_soft": "#EEF2FF",
-    "text_primary": "#111827",
-    "text_secondary": "#374151",
-    "text_muted": "#6B7280",
-    "text_inverse": "#FFFFFF",
-    "border": "#E5E7EB",
-    "info_bg": "#E0F2FE",
-    "info_text": "#0F172A",
-    "success_bg": "#ECFDF5",
-    "success_text": "#166534",
-    "danger_bg": "#FEE2E2",
-    "danger_text": "#B91C1C",
-    "button_disabled_bg": "#E5E7EB",
-    "button_disabled_text": "#9CA3AF",
-}
-
-STATUS_BADGE_STYLES = {
-    "pending": {"bg": "#FEF3C7", "fg": "#92400E"},
-    "accepted": {"bg": COLORS["success_bg"], "fg": COLORS["success_text"]},
-    "rejected": {"bg": "#E5E7EB", "fg": COLORS["text_secondary"]},
-    "shown": {"bg": "#DBEAFE", "fg": "#1D4ED8"},
-    "completed": {"bg": COLORS["success_bg"], "fg": COLORS["success_text"]},
-    "default": {"bg": COLORS["border"], "fg": COLORS["text_secondary"]},
-}
-
-BUTTON_STYLES = {
-    "primary": {
-        "bg": COLORS["primary"],
-        "fg": COLORS["text_inverse"],
-        "active_bg": COLORS["primary_dark"],
-        "active_fg": COLORS["text_inverse"],
-        "disabled_bg": COLORS["button_disabled_bg"],
-        "disabled_fg": COLORS["button_disabled_text"],
-    },
-    "secondary": {
-        "bg": COLORS["surface_alt"],
-        "fg": COLORS["text_primary"],
-        "active_bg": COLORS["border"],
-        "active_fg": COLORS["text_primary"],
-        "border_color": COLORS["border"],
-        "disabled_bg": COLORS["button_disabled_bg"],
-        "disabled_fg": COLORS["button_disabled_text"],
-    },
-    "ghost": {
-        "bg": COLORS["surface"],
-        "fg": COLORS["text_secondary"],
-        "active_bg": COLORS["surface_alt"],
-        "active_fg": COLORS["text_primary"],
-        "border_color": COLORS["border"],
-        "disabled_bg": COLORS["button_disabled_bg"],
-        "disabled_fg": COLORS["button_disabled_text"],
-    },
-    "danger": {
-        "bg": COLORS["danger_bg"],
-        "fg": COLORS["danger_text"],
-        "active_bg": "#FCA5A5",
-        "active_fg": COLORS["danger_text"],
-        "border_color": COLORS["danger_bg"],
-        "disabled_bg": COLORS["button_disabled_bg"],
-        "disabled_fg": COLORS["button_disabled_text"],
-    },
-}
+# Theme import (중앙 집중식 색상/스타일 관리)
+from theme import COLORS, BUTTON_STYLES, STATUS_BADGE_STYLES
 
 class FloatingChatApp:
     def __init__(self):
@@ -336,42 +267,15 @@ class FloatingChatApp:
         """상태별 배지 색상을 반환합니다."""
         return STATUS_BADGE_STYLES.get(status, STATUS_BADGE_STYLES["default"])
 
-    def _style_button(self, button: tk.Button, variant: str = "primary", disabled: bool = False):
-        """버튼에 일관된 테마 스타일을 적용합니다."""
-        style = BUTTON_STYLES.get(variant, BUTTON_STYLES["primary"]).copy()
-        config = {
-            "relief": 'flat',
-            "bd": 0,
-        }
-        border_color = style.get("border_color")
-        border_width = style.get("border_width", 1 if border_color else 0)
-        if border_color:
-            config.update({
-                "highlightbackground": border_color,
-                "highlightcolor": border_color,
-                "highlightthickness": border_width,
-            })
-        else:
-            config["highlightthickness"] = 0
+    def _style_button(self, button: tk.Button, variant: str = "outlined", disabled: bool = False):
+        """버튼에 일관된 테마 스타일을 적용합니다.
         
-        if disabled:
-            config.update({
-                "bg": style.get("disabled_bg", COLORS["button_disabled_bg"]),
-                "fg": style.get("disabled_fg", COLORS["button_disabled_text"]),
-                "state": 'disabled',
-                "cursor": 'arrow',
-            })
-        else:
-            config.update({
-                "bg": style.get("bg", COLORS["primary"]),
-                "fg": style.get("fg", COLORS["text_inverse"]),
-                "activebackground": style.get("active_bg", style.get("bg", COLORS["primary"])),
-                "activeforeground": style.get("active_fg", style.get("fg", COLORS["text_inverse"])),
-                "state": 'normal',
-                "cursor": 'hand2',
-            })
-        
-        button.configure(**config)
+        theme.py의 style_button 함수를 래핑합니다.
+        variant: "outlined" (기본), "ghost", "danger", "success"
+                 "primary", "secondary"도 하위 호환성을 위해 지원
+        """
+        from theme import style_button
+        style_button(button, variant=variant, disabled=disabled)
     
     def process_message_queue(self):
         """메시지 큐를 처리합니다. - 메인 스레드에서만 GUI 업데이트"""
@@ -1148,7 +1052,7 @@ class FloatingChatApp:
             width=8,
             height=2
         )
-        self._style_button(send_button, variant="primary")
+        self._style_button(send_button, variant="secondary")
         send_button.pack(side='right')
         
         # 초기 메시지
@@ -1639,7 +1543,7 @@ class FloatingChatApp:
             pady=4,
             command=lambda path=report_file_path: self._open_report_file(path) if path else None
         )
-        self._style_button(open_btn, variant="primary", disabled=not bool(report_file_path))
+        self._style_button(open_btn, variant="outlined", disabled=not bool(report_file_path))
         open_btn.pack(side='left', padx=(0, 8))
         
         # 관심 없음 버튼 (이미 거절된 상태가 아닐 때만)
@@ -3375,7 +3279,7 @@ class FloatingChatApp:
             pady=4,
             command=lambda: self._handle_deep_dive_yes(keyword, recommendation_id, offer_frame),
         )
-        self._style_button(yes_btn, variant="primary")
+        self._style_button(yes_btn, variant="secondary")
         yes_btn.pack(side='left', padx=(0, 8))
         
         # "아니" 버튼
@@ -4033,31 +3937,25 @@ class FloatingChatApp:
     def _get_current_selected_folders(self) -> list:
         """현재 설정된 폴더 경로를 API에서 가져옵니다."""
         try:
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, str(Path("frontend")))
-            from login_view import get_stored_token
-            
-            token = get_stored_token()
+            token = self.jwt_token or load_token()
             if not token:
                 return []
             
+            # /auth/me 엔드포인트 사용 (selected_root_folder 반환)
             response = requests.get(
-                f"{self.API_BASE_URL}/settings/me",
+                f"{self.API_BASE_URL}/api/v2/auth/me",
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10
             )
             
             if response.status_code == 200:
                 data = response.json()
-                if data.get("success"):
-                    user_info = data.get("data", {}).get("user", {})
-                    selected_folder = user_info.get("selected_folder")
-                    if selected_folder:
-                        # 콤마로 구분된 여러 폴더일 수 있음
-                        if "," in selected_folder:
-                            return [f.strip() for f in selected_folder.split(",") if f.strip()]
-                        return [selected_folder]
+                selected_folder = data.get("selected_root_folder")
+                if selected_folder:
+                    # 콤마로 구분된 여러 폴더일 수 있음
+                    if "," in selected_folder:
+                        return [f.strip() for f in selected_folder.split(",") if f.strip()]
+                    return [selected_folder]
             return []
         except Exception as e:
             print(f"[UI] 현재 폴더 정보 가져오기 실패: {e}")
