@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 from pathlib import Path
+from typing import Tuple
 from contextlib import asynccontextmanager
 
 # 현재 스크립트의 디렉토리를 Python 경로에 추가
@@ -38,6 +39,26 @@ global_profile_indexer: UserProfileIndexer = None
 
 # 전역 스케줄러 인스턴스
 scheduler = AsyncIOScheduler()
+
+
+def _initialize_singletons(config_path: str) -> Tuple[BGEM3Embedder, Repository, ReactAgent, UserProfileIndexer]:
+    """임베더/레포지토리 관련 싱글톤 의존성을 초기화한다."""
+    embedder = BGEM3Embedder(config_path=config_path)
+    repository = Repository(config_path=config_path)
+    react_agent = ReactAgent(
+        repository=repository,
+        embedder=embedder,
+        config_path=config_path
+    )
+    profile_indexer = UserProfileIndexer(
+        repository=repository,
+        embedder=embedder
+    )
+    from agents.chatbot_agent.rag.react_agent import set_global_react_agent
+    from database.user_profile_indexer import set_global_profile_indexer
+    set_global_react_agent(react_agent)
+    set_global_profile_indexer(profile_indexer)
+    return embedder, repository, react_agent, profile_indexer
 
 async def trigger_recommendation_analysis(force_recommend: bool = False):
     """
@@ -76,7 +97,11 @@ async def trigger_recommendation_analysis(force_recommend: bool = False):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- 애플리케이션 시작 시 실행될 코드 ---
-    global global_react_agent, global_embedder, global_repository
+    global global_react_agent, global_embedder, global_repository, global_profile_indexer
+    global_react_agent = None
+    global_embedder = None
+    global_repository = None
+    global_profile_indexer = None
     
     logger.info("🚀 JARVIS Multi-Agent System 시작")
     
@@ -103,51 +128,19 @@ async def lifespan(app: FastAPI):
     
     # 2. 싱글톤 리소스 초기화 (BGE-M3 모델, Repository, ReactAgent)
     logger.info("--- Application Starting: Initializing Singleton Resources ---")
+    CONFIG_PATH = "configs.yaml"
     try:
-        CONFIG_PATH = "configs.yaml"
-        
-        # 2-1. BGEM3Embedder 초기화 (BGE-M3 모델 로드 - 약 4초 소요)
-        logger.info("📦 BGE-M3 임베더 초기화 시작...")
-        global_embedder = BGEM3Embedder(config_path=CONFIG_PATH)
-        logger.info("✅ BGE-M3 임베더 초기화 완료")
-        
-        # 2-2. Repository 초기화
-        logger.info("📦 Repository 초기화 시작...")
-        global_repository = Repository(config_path=CONFIG_PATH)
-        logger.info("✅ Repository 초기화 완료")
-        
-        # 2-3. ReactAgent 초기화 (의존성 주입)
-        logger.info("📦 ReactAgent 초기화 시작...")
-        global_react_agent = ReactAgent(
-            repository=global_repository,
-            embedder=global_embedder,
-            config_path=CONFIG_PATH
-        )
-        logger.info("✅ ReactAgent 초기화 완료")
-        
-        # 2-4. 전역 싱글톤 인스턴스 설정 (react_agent.py의 함수 기반 래퍼에서 사용)
-        from agents.chatbot_agent.rag.react_agent import set_global_react_agent
-        set_global_react_agent(global_react_agent)
-        logger.info("✅ 전역 ReactAgent 싱글톤 설정 완료")
-        
-        # 2-5. UserProfileIndexer 초기화 (의존성 주입)
-        logger.info("📦 UserProfileIndexer 초기화 시작...")
-        global_profile_indexer = UserProfileIndexer(
-            repository=global_repository,
-            embedder=global_embedder
-        )
-        from database.user_profile_indexer import set_global_profile_indexer
-        set_global_profile_indexer(global_profile_indexer)
-        logger.info("✅ UserProfileIndexer 초기화 완료")
-        
+        logger.info("📦 싱글톤 리소스 초기화 시작...")
+        embedder, repository, react_agent, profile_indexer = _initialize_singletons(CONFIG_PATH)
         logger.info("--- ✅ Singleton Resources Initialized Successfully ---")
-        
-    except Exception as e:
-        logger.error(f"❌ 싱글톤 리소스 초기화 실패: {e}", exc_info=True)
-        # 실제 운영 시에는 여기서 앱을 종료시킬 수도 있음
-        global_react_agent = None
-        global_embedder = None
-        global_repository = None
+    except Exception:
+        logger.error("❌ 싱글톤 리소스 초기화 실패", exc_info=True)
+        raise
+    else:
+        global_embedder = embedder
+        global_repository = repository
+        global_react_agent = react_agent
+        global_profile_indexer = profile_indexer
     
     # 3. 스케줄러 작업 추가 및 시작
     # 10분 간격으로 반복 실행 (실시간성 확보)

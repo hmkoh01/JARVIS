@@ -7,7 +7,7 @@ import logging
 from .qdrant_client import QdrantManager
 from .sqlite import SQLite
 from pathlib import Path
-from utils.path_utils import get_config_path, get_db_path
+from utils.path_utils import get_config_path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 logger = logging.getLogger(__name__)
@@ -29,13 +29,20 @@ class Hit:
 class Repository:
     """Qdrant + SQLite 통합 Repository (하이브리드 검색 지원)"""
     
-    def __init__(self, config_path: str = "configs.yaml"):
+    def __init__(
+        self,
+        config_path: str = "configs.yaml",
+        sqlite_instance: Optional["SQLite"] = None,
+    ):
         config_file_path = get_config_path(config_path)
         self.config = self._load_config(config_file_path)
         self.qdrant = QdrantManager(config_path)
-        # EXE 환경 호환 DB 경로 사용
-        db_path = get_db_path(self.config.get('sqlite', {}).get('path', 'sqlite.db'))
-        self.sqlite = SQLite(str(db_path))
+        configured_path = self.config.get('sqlite', {}).get('path')
+        if configured_path and configured_path not in ("sqlite.db", "db/master.db"):
+            logger.warning(
+                "sqlite.path 설정은 더 이상 사용되지 않습니다. 프로젝트 루트의 db/ 디렉터리를 사용합니다."
+            )
+        self.sqlite = sqlite_instance or SQLite()
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """설정 파일 로드"""
@@ -208,3 +215,43 @@ class Repository:
     def get_user_folder(self, user_id: int):
         """user_id로 selected_root_folder 경로를 조회"""
         return self.sqlite.get_user_folder(user_id)
+    
+    # === 대시보드 관련 메서드들 ===
+    
+    def create_note(self, user_id: int, content: str, title: str = "", 
+                    pinned: bool = False, tags: str = None):
+        """새 노트 생성"""
+        return self.sqlite.create_note(user_id, content, title, pinned, tags)
+    
+    def update_note(self, user_id: int, note_id: int, content: str = None,
+                    title: str = None, pinned: bool = None, tags: str = None):
+        """노트 업데이트"""
+        return self.sqlite.update_note(user_id, note_id, content, title, pinned, tags)
+    
+    def delete_note(self, user_id: int, note_id: int):
+        """노트 삭제"""
+        return self.sqlite.delete_note(user_id, note_id)
+    
+    def get_notes(self, user_id: int, limit: int = 50):
+        """노트 목록 조회"""
+        return self.sqlite.get_notes(user_id, limit)
+    
+    def get_note_by_id(self, user_id: int, note_id: int):
+        """특정 노트 조회"""
+        return self.sqlite.get_note_by_id(user_id, note_id)
+    
+    def get_interest_trend(self, user_id: int, days: int = 30, keyword: str = None):
+        """관심사 트렌드 조회"""
+        return self.sqlite.get_interest_trend(user_id, days, keyword)
+    
+    def get_interest_summary(self, user_id: int, days: int = 30):
+        """관심사 요약 통계"""
+        return self.sqlite.get_interest_summary(user_id, days)
+    
+    def get_activity_summary(self, user_id: int, days: int = 7):
+        """사용자 활동 요약"""
+        return self.sqlite.get_activity_summary(user_id, days)
+    
+    def record_interest_snapshot(self, user_id: int):
+        """관심사 스냅샷 기록"""
+        return self.sqlite.record_interest_snapshot(user_id)

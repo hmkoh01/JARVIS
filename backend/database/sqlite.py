@@ -294,6 +294,33 @@ class SQLite:
         """)
         
         # ============================================================
+        # 7. User Notes (Dashboard)
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT DEFAULT '',
+                content TEXT NOT NULL,
+                pinned BOOLEAN DEFAULT 0,
+                tags TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ============================================================
+        # 8. Interest History (Dashboard - 관심사 변화 추적)
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS interest_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL,
+                score REAL NOT NULL,
+                recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ============================================================
         # Indexes
         # ============================================================
         conn.execute("CREATE INDEX IF NOT EXISTS idx_user_interests_keyword ON user_interests(keyword)")
@@ -303,6 +330,10 @@ class SQLite:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_created_at ON content_keywords(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_content_keywords_source ON content_keywords(source_type, source_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_user_notes_updated ON user_notes(updated_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_user_notes_pinned ON user_notes(pinned DESC, updated_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_interest_history_keyword ON interest_history(keyword, recorded_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_interest_history_recorded ON interest_history(recorded_at)")
         
         conn.commit()
     
@@ -1422,6 +1453,265 @@ class SQLite:
     def get_collected_browser_history_since(self, user_id: int, since: datetime) -> List[Dict[str, Any]]:
         """특정 시간 이후의 브라우저 히스토리 조회 (Legacy 호환)"""
         return self.get_browser_logs(user_id, since=since)
+
+    # =========================================================================
+    # Dashboard: User Notes Methods
+    # =========================================================================
+    
+    def create_note(self, user_id: int, content: str, title: str = "", 
+                    pinned: bool = False, tags: str = None) -> Optional[int]:
+        """새 노트 생성"""
+        try:
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("""
+                INSERT INTO user_notes (title, content, pinned, tags)
+                VALUES (?, ?, ?, ?)
+            """, (title, content, 1 if pinned else 0, tags))
+            conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"노트 생성 오류: {e}")
+            return None
+    
+    def update_note(self, user_id: int, note_id: int, content: str = None, 
+                    title: str = None, pinned: bool = None, tags: str = None) -> bool:
+        """노트 업데이트"""
+        try:
+            conn = self.get_user_connection(user_id)
+            updates = []
+            params = []
+            
+            if content is not None:
+                updates.append("content = ?")
+                params.append(content)
+            if title is not None:
+                updates.append("title = ?")
+                params.append(title)
+            if pinned is not None:
+                updates.append("pinned = ?")
+                params.append(1 if pinned else 0)
+            if tags is not None:
+                updates.append("tags = ?")
+                params.append(tags)
+            
+            if not updates:
+                return True
+            
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            params.append(note_id)
+            
+            conn.execute(f"""
+                UPDATE user_notes SET {', '.join(updates)} WHERE id = ?
+            """, params)
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"노트 업데이트 오류: {e}")
+            return False
+    
+    def delete_note(self, user_id: int, note_id: int) -> bool:
+        """노트 삭제"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.execute("DELETE FROM user_notes WHERE id = ?", (note_id,))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"노트 삭제 오류: {e}")
+            return False
+    
+    def get_notes(self, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """노트 목록 조회 (고정된 노트 우선, 최신순)"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM user_notes 
+                ORDER BY pinned DESC, updated_at DESC
+                LIMIT ?
+            """, (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"노트 조회 오류: {e}")
+            return []
+    
+    def get_note_by_id(self, user_id: int, note_id: int) -> Optional[Dict[str, Any]]:
+        """특정 노트 조회"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM user_notes WHERE id = ?", (note_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"노트 조회 오류: {e}")
+            return None
+
+    # =========================================================================
+    # Dashboard: Interest History & Trend Methods
+    # =========================================================================
+    
+    def record_interest_snapshot(self, user_id: int) -> bool:
+        """현재 관심사 스냅샷을 히스토리에 기록"""
+        try:
+            conn = self.get_user_connection(user_id)
+            interests = self.get_user_interests(user_id, limit=100)
+            
+            for interest in interests:
+                conn.execute("""
+                    INSERT INTO interest_history (keyword, score, recorded_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                """, (interest['keyword'], interest['score']))
+            
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"관심사 스냅샷 기록 오류: {e}")
+            return False
+    
+    def get_interest_trend(self, user_id: int, days: int = 30, 
+                           keyword: str = None) -> List[Dict[str, Any]]:
+        """관심사 트렌드 조회 (날짜별 스코어 변화)"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            
+            if keyword:
+                cursor = conn.execute("""
+                    SELECT keyword, score, recorded_at,
+                           DATE(recorded_at) as date
+                    FROM interest_history
+                    WHERE keyword = ? 
+                      AND recorded_at >= datetime('now', ?)
+                    ORDER BY recorded_at ASC
+                """, (keyword, f'-{days} days'))
+            else:
+                cursor = conn.execute("""
+                    SELECT keyword, score, recorded_at,
+                           DATE(recorded_at) as date
+                    FROM interest_history
+                    WHERE recorded_at >= datetime('now', ?)
+                    ORDER BY recorded_at ASC
+                """, (f'-{days} days',))
+            
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"관심사 트렌드 조회 오류: {e}")
+            return []
+    
+    def get_interest_summary(self, user_id: int, days: int = 30) -> Dict[str, Any]:
+        """관심사 요약 통계 (대시보드용)"""
+        try:
+            conn = self.get_user_connection(user_id)
+            
+            # 현재 관심사 개수
+            cursor = conn.execute("SELECT COUNT(*) FROM user_interests")
+            total_interests = cursor.fetchone()[0]
+            
+            # 상위 관심사
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT keyword, score FROM user_interests 
+                ORDER BY score DESC LIMIT 5
+            """)
+            top_interests = [dict(row) for row in cursor.fetchall()]
+            
+            # 최근 추가된 관심사 (7일 이내)
+            cursor = conn.execute("""
+                SELECT keyword, score, created_at FROM user_interests 
+                WHERE created_at >= datetime('now', '-7 days')
+                ORDER BY created_at DESC LIMIT 5
+            """)
+            recent_interests = [dict(row) for row in cursor.fetchall()]
+            
+            # 최근 활성화된 관심사 (최근 업데이트)
+            cursor = conn.execute("""
+                SELECT keyword, score, last_detected_at FROM user_interests 
+                ORDER BY last_detected_at DESC LIMIT 5
+            """)
+            active_interests = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "total_count": total_interests,
+                "top_interests": top_interests,
+                "recent_interests": recent_interests,
+                "active_interests": active_interests
+            }
+        except Exception as e:
+            logger.error(f"관심사 요약 조회 오류: {e}")
+            return {"total_count": 0, "top_interests": [], "recent_interests": [], "active_interests": []}
+
+    # =========================================================================
+    # Dashboard: Activity Summary
+    # =========================================================================
+    
+    def get_activity_summary(self, user_id: int, days: int = 7) -> Dict[str, Any]:
+        """사용자 활동 요약 (대시보드용)"""
+        try:
+            conn = self.get_user_connection(user_id)
+            
+            # 채팅 메시지 수
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM chat_messages 
+                WHERE created_at >= datetime('now', ?)
+            """, (f'-{days} days',))
+            chat_count = cursor.fetchone()[0]
+            
+            # 브라우저 로그 수
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM browser_logs 
+                WHERE visit_time >= datetime('now', ?)
+            """, (f'-{days} days',))
+            browser_count = cursor.fetchone()[0]
+            
+            # 추천 수
+            cursor = conn.execute("""
+                SELECT COUNT(*), 
+                       SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) as accepted,
+                       SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
+                FROM recommendations 
+                WHERE created_at >= datetime('now', ?)
+            """, (f'-{days} days',))
+            rec_row = cursor.fetchone()
+            rec_total = rec_row[0] or 0
+            rec_accepted = rec_row[1] or 0
+            rec_rejected = rec_row[2] or 0
+            
+            # 파일 수
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM files 
+                WHERE processed_at >= datetime('now', ?)
+            """, (f'-{days} days',))
+            file_count = cursor.fetchone()[0]
+            
+            # 마지막 활동 시간
+            cursor = conn.execute("""
+                SELECT MAX(created_at) FROM chat_messages
+            """)
+            last_chat = cursor.fetchone()[0]
+            
+            return {
+                "period_days": days,
+                "chat_messages": chat_count,
+                "browser_visits": browser_count,
+                "files_processed": file_count,
+                "recommendations": {
+                    "total": rec_total,
+                    "accepted": rec_accepted,
+                    "rejected": rec_rejected
+                },
+                "last_chat_at": last_chat
+            }
+        except Exception as e:
+            logger.error(f"활동 요약 조회 오류: {e}")
+            return {
+                "period_days": days,
+                "chat_messages": 0,
+                "browser_visits": 0,
+                "files_processed": 0,
+                "recommendations": {"total": 0, "accepted": 0, "rejected": 0},
+                "last_chat_at": None
+            }
 
 
 # Backward compatibility alias
