@@ -780,8 +780,8 @@ class FolderSelector:
             )
             if result:
                 self.selected_items.add(Path.home())
-        else:
-                return
+            else:
+                return  # 사용자가 '아니오' 선택 시 창 닫지 않음
         
         # 정리 후 창 닫기 (선택 결과 유지)
         self._cleanup_and_close()
