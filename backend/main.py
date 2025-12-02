@@ -132,6 +132,13 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("📦 싱글톤 리소스 초기화 시작...")
         embedder, repository, react_agent, profile_indexer = _initialize_singletons(CONFIG_PATH)
+        
+        # 전역 변수에 할당
+        global_embedder = embedder
+        global_repository = repository
+        global_react_agent = react_agent
+        global_profile_indexer = profile_indexer
+        
         logger.info("--- ✅ Singleton Resources Initialized Successfully ---")
         
     except Exception as e:

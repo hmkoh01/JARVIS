@@ -329,7 +329,7 @@ class RecommendationAgent(BaseAgent):
         try:
             response = self.llm_model.generate_content(
                 prompt,
-                request_options={"timeout": 30}
+                request_options={"timeout": 90}
             )
             
             # prompt_feedback 확인 (안전 필터 차단 여부)
@@ -685,7 +685,7 @@ class RecommendationAgent(BaseAgent):
             
             response = report_model.generate_content(
                 prompt,
-                request_options={"timeout": 30}
+                request_options={"timeout": 90}
             )
             
             report_text = self._extract_llm_response_text(response)

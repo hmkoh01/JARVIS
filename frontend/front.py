@@ -656,6 +656,21 @@ class FloatingChatApp:
         )
         recommendation_button.pack(side='left', padx=(0, 5))
 
+        # 폴더 변경 버튼
+        folder_button = tk.Button(
+            buttons_container,
+            text="📁",
+            font=('Arial', 18),
+            bg=COLORS["primary"],
+            fg=COLORS["text_inverse"],
+            relief='flat',
+            cursor='hand2',
+            command=self.prompt_change_data_folder,
+            activebackground='#4338CA',
+            activeforeground='white'
+        )
+        folder_button.pack(side='left', padx=(0, 5))
+        
         # 설정 버튼
         settings_button = tk.Button(
             buttons_container,
@@ -3014,6 +3029,9 @@ class FloatingChatApp:
             args=(keyword, recommendation_id),
             daemon=True
         ).start()
+        
+        # 1초 후 채팅창 닫고 플로팅 아이콘 상태로 전환
+        self.root.after(1000, self._close_chat_after_report_request)
     
     def _handle_deep_dive_no(self, offer_frame):
         """'아니' 버튼 클릭 - 제안 UI 제거"""
@@ -3022,6 +3040,25 @@ class FloatingChatApp:
         # 버튼 영역만 제거
         if offer_frame and offer_frame.winfo_exists():
             offer_frame.destroy()
+    
+    def _close_chat_after_report_request(self):
+        """심층 보고서 요청 후 채팅창을 닫고 플로팅 아이콘 상태로 전환"""
+        try:
+            if self.chat_window and self.chat_window.winfo_exists():
+                self.chat_window.withdraw()
+                self.is_chat_open = False
+                
+                # 플로팅 버튼 다시 표시
+                self.root.deiconify()
+                self.root.lift()
+                self.root.focus_force()
+                
+                # 버튼이 확실히 보이도록 재확인
+                self.root.after(100, self.ensure_button_visible)
+                
+                print("[UI] 보고서 생성 요청 후 채팅창 자동 닫힘 - 플로팅 아이콘 유지")
+        except Exception as e:
+            print(f"[UI] 채팅창 닫기 오류: {e}")
     
     def _call_report_create_api(self, keyword, recommendation_id=None):
         """[백그라운드 스레드] 보고서 생성 API를 호출합니다."""
@@ -3526,8 +3563,6 @@ class FloatingChatApp:
         
         # 메뉴 생성
         menu = tk.Menu(self.chat_window, tearoff=0)
-        menu.add_command(label="📁 데이터 폴더 변경", command=self.change_data_folder)
-        menu.add_separator()
         menu.add_command(label="ℹ️ 정보", command=lambda: messagebox.showinfo("JARVIS", "JARVIS Multi-Agent System\nVersion 1.0", parent=self.chat_window))
         
         # 설정 버튼 위치에 메뉴 표시 (헤더 높이 증가에 맞춰 조정)
@@ -3535,31 +3570,38 @@ class FloatingChatApp:
         button_y = self.chat_window.winfo_rooty() + 60
         menu.post(button_x, button_y)
     
-    def change_data_folder(self):
-        """데이터 폴더 변경"""
+    def prompt_change_data_folder(self):
+        """폴더 아이콘 클릭 시 확인 대화상자 표시 후 폴더 변경 진행"""
+        import tkinter.messagebox as messagebox
+        
+        result = messagebox.askyesno(
+            "데이터 폴더 변경",
+            "데이터 폴더를 변경하시겠습니까?\n\n기존 데이터가 모두 삭제되고\n새로운 폴더에서 데이터를 수집합니다.",
+            parent=self.chat_window
+        )
+        
+        if result:
+            self._proceed_change_data_folder()
+    
+    def _proceed_change_data_folder(self):
+        """폴더 변경 진행 (확인 후 호출됨)"""
         import tkinter.messagebox as messagebox
         import sys
         from pathlib import Path
         
-        # 확인 대화상자
-        result = messagebox.askyesno(
-            "데이터 폴더 변경",
-            "데이터 폴더를 변경하면 기존 데이터가 모두 삭제되고\n새로운 폴더에서 데이터를 수집합니다.\n\n계속하시겠습니까?"
-        )
-        
-        if not result:
-            return
+        # 기존 선택된 폴더 가져오기
+        current_folders = self._get_current_selected_folders()
         
         # 폴더 선택 UI 표시
         try:
             sys.path.insert(0, str(Path("frontend")))
             from folder_selector import select_folders
             
-            # 폴더 선택
-            selected_folders = select_folders()
+            # 폴더 선택 (기존 선택 항목 전달)
+            selected_folders = select_folders(initial_selections=current_folders)
             
             if selected_folders == "cancelled":
-                messagebox.showinfo("알림", "폴더 선택이 취소되었습니다.")
+                messagebox.showinfo("알림", "폴더 선택이 취소되었습니다.", parent=self.chat_window)
                 return
             
             # 폴더 경로 결정
@@ -3570,14 +3612,51 @@ class FloatingChatApp:
                 # 첫 번째 폴더 사용
                 folder_path = selected_folders[0]
             else:
-                messagebox.showwarning("오류", "올바른 폴더를 선택해주세요.")
+                messagebox.showwarning("오류", "올바른 폴더를 선택해주세요.", parent=self.chat_window)
                 return
             
             # 백엔드 API 호출
             self.call_update_folder_api(folder_path)
             
         except Exception as e:
-            messagebox.showerror("오류", f"폴더 선택 중 오류가 발생했습니다: {e}")
+            messagebox.showerror("오류", f"폴더 선택 중 오류가 발생했습니다: {e}", parent=self.chat_window)
+    
+    def change_data_folder(self):
+        """데이터 폴더 변경 (레거시 호환용 - prompt_change_data_folder 호출)"""
+        self.prompt_change_data_folder()
+    
+    def _get_current_selected_folders(self) -> list:
+        """현재 설정된 폴더 경로를 API에서 가져옵니다."""
+        try:
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path("frontend")))
+            from login_view import get_stored_token
+            
+            token = get_stored_token()
+            if not token:
+                return []
+            
+            response = requests.get(
+                f"{self.API_BASE_URL}/settings/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    user_info = data.get("data", {}).get("user", {})
+                    selected_folder = user_info.get("selected_folder")
+                    if selected_folder:
+                        # 콤마로 구분된 여러 폴더일 수 있음
+                        if "," in selected_folder:
+                            return [f.strip() for f in selected_folder.split(",") if f.strip()]
+                        return [selected_folder]
+            return []
+        except Exception as e:
+            print(f"[UI] 현재 폴더 정보 가져오기 실패: {e}")
+            return []
     
     def call_update_folder_api(self, folder_path: str):
         """백엔드에 폴더 업데이트 요청"""
