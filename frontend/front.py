@@ -185,6 +185,9 @@ class FloatingChatApp:
         self.collection_status_visible = False
         self.collection_bubble_auto_close_id = None
         
+        # 수집 중 대기 중인 추천 (수집 완료 후 표시)
+        self.pending_recommendations_queue = []
+        
         # WebSocket 연결 시작 (실시간 추천 알림용)
         self.connect_websocket()
         
@@ -646,7 +649,7 @@ class FloatingChatApp:
                 response = requests.get(
                     f"{self.API_BASE_URL}/api/v2/data-collection/status/{self.user_id}",
                     headers={"Authorization": f"Bearer {self.jwt_token}"},
-                    timeout=10
+                    timeout=30  # 임베딩 중 API가 느려질 수 있어 타임아웃 증가
                 )
                 
                 if response.status_code == 200:
@@ -693,6 +696,18 @@ class FloatingChatApp:
         self._show_temporary_message_bubble("🎉 초기 데이터 수집이 완료되었습니다!", 3000)
         
         print("[Collection] 데이터 수집 완료!")
+        
+        # 5초 후 대기 중인 추천 표시
+        if self.pending_recommendations_queue:
+            print(f"[Recommendation] 5초 후 대기 중인 추천 {len(self.pending_recommendations_queue)}개를 표시합니다.")
+            self.root.after(5000, self._show_pending_recommendations)
+    
+    def _show_pending_recommendations(self):
+        """대기 중인 추천을 표시합니다."""
+        if self.pending_recommendations_queue:
+            recommendations = self.pending_recommendations_queue
+            self.pending_recommendations_queue = []
+            self.show_recommendation_notification(recommendations)
     
     def _start_spinner_animation(self):
         """스피너 애니메이션을 시작합니다."""
@@ -811,31 +826,14 @@ class FloatingChatApp:
         inner_frame = tk.Frame(main_frame, bg=COLORS["panel_bg"], padx=15, pady=15)
         inner_frame.pack(fill='both', expand=True)
         
-        # 헤더
-        header_frame = tk.Frame(inner_frame, bg=COLORS["panel_bg"])
-        header_frame.pack(fill='x', pady=(0, 10))
-        
+        # 헤더 (닫기 버튼 제거 - 3초 후 자동 닫힘)
         tk.Label(
-            header_frame,
+            inner_frame,
             text="📊 데이터 수집 현황",
             font=(self.default_font, 13, 'bold'),
             bg=COLORS["panel_bg"],
             fg=COLORS["text_primary"]
-        ).pack(side='left')
-        
-        # 닫기 버튼
-        close_btn = tk.Button(
-            header_frame,
-            text="✕",
-            font=(self.default_font, 10),
-            command=self._close_collection_status_bubble,
-            relief='flat',
-            bg=COLORS["panel_bg"],
-            fg=COLORS["text_muted"],
-            cursor='hand2',
-            width=2
-        )
-        close_btn.pack(side='right')
+        ).pack(pady=(0, 10))
         
         # 진행률 바 배경
         progress_bg = tk.Frame(inner_frame, bg=COLORS["border"], height=8)
@@ -903,7 +901,7 @@ class FloatingChatApp:
         self.collection_status_bubble = bubble
         self.collection_status_visible = True
         
-        # 10초 후 자동 닫기
+        # 3초 후 자동 닫기
         self.collection_bubble_auto_close_id = self.root.after(
             3000, 
             self._close_collection_status_bubble
@@ -3004,6 +3002,12 @@ class FloatingChatApp:
     def show_recommendation_notification(self, recommendations):
         """새로운 추천이 있으면 말풍선을 표시합니다."""
         if not recommendations:
+            return
+        
+        # 데이터 수집 중이면 추천을 대기열에 추가하고 나중에 표시
+        if self.is_collecting_data:
+            print("[Recommendation] 데이터 수집 중이므로 추천을 대기열에 추가합니다.")
+            self.pending_recommendations_queue.extend(recommendations)
             return
         
         # 이미 말풍선이 떠있으면 닫고 새로 띄움

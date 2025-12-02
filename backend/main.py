@@ -68,6 +68,8 @@ async def trigger_recommendation_analysis(force_recommend: bool = False):
     Args:
         force_recommend: True면 데이터가 있을 경우 무조건 추천 생성 (시작 시 초기 분석용)
     """
+    from database.data_collector import data_collection_managers
+    
     logger.info(f"📈 추천 분석 시작... (force_recommend={force_recommend})")
     try:
         # agent_registry에서 recommendation 에이전트를 가져옵니다.
@@ -83,6 +85,14 @@ async def trigger_recommendation_analysis(force_recommend: bool = False):
             logger.info(f"{len(all_users)}명의 사용자에 대한 분석을 시작합니다.")
             for user in all_users:
                 user_id = user['user_id']
+                
+                # 초기 데이터 수집이 완료되지 않은 사용자는 스킵
+                if user_id in data_collection_managers:
+                    manager = data_collection_managers[user_id]
+                    if not manager.initial_collection_done:
+                        logger.info(f"⏸️ 사용자 {user_id}의 초기 데이터 수집이 진행 중입니다. 추천 분석을 스킵합니다.")
+                        continue
+                
                 await recommendation_agent.run_active_analysis(user_id, force_recommend=force_recommend)
         else:
             logger.warning("Recommendation agent 또는 분석 메서드를 찾을 수 없습니다.")
