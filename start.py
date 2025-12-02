@@ -612,8 +612,13 @@ def start_backend():
         traceback.print_exc()
         return None
 
-def start_frontend():
-    """프론트엔드 시작 (데스크톱 플로팅 채팅 앱)"""
+def start_frontend(start_collection_mode: bool = False, selected_folders: list = None):
+    """프론트엔드 시작 (데스크톱 플로팅 채팅 앱)
+    
+    Args:
+        start_collection_mode: True면 데이터 수집 모드로 시작
+        selected_folders: 수집할 폴더 목록 (start_collection_mode=True일 때 사용)
+    """
     print("🎨 데스크톱 플로팅 채팅 앱 시작 중...")
     
     try:
@@ -622,11 +627,19 @@ def start_frontend():
             print("❌ frontend/front.py 파일을 찾을 수 없습니다.")
             return None
         
+        # 환경 변수로 수집 모드 정보 전달
+        env = os.environ.copy()
+        if start_collection_mode:
+            env["JARVIS_START_COLLECTION"] = "1"
+            if selected_folders:
+                env["JARVIS_SELECTED_FOLDERS"] = json.dumps(selected_folders)
+            else:
+                env["JARVIS_SELECTED_FOLDERS"] = "[]"
+        
         # 데스크톱 플로팅 채팅 앱 실행
-        # stdout/stderr 파이프를 제거하여 콘솔에 출력되도록 함
         process = subprocess.Popen([
             sys.executable, str(frontend_file)
-        ])  # stdout, stderr 인자 제거 - 콘솔에 직접 출력
+        ], env=env)
         
         # 서버 시작 대기
         time.sleep(3)
@@ -634,10 +647,11 @@ def start_frontend():
         if process.poll() is None:
             print("✅ 데스크톱 플로팅 채팅 앱이 시작되었습니다.")
             print("💬 화면 우측 하단에 플로팅 버튼이 나타납니다.")
+            if start_collection_mode:
+                print("📊 데이터 수집 모드로 시작되었습니다.")
             print("💡 프런트엔드 디버그 로그가 이 콘솔에 출력됩니다.")
             return process
         else:
-            # 프로세스가 즉시 종료된 경우 (에러 발생)
             print(f"❌ 데스크톱 앱 시작 실패: 프로세스가 즉시 종료되었습니다.")
             print("   프런트엔드 파일에 오류가 있을 수 있습니다. 직접 실행하여 확인하세요:")
             print(f"   python {frontend_file}")
@@ -753,10 +767,8 @@ def main():
         
         # 선택된 폴더를 백엔드에 전송
         if selected_folders_global:
-            # 여러 폴더가 선택된 경우 첫 번째 폴더를 사용
             folder_path = selected_folders_global[0]
         else:
-            # 전체 사용자 폴더 스캔 선택됨
             folder_path = None
         
         # 백엔드에 폴더 경로 전송
@@ -766,6 +778,17 @@ def main():
             return
         
         print("✅ 초기 설정이 완료되었습니다.")
+        
+        # 프론트엔드를 데이터 수집 모드로 시작 (데이터 수집 완료를 기다리지 않음)
+        # 프론트엔드에서 직접 데이터 수집 API를 호출하고 진행률을 표시함
+        print("\n🎨 플로팅 앱을 시작하고 데이터 수집을 진행합니다...")
+        frontend_process = start_frontend(
+            start_collection_mode=True,
+            selected_folders=selected_folders_global or []
+        )
+        if not frontend_process:
+            backend_process.terminate()
+            return
     else:
         # 기존 사용자: 설문지와 폴더 선택 건너뛰기
         print("\n✅ 기존 사용자입니다. 초기 설정을 건너뜁니다.")
@@ -773,24 +796,11 @@ def main():
         print("   - 폴더 선택: 이미 완료됨")
         print("   - 기존 데이터 사용")
         
-    # 초기 데이터 수집 수행 (완료될 때까지 대기)
-    if has_completed_setup == 0:
-        print("\n📊 초기 데이터 수집을 시작합니다...")
-        if not perform_initial_data_collection_with_progress(user_id):
-            print("❌ 초기 데이터 수집에 실패했습니다. 시스템을 종료합니다.")
+        # 프론트엔드 시작 (일반 모드)
+        frontend_process = start_frontend()
+        if not frontend_process:
             backend_process.terminate()
             return
-    else:
-        print("\n📊 기존 데이터를 사용합니다.")
-        print("   - 이미 수집된 파일 데이터 사용")
-        print("   - 이미 수집된 브라우저 히스토리 사용")
-        print("   - 이미 수집된 앱 사용 기록 사용")
-        
-    # 프론트엔드 시작
-    frontend_process = start_frontend()
-    if not frontend_process:
-        backend_process.terminate()
-        return
         
     print("\n🎉 JARVIS Multi-Agent System이 성공적으로 시작되었습니다!")
     print("=" * 60)

@@ -168,8 +168,28 @@ class FloatingChatApp:
         self.ws_connected = False
         self.ws_reconnect_delay = 5  # 재연결 대기 시간 (초)
         
+        # =========================================================================
+        # 데이터 수집 상태 관련 변수
+        # =========================================================================
+        self.is_collecting_data = False  # 현재 데이터 수집 중인지
+        self.collection_progress = 0.0  # 수집 진행률 (0-100)
+        self.collection_message = ""  # 현재 수집 단계 메시지
+        self.collection_check_id = None  # 수집 상태 체크 타이머 ID
+        
+        # 스피너 애니메이션 관련 변수
+        self.spinner_angle = 0
+        self.spinner_animation_id = None
+        
+        # 수집 상태 말풍선 관련 변수
+        self.collection_status_bubble = None
+        self.collection_status_visible = False
+        self.collection_bubble_auto_close_id = None
+        
         # WebSocket 연결 시작 (실시간 추천 알림용)
         self.connect_websocket()
+        
+        # 환경 변수 확인하여 데이터 수집 모드로 시작할지 결정
+        self._check_and_start_collection_mode()
     
     # =========================================================================
     # 토큰/인증 상태 관리 메서드
@@ -547,10 +567,391 @@ class FloatingChatApp:
         
     def stop_drag(self, event):
         """드래그 종료"""
-        # 드래그가 아니었다면 클릭으로 간주하여 채팅창 토글
+        # 드래그가 아니었다면 클릭으로 간주
         if not self.drag_data["dragging"]:
-            self.toggle_chat_window()
+            # 데이터 수집 중이면 상태 말풍선 표시, 아니면 채팅창 토글
+            if self.is_collecting_data:
+                self.show_collection_status_bubble()
+            else:
+                self.toggle_chat_window()
         self.drag_data["dragging"] = False
+    
+    # =========================================================================
+    # 데이터 수집 상태 및 스피너 애니메이션 메서드
+    # =========================================================================
+    
+    def start_data_collection_mode(self, selected_folders: list = None):
+        """
+        데이터 수집 모드를 시작합니다.
+        - 스피너 애니메이션 시작
+        - '초기 데이터 수집을 시작합니다.' 말풍선 3초 표시
+        - 백엔드 API로 수집 시작 요청
+        - 진행률 모니터링 시작
+        """
+        self.is_collecting_data = True
+        self.collection_progress = 0.0
+        self.collection_message = "초기화 중..."
+        self.selected_folders_for_collection = selected_folders or []
+        
+        # 스피너 애니메이션 시작
+        self._start_spinner_animation()
+        
+        # 시작 말풍선 표시 (3초 후 자동 닫힘)
+        self._show_temporary_message_bubble("🚀 초기 데이터 수집을 시작합니다.", 3000)
+        
+        # 백엔드에 데이터 수집 시작 요청
+        threading.Thread(target=self._start_collection_api_call, daemon=True).start()
+        
+        # 진행률 모니터링 시작
+        self._start_collection_progress_monitoring()
+    
+    def _start_collection_api_call(self):
+        """백엔드 API를 호출하여 데이터 수집을 시작합니다."""
+        try:
+            if not self.jwt_token or not self.user_id:
+                print("[Collection] 인증 정보가 없어 데이터 수집을 시작할 수 없습니다.")
+                return
+            
+            response = requests.post(
+                f"{self.API_BASE_URL}/api/v2/data-collection/start/{self.user_id}",
+                headers={"Authorization": f"Bearer {self.jwt_token}"},
+                json={"selected_folders": self.selected_folders_for_collection},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                print("[Collection] 데이터 수집 시작 요청 성공")
+            else:
+                print(f"[Collection] 데이터 수집 시작 실패: {response.text}")
+        except Exception as e:
+            print(f"[Collection] 데이터 수집 시작 API 호출 오류: {e}")
+    
+    def _start_collection_progress_monitoring(self):
+        """데이터 수집 진행률을 주기적으로 모니터링합니다."""
+        if self.collection_check_id:
+            self.root.after_cancel(self.collection_check_id)
+        
+        self._check_collection_progress()
+    
+    def _check_collection_progress(self):
+        """백엔드에서 데이터 수집 진행률을 조회합니다."""
+        if not self.is_collecting_data:
+            return
+        
+        def fetch_progress():
+            try:
+                if not self.jwt_token or not self.user_id:
+                    return
+                
+                response = requests.get(
+                    f"{self.API_BASE_URL}/api/v2/data-collection/status/{self.user_id}",
+                    headers={"Authorization": f"Bearer {self.jwt_token}"},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    progress = data.get("progress", 0.0) or 0.0
+                    message = data.get("progress_message", "")
+                    is_done = data.get("is_done", False)
+                    
+                    # UI 업데이트는 메인 스레드에서
+                    self.root.after(0, lambda: self._update_collection_progress(progress, message, is_done))
+            except Exception as e:
+                print(f"[Collection] 진행률 조회 오류: {e}")
+        
+        threading.Thread(target=fetch_progress, daemon=True).start()
+        
+        # 3초마다 다시 체크
+        if self.is_collecting_data:
+            self.collection_check_id = self.root.after(3000, self._check_collection_progress)
+    
+    def _update_collection_progress(self, progress: float, message: str, is_done: bool):
+        """수집 진행률 정보를 업데이트합니다."""
+        self.collection_progress = progress
+        self.collection_message = message
+        
+        if is_done:
+            self._on_collection_complete()
+    
+    def _on_collection_complete(self):
+        """데이터 수집이 완료되었을 때 호출됩니다."""
+        self.is_collecting_data = False
+        
+        # 스피너 애니메이션 중지
+        self._stop_spinner_animation()
+        
+        # 진행률 모니터링 중지
+        if self.collection_check_id:
+            self.root.after_cancel(self.collection_check_id)
+            self.collection_check_id = None
+        
+        # 상태 말풍선 닫기 (열려있다면)
+        self._close_collection_status_bubble()
+        
+        # 완료 말풍선 표시 (3초 후 자동 닫힘)
+        self._show_temporary_message_bubble("🎉 초기 데이터 수집이 완료되었습니다!", 3000)
+        
+        print("[Collection] 데이터 수집 완료!")
+    
+    def _start_spinner_animation(self):
+        """스피너 애니메이션을 시작합니다."""
+        self.spinner_angle = 0
+        self._animate_spinner()
+    
+    def _animate_spinner(self):
+        """스피너 프레임을 그립니다."""
+        if not self.is_collecting_data:
+            return
+        
+        # 기존 스피너 삭제
+        self.button_canvas.delete('spinner')
+        
+        # 회전하는 arc 그리기 (270도 원호)
+        # 버튼 크기(70x70) 기준, 안쪽에 여백을 두고 그림
+        self.button_canvas.create_arc(
+            8, 8, 62, 62,
+            start=self.spinner_angle, extent=270,
+            outline='white', width=3,
+            style='arc', tags='spinner'
+        )
+        
+        self.spinner_angle = (self.spinner_angle + 15) % 360
+        self.spinner_animation_id = self.root.after(50, self._animate_spinner)
+    
+    def _stop_spinner_animation(self):
+        """스피너 애니메이션을 중지합니다."""
+        if self.spinner_animation_id:
+            self.root.after_cancel(self.spinner_animation_id)
+            self.spinner_animation_id = None
+        
+        self.button_canvas.delete('spinner')
+    
+    def _show_temporary_message_bubble(self, message: str, duration_ms: int = 3000):
+        """임시 메시지 말풍선을 표시합니다 (지정된 시간 후 자동 닫힘)."""
+        # 기존 말풍선 닫기
+        self._close_collection_status_bubble()
+        
+        # 새 말풍선 생성
+        bubble = tk.Toplevel(self.root)
+        bubble.wm_overrideredirect(True)
+        bubble.attributes('-topmost', True)
+        bubble.configure(bg=COLORS["primary"])
+        
+        # macOS 설정
+        self._setup_window_for_macos(bubble, is_popup=True)
+        
+        # 메인 프레임
+        main_frame = tk.Frame(bubble, bg=COLORS["primary"], padx=15, pady=12)
+        main_frame.pack(fill='both', expand=True)
+        
+        # 메시지 라벨
+        msg_label = tk.Label(
+            main_frame,
+            text=message,
+            font=(self.default_font, 12, 'bold'),
+            bg=COLORS["primary"],
+            fg=COLORS["text_inverse"],
+            wraplength=250
+        )
+        msg_label.pack()
+        
+        # 위치 계산 (플로팅 버튼 위)
+        bubble.update_idletasks()
+        bubble_width = bubble.winfo_reqwidth()
+        bubble_height = bubble.winfo_reqheight()
+        
+        button_x = self.root.winfo_x()
+        button_y = self.root.winfo_y()
+        
+        x = button_x + 35 - bubble_width // 2
+        y = button_y - bubble_height - 15
+        
+        # 화면 경계 체크
+        screen_width = self.root.winfo_screenwidth()
+        if x < 10:
+            x = 10
+        elif x + bubble_width > screen_width - 10:
+            x = screen_width - bubble_width - 10
+        if y < 10:
+            y = button_y + 80
+        
+        bubble.geometry(f"+{x}+{y}")
+        
+        self.collection_status_bubble = bubble
+        self.collection_status_visible = True
+        
+        # 자동 닫기 타이머
+        self.collection_bubble_auto_close_id = self.root.after(
+            duration_ms, 
+            self._close_collection_status_bubble
+        )
+    
+    def show_collection_status_bubble(self):
+        """현재 데이터 수집 상태를 말풍선으로 표시합니다."""
+        if not self.is_collecting_data:
+            return
+        
+        # 기존 말풍선 닫기
+        self._close_collection_status_bubble()
+        
+        # 새 말풍선 생성
+        bubble = tk.Toplevel(self.root)
+        bubble.wm_overrideredirect(True)
+        bubble.attributes('-topmost', True)
+        bubble.configure(bg='white')
+        
+        # macOS 설정
+        self._setup_window_for_macos(bubble, is_popup=True)
+        
+        # 메인 프레임
+        main_frame = tk.Frame(bubble, bg='white', padx=2, pady=2)
+        main_frame.pack(fill='both', expand=True)
+        
+        inner_frame = tk.Frame(main_frame, bg=COLORS["panel_bg"], padx=15, pady=15)
+        inner_frame.pack(fill='both', expand=True)
+        
+        # 헤더
+        header_frame = tk.Frame(inner_frame, bg=COLORS["panel_bg"])
+        header_frame.pack(fill='x', pady=(0, 10))
+        
+        tk.Label(
+            header_frame,
+            text="📊 데이터 수집 현황",
+            font=(self.default_font, 13, 'bold'),
+            bg=COLORS["panel_bg"],
+            fg=COLORS["text_primary"]
+        ).pack(side='left')
+        
+        # 닫기 버튼
+        close_btn = tk.Button(
+            header_frame,
+            text="✕",
+            font=(self.default_font, 10),
+            command=self._close_collection_status_bubble,
+            relief='flat',
+            bg=COLORS["panel_bg"],
+            fg=COLORS["text_muted"],
+            cursor='hand2',
+            width=2
+        )
+        close_btn.pack(side='right')
+        
+        # 진행률 바 배경
+        progress_bg = tk.Frame(inner_frame, bg=COLORS["border"], height=8)
+        progress_bg.pack(fill='x', pady=(0, 10))
+        progress_bg.pack_propagate(False)
+        
+        # 진행률 바
+        progress_width = max(int(self.collection_progress * 2.5), 1)  # 최대 250px
+        progress_bar = tk.Frame(progress_bg, bg=COLORS["primary"], width=progress_width, height=8)
+        progress_bar.pack(side='left')
+        
+        # 진행률 텍스트
+        tk.Label(
+            inner_frame,
+            text=f"{int(self.collection_progress)}%",
+            font=(self.default_font, 16, 'bold'),
+            bg=COLORS["panel_bg"],
+            fg=COLORS["primary"]
+        ).pack(pady=(0, 5))
+        
+        # 현재 단계 메시지
+        status_message = self._get_collection_status_detail()
+        tk.Label(
+            inner_frame,
+            text=status_message,
+            font=(self.default_font, 11),
+            bg=COLORS["panel_bg"],
+            fg=COLORS["text_secondary"],
+            wraplength=250,
+            justify='center'
+        ).pack(pady=(0, 10))
+        
+        # 안내 메시지
+        tk.Label(
+            inner_frame,
+            text="💡 이 작업은 보통 3~5분 정도 걸려요.\n조금만 기다려주세요.",
+            font=(self.default_font, 10),
+            bg=COLORS["panel_bg"],
+            fg=COLORS["text_muted"],
+            justify='center'
+        ).pack()
+        
+        # 위치 계산
+        bubble.update_idletasks()
+        bubble_width = bubble.winfo_reqwidth()
+        bubble_height = bubble.winfo_reqheight()
+        
+        button_x = self.root.winfo_x()
+        button_y = self.root.winfo_y()
+        
+        x = button_x + 35 - bubble_width // 2
+        y = button_y - bubble_height - 15
+        
+        # 화면 경계 체크
+        screen_width = self.root.winfo_screenwidth()
+        if x < 10:
+            x = 10
+        elif x + bubble_width > screen_width - 10:
+            x = screen_width - bubble_width - 10
+        if y < 10:
+            y = button_y + 80
+        
+        bubble.geometry(f"+{x}+{y}")
+        
+        self.collection_status_bubble = bubble
+        self.collection_status_visible = True
+        
+        # 10초 후 자동 닫기
+        self.collection_bubble_auto_close_id = self.root.after(
+            3000, 
+            self._close_collection_status_bubble
+        )
+    
+    def _get_collection_status_detail(self) -> str:
+        """현재 진행률에 따른 상세 상태 메시지를 반환합니다."""
+        progress = self.collection_progress
+        
+        if progress < 50:
+            return "📁 파일을 스캔하고 있어요...\n선택하신 폴더에서 문서를 찾고 있습니다."
+        elif progress < 65:
+            return "🌐 브라우저 기록을 수집하고 있어요...\n최근 방문한 웹사이트를 확인하고 있습니다."
+        elif progress < 85:
+            return "📄 파일을 분석하고 있어요...\n문서에서 핵심 키워드를 추출하고 있습니다."
+        elif progress < 95:
+            return "🔍 웹 콘텐츠를 분석하고 있어요...\n방문한 웹페이지의 내용을 분석하고 있습니다."
+        else:
+            return "✨ 마무리 중이에요...\n거의 다 됐습니다!"
+    
+    def _close_collection_status_bubble(self):
+        """수집 상태 말풍선을 닫습니다."""
+        if self.collection_bubble_auto_close_id:
+            self.root.after_cancel(self.collection_bubble_auto_close_id)
+            self.collection_bubble_auto_close_id = None
+        
+        if self.collection_status_bubble and self.collection_status_bubble.winfo_exists():
+            self.collection_status_bubble.destroy()
+        
+        self.collection_status_bubble = None
+        self.collection_status_visible = False
+    
+    def _check_and_start_collection_mode(self):
+        """환경 변수를 확인하여 데이터 수집 모드로 시작할지 결정합니다."""
+        start_collection = os.environ.get("JARVIS_START_COLLECTION", "0")
+        
+        if start_collection == "1":
+            # 선택된 폴더 목록 파싱
+            selected_folders_json = os.environ.get("JARVIS_SELECTED_FOLDERS", "[]")
+            try:
+                selected_folders = json.loads(selected_folders_json)
+            except json.JSONDecodeError:
+                selected_folders = []
+            
+            print(f"[Collection] 데이터 수집 모드로 시작합니다. 폴더: {len(selected_folders)}개")
+            
+            # 약간의 딜레이 후 수집 모드 시작 (UI가 완전히 로드된 후)
+            self.root.after(500, lambda: self.start_data_collection_mode(selected_folders))
         
     def show_context_menu(self, event):
         """우클릭 컨텍스트 메뉴 표시"""
