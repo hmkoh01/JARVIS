@@ -191,12 +191,12 @@ class LangGraphSupervisor:
                 "reasoning": "코딩 관련 키워드가 감지되었습니다.",
                 "selected_agents": ["coding_agent"]
             }
-        elif any(keyword in user_input_lower for keyword in ['대시보드', '차트', '그래프', '데이터', '분석']):
+        elif any(keyword in user_input_lower for keyword in ['대시보드', '차트', '그래프', '분석', '트렌드', '통계', '패턴', '비교']):
             return {
                 "intent": "dashboard",
                 "confidence": 0.8,
-                "reasoning": "대시보드 관련 키워드가 감지되었습니다.",
-                "selected_agents": ["dashboard_agent"]
+                "reasoning": "대시보드/분석 관련 키워드가 감지되었습니다.",
+                "selected_agents": ["dashboard"]
             }
         elif any(keyword in user_input_lower for keyword in ['추천', '추천해', '추천해줘', '어떤', '뭐가 좋을까']):
             return {
@@ -249,15 +249,21 @@ class LangGraphSupervisor:
 
 에이전트 선택 기준:
 - coding: 코드 작성, 디버깅, 프로그래밍 관련 질문
-- dashboard: 데이터 시각화, 차트, 분석, 통계 관련 질문
+- dashboard: 사용자 데이터 분석, 관심사 트렌드 분석, 활동 패턴 분석, 기간 비교, 통계 분석 요청 (예: "내 활동 분석해줘", "관심사 트렌드 보여줘", "이번 주 저번 주 비교해줘")
 - recommendation: 추천, 제안, 추천해줘 등의 요청
-- report: 보고서 생성, 리포트 작성, 특정 주제에 대한 심층 보고서 요청
+- report: 보고서 생성, 리포트 작성, 특정 주제에 대한 심층 보고서 요청 (외부 웹 검색 기반)
 - chatbot: 일반적인 질문, 이미지 분석, 멀티모달 질문
 
 복합 요청 예시:
 - "코드를 작성하고 대시보드로 시각화해줘" → ["coding", "dashboard"]
 - "추천해주고 분석 결과를 차트로 보여줘" → ["recommendation", "dashboard"]
 - "이미지를 분석하고 코드로 구현해줘" → ["chatbot", "coding"]
+
+대시보드 분석 요청 예시:
+- "내 활동 분석해줘" → ["dashboard"]
+- "관심사 트렌드 보여줘" → ["dashboard"]
+- "이번 주 저번 주 비교해줘" → ["dashboard"]
+- "추천 수락률 분석해줘" → ["dashboard"]
 
 보고서 요청 예시:
 - "Docker에 대한 보고서를 작성해줘" → ["report"]

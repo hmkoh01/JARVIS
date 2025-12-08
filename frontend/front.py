@@ -91,6 +91,11 @@ class FloatingChatApp:
         self.report_notification_visible = False
         self.report_auto_close_id = None
         
+        # 대시보드 분석 알림 말풍선을 위한 변수
+        self.analysis_notification_window = None
+        self.analysis_notification_visible = False
+        self.analysis_auto_close_id = None
+        
         # 대시보드 창 인스턴스
         self.dashboard_window = None
 
@@ -328,6 +333,10 @@ class FloatingChatApp:
                     elif message['type'] == 'show_report_notification':
                         # 보고서 완료/실패 알림 표시
                         self.show_report_notification(message['data'])
+                    
+                    elif message['type'] == 'show_analysis_notification':
+                        # 대시보드 분석 완료/실패 알림 표시
+                        self.show_analysis_notification(message['data'])
                     
                     elif message['type'] == 'show_deep_dive_offer':
                         # 심층 보고서 제안 UI 표시
@@ -2823,6 +2832,19 @@ class FloatingChatApp:
                             self.streaming_bot_container,
                             keyword
                         )
+                
+                elif action == "confirm_analysis":
+                    # 대시보드 분석 확인 버튼 추가
+                    analysis_type = self.pending_metadata.get("analysis_type", "custom")
+                    title = self.pending_metadata.get("title", "데이터 분석")
+                    query = self.pending_metadata.get("query", "")
+                    if hasattr(self, 'streaming_bot_container'):
+                        self.add_confirm_analysis_button(
+                            self.streaming_bot_container,
+                            analysis_type,
+                            title,
+                            query
+                        )
             
         # 변수 정리
         if hasattr(self, 'streaming_text_buffer'):
@@ -3158,6 +3180,284 @@ class FloatingChatApp:
         # 스크롤 업데이트
         self._update_messages_scrollregion()
         self.messages_canvas.yview_moveto(1.0)
+    
+    # ============================================================
+    # 대시보드 분석 확인 버튼 (DashboardAgent 연동)
+    # ============================================================
+    
+    def add_confirm_analysis_button(self, container, analysis_type, title, query):
+        """
+        봇 메시지 하단에 대시보드 분석 확인 버튼을 추가합니다.
+        
+        Args:
+            container: 버튼을 추가할 부모 위젯 (bot_container)
+            analysis_type: 분석 유형
+            title: 분석 제목
+            query: 원본 질문
+        """
+        # 채팅창이 열려있는지 확인
+        if self.chat_window.state() == 'withdrawn':
+            return
+        
+        # 제안 메시지 프레임 생성
+        offer_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["info_bg"],
+            padx=12,
+            pady=10,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        offer_frame.pack(fill='x', padx=10, pady=(5, 10))
+        self._bind_canvas_scroll_events(offer_frame)
+        
+        # 제안 메시지
+        offer_label = tk.Label(
+            offer_frame,
+            text=f"📊 '{title}'을(를) 진행해드릴까요? 분석 완료 후 대시보드에서 확인하실 수 있어요!",
+            font=(self.default_font, 10),
+            bg=COLORS["info_bg"],
+            fg=COLORS["info_text"],
+            wraplength=350,
+            justify='left'
+        )
+        offer_label.pack(anchor='w', pady=(0, 8))
+        
+        # 버튼 컨테이너
+        button_container = tk.Frame(offer_frame, bg=COLORS["info_bg"])
+        button_container.pack(anchor='w')
+        
+        # "응, 분석해줘" 버튼
+        confirm_btn = tk.Button(
+            button_container,
+            text="응, 분석해줘 📊",
+            font=(self.default_font, 9, 'bold'),
+            padx=10,
+            pady=4,
+            command=lambda: self._request_analysis_creation_styled(analysis_type, title, query, offer_frame)
+        )
+        self._style_button(confirm_btn, variant="secondary")
+        confirm_btn.pack(side='left', padx=(0, 8))
+        
+        # "아니, 괜찮아" 버튼
+        cancel_btn = tk.Button(
+            button_container,
+            text="아니, 괜찮아",
+            font=(self.default_font, 9),
+            padx=10,
+            pady=4,
+            command=lambda: self._cancel_analysis_creation_styled(offer_frame, title)
+        )
+        self._style_button(cancel_btn, variant="ghost")
+        cancel_btn.pack(side='left')
+        
+        # 스크롤을 맨 아래로
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+        
+        print(f"[UI] 대시보드 분석 확인 버튼 추가: {title}")
+    
+    def _request_analysis_creation_styled(self, analysis_type, title, query, offer_frame):
+        """
+        대시보드 분석 API를 호출합니다.
+        
+        Args:
+            analysis_type: 분석 유형
+            title: 분석 제목
+            query: 원본 질문
+            offer_frame: 제안 프레임 위젯 (제거용)
+        """
+        print(f"[UI] 대시보드 분석 요청: type='{analysis_type}', title='{title}'")
+        
+        # 버튼 영역 제거
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+        
+        # 확인 메시지 표시
+        confirm_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["success_bg"],
+            padx=12,
+            pady=8,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        confirm_frame.pack(fill='x', padx=10, pady=(5, 10))
+        
+        confirm_label = tk.Label(
+            confirm_frame,
+            text=f"📊 '{title}'을(를) 분석하고 있어요! 완료되면 알려드릴게요.",
+            font=(self.default_font, 10),
+            bg=COLORS["success_bg"],
+            fg=COLORS["success_text"],
+            wraplength=350,
+            justify='left'
+        )
+        confirm_label.pack(anchor='w')
+        
+        # 스크롤 업데이트
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+        
+        # API 호출 (백그라운드)
+        import threading
+        thread = threading.Thread(
+            target=self._call_analysis_create_api,
+            args=(analysis_type, query, title),
+            daemon=True
+        )
+        thread.start()
+        
+        print(f"[UI] 대시보드 분석 요청 전송: {title}")
+    
+    def _cancel_analysis_creation_styled(self, offer_frame, title):
+        """
+        대시보드 분석을 취소합니다.
+        
+        Args:
+            offer_frame: 제안 프레임 위젯 (제거용)
+            title: 분석 제목
+        """
+        print(f"[UI] 대시보드 분석 거절: title='{title}'")
+        
+        # 제안 영역 제거
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+        
+        # 거절 확인 메시지
+        reject_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["surface_alt"],
+            padx=12,
+            pady=8,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        reject_frame.pack(fill='x', padx=10, pady=(5, 10))
+        
+        reject_label = tk.Label(
+            reject_frame,
+            text="알겠어요! 다른 분석이 필요하면 말씀해 주세요. 😊",
+            font=(self.default_font, 10),
+            bg=COLORS["surface_alt"],
+            fg='#4b5563',
+            wraplength=350,
+            justify='left'
+        )
+        reject_label.pack(anchor='w')
+        
+        # 스크롤 업데이트
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+    
+    def _call_analysis_create_api(self, analysis_type, query, title="데이터 분석"):
+        """
+        대시보드 분석 생성 API를 호출합니다 (백그라운드 스레드에서 실행).
+        
+        Args:
+            analysis_type: 분석 유형
+            query: 원본 질문
+            title: 분석 제목
+        """
+        try:
+            import requests
+            
+            headers = {"Authorization": f"Bearer {self.jwt_token}"}
+            response = requests.post(
+                f"{self.API_BASE_URL}/api/v2/dashboard/analyses/create",
+                headers=headers,
+                json={
+                    "analysis_type": analysis_type,
+                    "query": query,
+                    "title": title
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    # 분석 시작 메시지 (완료 알림은 WebSocket으로 받음)
+                    print(f"[UI] 대시보드 분석 요청 성공: {result}")
+                    # 알림은 WebSocket으로 받으므로 별도 메시지 표시하지 않음
+                else:
+                    error_msg = result.get("message", "분석 요청에 실패했습니다.")
+                    self.root.after(0, lambda: self.add_bot_message(f"❌ {error_msg}"))
+            else:
+                self.root.after(0, lambda: self.add_bot_message("❌ 분석 요청에 실패했습니다. 다시 시도해 주세요."))
+                
+        except Exception as e:
+            print(f"[UI] 대시보드 분석 API 호출 오류: {e}")
+            self.root.after(0, lambda: self.add_bot_message("❌ 분석 요청 중 오류가 발생했습니다."))
+    
+    def _open_dashboard_from_chat(self, offer_frame):
+        """채팅에서 대시보드 창을 엽니다."""
+        # 버튼 프레임 제거
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+        
+        # 대시보드 창 열기
+        self.open_dashboard_window()
+        
+        # 확인 메시지
+        confirm_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["success_bg"],
+            padx=12,
+            pady=8,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        confirm_frame.pack(fill='x', padx=10, pady=(5, 10))
+        
+        confirm_label = tk.Label(
+            confirm_frame,
+            text="📊 대시보드 창을 열었어요!",
+            font=(self.default_font, 10),
+            bg=COLORS["success_bg"],
+            fg=COLORS["success_text"],
+            wraplength=350,
+            justify='left'
+        )
+        confirm_label.pack(anchor='w')
+        
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+    
+    def _dismiss_dashboard_button(self, offer_frame):
+        """대시보드 열기 버튼을 닫습니다."""
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+        
+        # 거절 메시지
+        reject_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["surface_alt"],
+            padx=12,
+            pady=8,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        reject_frame.pack(fill='x', padx=10, pady=(5, 10))
+        
+        reject_label = tk.Label(
+            reject_frame,
+            text="알겠어요! 나중에 대시보드 아이콘 📊을 클릭하시면 확인하실 수 있어요.",
+            font=(self.default_font, 10),
+            bg=COLORS["surface_alt"],
+            fg='#4b5563',
+            wraplength=350,
+            justify='left'
+        )
+        reject_label.pack(anchor='w')
+        
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
         
     # ============================================================
     # WebSocket 연결 (실시간 추천 알림)
@@ -3253,6 +3553,32 @@ class FloatingChatApp:
                     'data': {
                         'success': False,
                         'keyword': data.get('keyword', ''),
+                        'reason': data.get('reason', '알 수 없는 오류')
+                    }
+                })
+            
+            elif msg_type == 'analysis_completed':
+                # 대시보드 분석 완료 알림
+                print(f"[WebSocket] 📊 분석 완료: {data.get('title')}")
+                self.message_queue.put({
+                    'type': 'show_analysis_notification',
+                    'data': {
+                        'success': True,
+                        'analysis_type': data.get('analysis_type', ''),
+                        'title': data.get('title', '데이터 분석'),
+                        'analysis_id': data.get('analysis_id')
+                    }
+                })
+            
+            elif msg_type == 'analysis_failed':
+                # 대시보드 분석 실패 알림
+                print(f"[WebSocket] 📊 분석 실패: {data.get('title')} - {data.get('reason')}")
+                self.message_queue.put({
+                    'type': 'show_analysis_notification',
+                    'data': {
+                        'success': False,
+                        'analysis_type': data.get('analysis_type', ''),
+                        'title': data.get('title', '데이터 분석'),
                         'reason': data.get('reason', '알 수 없는 오류')
                     }
                 })
@@ -4172,6 +4498,333 @@ class FloatingChatApp:
         
         self.report_notification_window = None
         self.report_notification_visible = False
+    
+    # ============================================================
+    # Dashboard Analysis Notification (말풍선 알림)
+    # ============================================================
+    
+    def show_analysis_notification(self, data):
+        """대시보드 분석 완료/실패 알림 말풍선을 표시합니다."""
+        # 기존 분석 알림이 있으면 닫기
+        self.close_analysis_notification()
+        
+        success = data.get('success', False)
+        title = data.get('title', '데이터 분석')
+        
+        # 말풍선 Toplevel 윈도우 생성
+        self.analysis_notification_window = tk.Toplevel(self.root)
+        self.analysis_notification_window.wm_overrideredirect(True)
+        self.analysis_notification_window.attributes('-topmost', True)
+        
+        # macOS에서 팝업이 올바르게 표시되도록 설정
+        self._setup_window_for_macos(self.analysis_notification_window, is_popup=True)
+        
+        if success:
+            # 성공 알림
+            self._create_analysis_success_bubble(title)
+        else:
+            # 실패 알림
+            reason = data.get('reason', '알 수 없는 오류')
+            self._create_analysis_failure_bubble(title, reason)
+        
+        self.analysis_notification_visible = True
+        
+        # 20초 후 자동 닫기
+        self.analysis_auto_close_id = self.root.after(20000, self.close_analysis_notification)
+    
+    def _create_analysis_success_bubble(self, title):
+        """분석 성공 알림 말풍선 UI를 생성합니다."""
+        self.analysis_notification_window.configure(bg='white')
+        
+        # 메인 프레임
+        main_frame = tk.Frame(self.analysis_notification_window, bg='white', padx=2, pady=2)
+        main_frame.pack(fill='both', expand=True)
+        
+        # 내부 컨테이너 (성공: 파란색 계열)
+        inner_frame = tk.Frame(main_frame, bg='#eff6ff', padx=15, pady=12)
+        inner_frame.pack(fill='both', expand=True)
+        
+        # 상단: 아이콘과 닫기 버튼
+        header_frame = tk.Frame(inner_frame, bg='#eff6ff')
+        header_frame.pack(fill='x', pady=(0, 8))
+        
+        # 📊 아이콘
+        icon_label = tk.Label(
+            header_frame,
+            text="📊",
+            font=('Arial', 16),
+            bg='#eff6ff'
+        )
+        icon_label.pack(side='left')
+        
+        # 제목 라벨
+        title_label = tk.Label(
+            header_frame,
+            text=f"'{title}'",
+            font=(self.default_font, 10, 'bold'),
+            bg='#eff6ff',
+            fg='#1e40af'
+        )
+        title_label.pack(side='left', padx=(8, 0))
+        
+        # 닫기 버튼
+        close_btn = tk.Button(
+            header_frame,
+            text="✕",
+            font=(self.default_font, 10),
+            bg='#eff6ff',
+            fg='#9ca3af',
+            relief='flat',
+            cursor='hand2',
+            command=self.close_analysis_notification,
+            activebackground='#dbeafe'
+        )
+        close_btn.pack(side='right')
+        
+        # 메시지 라벨
+        message_label = tk.Label(
+            inner_frame,
+            text="분석이 완료되었어요! 대시보드에서 확인하시겠어요?",
+            font=(self.default_font, 11),
+            bg='#eff6ff',
+            fg='#1f2937',
+            wraplength=250,
+            justify='left'
+        )
+        message_label.pack(fill='x', pady=(0, 12))
+        
+        # 버튼 프레임
+        button_frame = tk.Frame(inner_frame, bg='#eff6ff')
+        button_frame.pack(fill='x')
+        
+        # [대시보드 열기] 버튼
+        open_btn = tk.Button(
+            button_frame,
+            text="대시보드 열기 📊",
+            font=(self.default_font, 10, 'bold'),
+            bg='#3b82f6',
+            fg='white',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=self._open_dashboard_from_notification,
+            activebackground='#2563eb',
+            activeforeground='white'
+        )
+        open_btn.pack(side='left', padx=(0, 8))
+        
+        # [닫기] 버튼
+        dismiss_btn = tk.Button(
+            button_frame,
+            text="닫기",
+            font=(self.default_font, 10),
+            bg=COLORS["border"],
+            fg='#4b5563',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=self.close_analysis_notification,
+            activebackground='#d1d5db'
+        )
+        dismiss_btn.pack(side='left')
+        
+        # 말풍선 꼬리
+        tail_canvas = tk.Canvas(
+            self.analysis_notification_window,
+            width=20,
+            height=10,
+            bg='white',
+            highlightthickness=0
+        )
+        tail_canvas.pack(side='bottom')
+        tail_canvas.create_polygon(
+            0, 0,
+            10, 10,
+            20, 0,
+            fill='#eff6ff',
+            outline='#eff6ff'
+        )
+        
+        # 테두리
+        self.analysis_notification_window.configure(
+            highlightbackground='#bfdbfe',
+            highlightthickness=1
+        )
+        
+        # 위치 계산
+        self._position_analysis_bubble()
+    
+    def _create_analysis_failure_bubble(self, title, reason):
+        """분석 실패 알림 말풍선 UI를 생성합니다."""
+        self.analysis_notification_window.configure(bg='white')
+        
+        # 메인 프레임
+        main_frame = tk.Frame(self.analysis_notification_window, bg='white', padx=2, pady=2)
+        main_frame.pack(fill='both', expand=True)
+        
+        # 내부 컨테이너 (실패: 빨간색 계열)
+        inner_frame = tk.Frame(main_frame, bg='#fef2f2', padx=15, pady=12)
+        inner_frame.pack(fill='both', expand=True)
+        
+        # 상단: 아이콘과 닫기 버튼
+        header_frame = tk.Frame(inner_frame, bg='#fef2f2')
+        header_frame.pack(fill='x', pady=(0, 8))
+        
+        # ❌ 아이콘
+        icon_label = tk.Label(
+            header_frame,
+            text="❌",
+            font=('Arial', 16),
+            bg='#fef2f2'
+        )
+        icon_label.pack(side='left')
+        
+        # 제목 라벨
+        title_label = tk.Label(
+            header_frame,
+            text=f"'{title}' 분석",
+            font=(self.default_font, 10, 'bold'),
+            bg='#fef2f2',
+            fg='#991b1b'
+        )
+        title_label.pack(side='left', padx=(8, 0))
+        
+        # 닫기 버튼
+        close_btn = tk.Button(
+            header_frame,
+            text="✕",
+            font=(self.default_font, 10),
+            bg='#fef2f2',
+            fg='#9ca3af',
+            relief='flat',
+            cursor='hand2',
+            command=self.close_analysis_notification,
+            activebackground='#fecaca'
+        )
+        close_btn.pack(side='right')
+        
+        # 메시지 라벨
+        message_label = tk.Label(
+            inner_frame,
+            text="분석 중 오류가 발생했어요.",
+            font=(self.default_font, 11),
+            bg='#fef2f2',
+            fg='#1f2937',
+            wraplength=250,
+            justify='left'
+        )
+        message_label.pack(fill='x', pady=(0, 4))
+        
+        # 오류 사유 표시
+        reason_label = tk.Label(
+            inner_frame,
+            text=f"사유: {reason[:100]}..." if len(reason) > 100 else f"사유: {reason}",
+            font=(self.default_font, 9),
+            bg='#fef2f2',
+            fg='#6b7280',
+            wraplength=250,
+            justify='left'
+        )
+        reason_label.pack(fill='x', pady=(0, 12))
+        
+        # 버튼 프레임
+        button_frame = tk.Frame(inner_frame, bg='#fef2f2')
+        button_frame.pack(fill='x')
+        
+        # [닫기] 버튼
+        dismiss_btn = tk.Button(
+            button_frame,
+            text="닫기",
+            font=(self.default_font, 10),
+            bg=COLORS["border"],
+            fg='#4b5563',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=self.close_analysis_notification,
+            activebackground='#d1d5db'
+        )
+        dismiss_btn.pack(side='left')
+        
+        # 말풍선 꼬리
+        tail_canvas = tk.Canvas(
+            self.analysis_notification_window,
+            width=20,
+            height=10,
+            bg='white',
+            highlightthickness=0
+        )
+        tail_canvas.pack(side='bottom')
+        tail_canvas.create_polygon(
+            0, 0,
+            10, 10,
+            20, 0,
+            fill='#fef2f2',
+            outline='#fef2f2'
+        )
+        
+        # 테두리
+        self.analysis_notification_window.configure(
+            highlightbackground='#fecaca',
+            highlightthickness=1
+        )
+        
+        # 위치 계산
+        self._position_analysis_bubble()
+    
+    def _position_analysis_bubble(self):
+        """분석 알림 말풍선 위치를 계산합니다."""
+        # 말풍선 크기 계산
+        self.analysis_notification_window.update_idletasks()
+        bubble_width = self.analysis_notification_window.winfo_reqwidth()
+        bubble_height = self.analysis_notification_window.winfo_reqheight()
+        
+        # 플로팅 버튼 위치 가져오기
+        button_x = self.root.winfo_x()
+        button_y = self.root.winfo_y()
+        button_width = self.root.winfo_width()
+        
+        # 버튼 위에 위치
+        x = button_x + (button_width // 2) - (bubble_width // 2)
+        y = button_y - bubble_height - 10
+        
+        # 화면 경계 체크
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        if x < 10:
+            x = 10
+        if x + bubble_width > screen_width - 10:
+            x = screen_width - bubble_width - 10
+        if y < 10:
+            y = button_y + self.root.winfo_height() + 10
+        
+        self.analysis_notification_window.geometry(f"+{x}+{y}")
+    
+    def _open_dashboard_from_notification(self):
+        """알림 말풍선에서 대시보드 창을 엽니다."""
+        # 알림 닫기
+        self.close_analysis_notification()
+        
+        # 대시보드 창 열기
+        self.open_dashboard_window()
+    
+    def close_analysis_notification(self):
+        """분석 알림 말풍선을 닫습니다."""
+        # 자동 닫기 타이머 취소
+        if self.analysis_auto_close_id:
+            self.root.after_cancel(self.analysis_auto_close_id)
+            self.analysis_auto_close_id = None
+        
+        # 말풍선 파괴
+        if self.analysis_notification_window and self.analysis_notification_window.winfo_exists():
+            self.analysis_notification_window.destroy()
+        
+        self.analysis_notification_window = None
+        self.analysis_notification_visible = False
     
     # ============================================================
     # Legacy Recommendation Notification (Backward Compatibility)

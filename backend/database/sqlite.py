@@ -321,6 +321,23 @@ class SQLite:
         """)
         
         # ============================================================
+        # 9. Dashboard Analyses (AI 분석 결과)
+        # ============================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dashboard_analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analysis_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                chart_data TEXT,
+                insights TEXT,
+                query TEXT,
+                status TEXT DEFAULT 'completed',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ============================================================
         # Indexes
         # ============================================================
         conn.execute("CREATE INDEX IF NOT EXISTS idx_user_interests_keyword ON user_interests(keyword)")
@@ -334,6 +351,8 @@ class SQLite:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_user_notes_pinned ON user_notes(pinned DESC, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_interest_history_keyword ON interest_history(keyword, recorded_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_interest_history_recorded ON interest_history(recorded_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_analyses_type ON dashboard_analyses(analysis_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_analyses_created ON dashboard_analyses(created_at DESC)")
         
         conn.commit()
     
@@ -1712,6 +1731,134 @@ class SQLite:
                 "recommendations": {"total": 0, "accepted": 0, "rejected": 0},
                 "last_chat_at": None
             }
+
+
+    # =========================================================================
+    # Dashboard: AI Analysis Results
+    # =========================================================================
+    
+    def create_analysis(self, user_id: int, analysis_type: str, title: str, 
+                        content: str, chart_data: Dict = None, 
+                        insights: List[str] = None, query: str = None) -> Optional[int]:
+        """AI 분석 결과 저장"""
+        try:
+            conn = self.get_user_connection(user_id)
+            chart_json = json.dumps(chart_data, ensure_ascii=False) if chart_data else None
+            insights_json = json.dumps(insights, ensure_ascii=False) if insights else None
+            
+            cursor = conn.execute("""
+                INSERT INTO dashboard_analyses 
+                (analysis_type, title, content, chart_data, insights, query)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (analysis_type, title, content, chart_json, insights_json, query))
+            conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"분석 결과 저장 오류: {e}")
+            return None
+    
+    def get_latest_analysis(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """최신 분석 결과 1개 조회"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM dashboard_analyses 
+                WHERE status = 'completed'
+                ORDER BY created_at DESC LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row:
+                result = dict(row)
+                if result.get('chart_data'):
+                    result['chart_data'] = json.loads(result['chart_data'])
+                if result.get('insights'):
+                    result['insights'] = json.loads(result['insights'])
+                return result
+            return None
+        except Exception as e:
+            logger.error(f"최신 분석 조회 오류: {e}")
+            return None
+    
+    def get_all_analyses(self, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """모든 분석 결과 조회"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM dashboard_analyses 
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit,))
+            results = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get('chart_data'):
+                    item['chart_data'] = json.loads(item['chart_data'])
+                if item.get('insights'):
+                    item['insights'] = json.loads(item['insights'])
+                results.append(item)
+            return results
+        except Exception as e:
+            logger.error(f"분석 결과 조회 오류: {e}")
+            return []
+    
+    def get_analysis_by_id(self, user_id: int, analysis_id: int) -> Optional[Dict[str, Any]]:
+        """특정 분석 결과 조회"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM dashboard_analyses WHERE id = ?", (analysis_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                result = dict(row)
+                if result.get('chart_data'):
+                    result['chart_data'] = json.loads(result['chart_data'])
+                if result.get('insights'):
+                    result['insights'] = json.loads(result['insights'])
+                return result
+            return None
+        except Exception as e:
+            logger.error(f"분석 결과 조회 오류: {e}")
+            return None
+    
+    def delete_analysis(self, user_id: int, analysis_id: int) -> bool:
+        """분석 결과 삭제"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.execute("DELETE FROM dashboard_analyses WHERE id = ?", (analysis_id,))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"분석 결과 삭제 오류: {e}")
+            return False
+    
+    def get_analyses_by_type(self, user_id: int, analysis_type: str, 
+                             limit: int = 10) -> List[Dict[str, Any]]:
+        """유형별 분석 결과 조회"""
+        try:
+            conn = self.get_user_connection(user_id)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM dashboard_analyses 
+                WHERE analysis_type = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (analysis_type, limit))
+            results = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get('chart_data'):
+                    item['chart_data'] = json.loads(item['chart_data'])
+                if item.get('insights'):
+                    item['insights'] = json.loads(item['insights'])
+                results.append(item)
+            return results
+        except Exception as e:
+            logger.error(f"유형별 분석 조회 오류: {e}")
+            return []
 
 
 # Backward compatibility alias

@@ -55,9 +55,9 @@ class WebSocketManager:
         연결이 없으면 큐에 저장하여 재연결 시 전송합니다.
         """
         if user_id not in self.active_connections:
-            # 연결이 없으면 큐에 저장 (report_completed, report_failed 같은 중요한 메시지만)
+            # 연결이 없으면 큐에 저장 (중요한 메시지만)
             msg_type = message.get('type', '')
-            if msg_type in ['report_completed', 'report_failed']:
+            if msg_type in ['report_completed', 'report_failed', 'analysis_completed', 'analysis_failed']:
                 if user_id not in self.message_queue:
                     self.message_queue[user_id] = []
                 self.message_queue[user_id].append(message)
@@ -164,6 +164,60 @@ class WebSocketManager:
             "timestamp": datetime.now().isoformat()
         }
         logger.warning(f"📄 보고서 실패 알림 전송: user_id={user_id}, keyword={keyword}, reason={reason}")
+        return await self.send_to_user(user_id, message)
+    
+    async def broadcast_analysis_completed(
+        self, 
+        user_id: int, 
+        analysis_type: str, 
+        title: str,
+        analysis_id: Optional[int] = None
+    ):
+        """대시보드 분석 완료를 사용자에게 전송
+        
+        Args:
+            user_id: 사용자 ID
+            analysis_type: 분석 유형
+            title: 분석 제목
+            analysis_id: 분석 ID (선택)
+        """
+        from datetime import datetime
+        
+        message = {
+            "type": "analysis_completed",
+            "analysis_type": analysis_type,
+            "title": title,
+            "analysis_id": analysis_id,
+            "timestamp": datetime.now().isoformat()
+        }
+        logger.info(f"📊 분석 완료 알림 전송: user_id={user_id}, title={title}")
+        return await self.send_to_user(user_id, message)
+    
+    async def broadcast_analysis_failed(
+        self, 
+        user_id: int, 
+        analysis_type: str, 
+        title: str,
+        reason: str
+    ):
+        """대시보드 분석 실패를 사용자에게 전송
+        
+        Args:
+            user_id: 사용자 ID
+            analysis_type: 분석 유형
+            title: 분석 제목
+            reason: 실패 사유
+        """
+        from datetime import datetime
+        
+        message = {
+            "type": "analysis_failed",
+            "analysis_type": analysis_type,
+            "title": title,
+            "reason": reason,
+            "timestamp": datetime.now().isoformat()
+        }
+        logger.warning(f"📊 분석 실패 알림 전송: user_id={user_id}, title={title}, reason={reason}")
         return await self.send_to_user(user_id, message)
     
     def is_user_connected(self, user_id: int) -> bool:

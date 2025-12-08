@@ -253,7 +253,7 @@ async def process_message(request_data: dict, request: Request):
                     
                     # 메타데이터에 특정 action이 있으면 구분자와 함께 전송
                     action = response_metadata.get("action", "")
-                    if action in ("open_file", "confirm_report", "request_topic"):
+                    if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
                         import json as json_module
                         metadata_json = json_module.dumps(response_metadata, ensure_ascii=False)
                         yield f"\n\n---METADATA---\n{metadata_json}"
@@ -1293,4 +1293,162 @@ async def get_dashboard_activity(
         }
     except Exception as e:
         logger.error(f"활동 요약 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Dashboard AI Analysis Endpoints
+# =============================================================================
+
+@router.post("/dashboard/analyses/create")
+async def create_dashboard_analysis(
+    request: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+    user_id: int = Depends(get_current_user_id)
+):
+    """AI 분석 생성 요청"""
+    try:
+        from agents.dashboard_agent.dashboard_agent import DashboardAgent
+        from core.websocket_manager import get_websocket_manager
+        
+        analysis_type = request.get("analysis_type", "custom")
+        query = request.get("query", "")
+        title = request.get("title", "데이터 분석")
+        
+        if not query:
+            raise HTTPException(status_code=400, detail="분석 질문이 필요합니다.")
+        
+        # 백그라운드에서 분석 실행
+        async def run_analysis():
+            ws_manager = get_websocket_manager()
+            try:
+                agent = DashboardAgent()
+                result = await agent.create_analysis(user_id, analysis_type, query)
+                logger.info(f"분석 완료: user_id={user_id}, success={result.get('success')}")
+                
+                # WebSocket으로 알림 전송
+                if result.get('success'):
+                    await ws_manager.broadcast_analysis_completed(
+                        user_id=user_id,
+                        analysis_type=analysis_type,
+                        title=title,
+                        analysis_id=result.get('analysis_id')
+                    )
+                else:
+                    await ws_manager.broadcast_analysis_failed(
+                        user_id=user_id,
+                        analysis_type=analysis_type,
+                        title=title,
+                        reason=result.get('message', '알 수 없는 오류')
+                    )
+            except Exception as e:
+                logger.error(f"백그라운드 분석 오류: {e}", exc_info=True)
+                await ws_manager.broadcast_analysis_failed(
+                    user_id=user_id,
+                    analysis_type=analysis_type,
+                    title=title,
+                    reason=str(e)
+                )
+        
+        # 동기 래퍼로 백그라운드 태스크 추가
+        def sync_run_analysis():
+            import asyncio
+            asyncio.run(run_analysis())
+        
+        background_tasks.add_task(sync_run_analysis)
+        
+        return {
+            "success": True,
+            "message": "분석을 시작했습니다. 완료되면 알림을 보내드립니다.",
+            "data": {
+                "analysis_type": analysis_type,
+                "query": query,
+                "title": title,
+                "status": "processing"
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"분석 생성 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/analyses/latest")
+async def get_latest_analysis(user_id: int = Depends(get_current_user_id)):
+    """최신 분석 결과 조회 (대시보드 UI용)"""
+    try:
+        db = SQLite()
+        analysis = db.get_latest_analysis(user_id)
+        
+        return {
+            "success": True,
+            "data": {"analysis": analysis}
+        }
+    except Exception as e:
+        logger.error(f"최신 분석 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/analyses")
+async def get_all_analyses(
+    user_id: int = Depends(get_current_user_id),
+    limit: int = 50
+):
+    """모든 분석 결과 목록 조회"""
+    try:
+        db = SQLite()
+        analyses = db.get_all_analyses(user_id, limit=limit)
+        
+        return {
+            "success": True,
+            "data": {"analyses": analyses, "count": len(analyses)}
+        }
+    except Exception as e:
+        logger.error(f"분석 목록 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dashboard/analyses/{analysis_id}")
+async def get_analysis_by_id(
+    analysis_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
+    """특정 분석 결과 조회"""
+    try:
+        db = SQLite()
+        analysis = db.get_analysis_by_id(user_id, analysis_id)
+        
+        if not analysis:
+            raise HTTPException(status_code=404, detail="분석 결과를 찾을 수 없습니다.")
+        
+        return {
+            "success": True,
+            "data": {"analysis": analysis}
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"분석 조회 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/dashboard/analyses/{analysis_id}")
+async def delete_analysis(
+    analysis_id: int,
+    user_id: int = Depends(get_current_user_id)
+):
+    """분석 결과 삭제"""
+    try:
+        db = SQLite()
+        success = db.delete_analysis(user_id, analysis_id)
+        
+        if success:
+            return {"success": True, "message": "분석 결과가 삭제되었습니다."}
+        else:
+            raise HTTPException(status_code=500, detail="분석 결과 삭제에 실패했습니다.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"분석 삭제 오류: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
