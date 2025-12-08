@@ -166,6 +166,31 @@ class CodingAgent(BaseAgent):
             "metadata": result.get("metadata", {})
         }
     
+    async def process_async(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
+        """
+        비동기 처리 메서드 (기존 호환성을 위한 메서드)
+        
+        Args:
+            user_input: 사용자 입력
+            user_id: 사용자 ID
+        
+        Returns:
+            AgentResponse 객체
+        """
+        result = await self._generate_code(
+            question=user_input,
+            user_id=user_id,
+            attached_files=[],
+            chat_history=[]
+        )
+        
+        return AgentResponse(
+            success=result.get("success", False),
+            content=result.get("answer", ""),
+            agent_type=self.agent_type,
+            metadata=result.get("metadata", {})
+        )
+    
     # ============================================================
     # Main Code Generation Logic
     # ============================================================
