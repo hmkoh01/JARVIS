@@ -2801,9 +2801,11 @@ class FloatingChatApp:
             self.root.after_idle(finalize_height)
             self.root.after(150, finalize_height)
             
-            # 4. 메타데이터에 따른 버튼 추가 (action="open_file")
+            # 4. 메타데이터에 따른 버튼 추가
             if hasattr(self, 'pending_metadata') and self.pending_metadata:
-                if self.pending_metadata.get("action") == "open_file":
+                action = self.pending_metadata.get("action", "")
+                
+                if action == "open_file":
                     file_path = self.pending_metadata.get("file_path", "")
                     file_name = self.pending_metadata.get("file_name", "파일")
                     if file_path and hasattr(self, 'streaming_bot_container'):
@@ -2811,6 +2813,15 @@ class FloatingChatApp:
                             self.streaming_bot_container,
                             file_path,
                             file_name
+                        )
+                
+                elif action == "confirm_report":
+                    # 보고서 생성 확인 버튼 추가
+                    keyword = self.pending_metadata.get("keyword", "")
+                    if keyword and hasattr(self, 'streaming_bot_container'):
+                        self.add_confirm_report_button(
+                            self.streaming_bot_container,
+                            keyword
                         )
             
         # 변수 정리
@@ -2925,6 +2936,228 @@ class FloatingChatApp:
             print(f"[UI] 코드 폴더 열기: {folder_path}")
         except Exception as e:
             print(f"[UI] 폴더 열기 오류: {e}")
+    
+    # ============================================================
+    # 보고서 생성 확인 버튼 (ReportAgent 연동)
+    # ============================================================
+    
+    def add_confirm_report_button(self, container, keyword):
+        """
+        봇 메시지 하단에 보고서 생성 확인 버튼을 추가합니다.
+        (show_deep_dive_offer와 동일한 스타일)
+        
+        Args:
+            container: 버튼을 추가할 부모 위젯 (bot_container)
+            keyword: 보고서 주제 키워드
+        """
+        # 채팅창이 열려있는지 확인
+        if self.chat_window.state() == 'withdrawn':
+            return
+        
+        # 제안 메시지 프레임 생성 (show_deep_dive_offer와 동일 스타일)
+        offer_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["info_bg"],
+            padx=12,
+            pady=10,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        offer_frame.pack(fill='x', padx=10, pady=(5, 10))
+        self._bind_canvas_scroll_events(offer_frame)
+        
+        # 제안 메시지
+        offer_label = tk.Label(
+            offer_frame,
+            text=f"📄 '{keyword}'에 대한 심층 보고서를 PDF로 작성해 드릴까요?",
+            font=(self.default_font, 10),
+            bg=COLORS["info_bg"],
+            fg=COLORS["info_text"],
+            wraplength=350,
+            justify='left'
+        )
+        offer_label.pack(anchor='w', pady=(0, 8))
+        
+        # 버튼 컨테이너 (별도 Frame)
+        button_container = tk.Frame(offer_frame, bg=COLORS["info_bg"])
+        button_container.pack(anchor='w')
+        
+        # "응, 작성해줘" 버튼
+        confirm_btn = tk.Button(
+            button_container,
+            text="응, 작성해줘 📝",
+            font=(self.default_font, 9, 'bold'),
+            padx=10,
+            pady=4,
+            command=lambda: self._request_report_creation_styled(keyword, offer_frame)
+        )
+        self._style_button(confirm_btn, variant="secondary")
+        confirm_btn.pack(side='left', padx=(0, 8))
+        
+        # "아니, 괜찮아" 버튼
+        cancel_btn = tk.Button(
+            button_container,
+            text="아니, 괜찮아",
+            font=(self.default_font, 9),
+            padx=10,
+            pady=4,
+            command=lambda: self._cancel_report_creation_styled(offer_frame, keyword)
+        )
+        self._style_button(cancel_btn, variant="ghost")
+        cancel_btn.pack(side='left')
+        
+        # 스크롤을 맨 아래로
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+        
+        print(f"[UI] 보고서 생성 확인 버튼 추가: {keyword}")
+    
+    def _request_report_creation(self, keyword, confirm_btn, cancel_btn):
+        """
+        보고서 생성 API를 호출합니다.
+        
+        Args:
+            keyword: 보고서 주제
+            confirm_btn: 확인 버튼 위젯 (비활성화용)
+            cancel_btn: 취소 버튼 위젯 (비활성화용)
+        """
+        try:
+            # 버튼 비활성화
+            confirm_btn.config(state='disabled', text="⏳ 작성 중...", bg='#9ca3af')
+            cancel_btn.config(state='disabled')
+            
+            # 채팅에 메시지 추가 (추천 수락과 유사한 톤)
+            self.add_bot_message(f"**{keyword}** 보고서를 작성하고 있어요! 웹에서 정보를 수집하고 정리하는 데 1-2분 정도 걸릴 수 있습니다. 완료되면 바로 알려드릴게요! 📝")
+            
+            # API 호출 (백그라운드) - 추천 로직과 동일한 패턴
+            import threading
+            thread = threading.Thread(
+                target=self._call_report_create_api,
+                args=(keyword,),
+                daemon=True
+            )
+            thread.start()
+            
+            print(f"[UI] 보고서 생성 요청: {keyword}")
+            
+        except Exception as e:
+            print(f"[UI] 보고서 생성 요청 오류: {e}")
+            confirm_btn.config(state='normal', text="네, 작성해주세요 📄", bg=COLORS["primary"])
+            cancel_btn.config(state='normal')
+    
+    def _cancel_report_creation(self, button_frame, keyword):
+        """
+        보고서 생성을 취소합니다.
+        
+        Args:
+            button_frame: 버튼 프레임 위젯 (제거용)
+            keyword: 보고서 주제
+        """
+        try:
+            # 버튼 프레임 제거
+            button_frame.destroy()
+            
+            # 취소 메시지 (자연스러운 톤)
+            self.add_bot_message(f"알겠습니다! 다른 궁금한 점이 있으시면 말씀해 주세요. 😊")
+            
+            print(f"[UI] 보고서 생성 취소: {keyword}")
+            
+        except Exception as e:
+            print(f"[UI] 보고서 생성 취소 오류: {e}")
+    
+    def _request_report_creation_styled(self, keyword, offer_frame):
+        """
+        보고서 생성 API를 호출합니다 (show_deep_dive_offer 스타일).
+        
+        Args:
+            keyword: 보고서 주제
+            offer_frame: 제안 프레임 위젯 (제거용)
+        """
+        print(f"[UI] 심층 보고서 생성 요청: keyword='{keyword}'")
+        
+        # 버튼 영역 제거
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+        
+        # 확인 메시지 표시 (show_deep_dive_offer와 동일 스타일)
+        confirm_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["success_bg"],
+            padx=12,
+            pady=8,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        confirm_frame.pack(fill='x', padx=10, pady=(5, 10))
+        
+        confirm_label = tk.Label(
+            confirm_frame,
+            text=f"📝 '{keyword}' 심층 보고서를 작성하고 있어요! 완료되면 알려드릴게요.",
+            font=(self.default_font, 10),
+            bg=COLORS["success_bg"],
+            fg=COLORS["success_text"],
+            wraplength=350,
+            justify='left'
+        )
+        confirm_label.pack(anchor='w')
+        
+        # 스크롤 업데이트
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
+        
+        # API 호출 (백그라운드) - 추천 로직과 동일한 패턴
+        import threading
+        thread = threading.Thread(
+            target=self._call_report_create_api,
+            args=(keyword,),
+            daemon=True
+        )
+        thread.start()
+        
+        print(f"[UI] 보고서 생성 요청: {keyword}")
+    
+    def _cancel_report_creation_styled(self, offer_frame, keyword):
+        """
+        보고서 생성을 취소합니다 (show_deep_dive_offer 스타일).
+        
+        Args:
+            offer_frame: 제안 프레임 위젯 (제거용)
+            keyword: 보고서 주제
+        """
+        print(f"[UI] 심층 보고서 생성 거절: keyword='{keyword}'")
+        
+        # 제안 영역 제거
+        if offer_frame and offer_frame.winfo_exists():
+            offer_frame.destroy()
+        
+        # 거절 확인 메시지
+        reject_frame = tk.Frame(
+            self.scrollable_frame,
+            bg=COLORS["surface_alt"],
+            padx=12,
+            pady=8,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            bd=0
+        )
+        reject_frame.pack(fill='x', padx=10, pady=(5, 10))
+        
+        reject_label = tk.Label(
+            reject_frame,
+            text="알겠어요! 다른 궁금한 점이 있으면 말씀해 주세요. 😊",
+            font=(self.default_font, 10),
+            bg=COLORS["surface_alt"],
+            fg='#4b5563',
+            wraplength=350,
+            justify='left'
+        )
+        reject_label.pack(anchor='w')
+        
+        # 스크롤 업데이트
+        self._update_messages_scrollregion()
+        self.messages_canvas.yview_moveto(1.0)
         
     # ============================================================
     # WebSocket 연결 (실시간 추천 알림)

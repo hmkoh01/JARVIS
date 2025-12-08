@@ -205,6 +205,13 @@ class LangGraphSupervisor:
                 "reasoning": "추천 관련 키워드가 감지되었습니다.",
                 "selected_agents": ["recommendation_agent"]
             }
+        elif any(keyword in user_input_lower for keyword in ['보고서', '리포트', 'report', '보고서 생성', '보고서 작성', '보고서를 만들어', '보고서를 작성해']):
+            return {
+                "intent": "report",
+                "confidence": 0.85,
+                "reasoning": "보고서 생성 관련 키워드가 감지되었습니다.",
+                "selected_agents": ["report"]
+            }
         else:
             return {
                 "intent": "chat",
@@ -244,12 +251,18 @@ class LangGraphSupervisor:
 - coding: 코드 작성, 디버깅, 프로그래밍 관련 질문
 - dashboard: 데이터 시각화, 차트, 분석, 통계 관련 질문
 - recommendation: 추천, 제안, 추천해줘 등의 요청
+- report: 보고서 생성, 리포트 작성, 특정 주제에 대한 심층 보고서 요청
 - chatbot: 일반적인 질문, 이미지 분석, 멀티모달 질문
 
 복합 요청 예시:
 - "코드를 작성하고 대시보드로 시각화해줘" → ["coding", "dashboard"]
 - "추천해주고 분석 결과를 차트로 보여줘" → ["recommendation", "dashboard"]
 - "이미지를 분석하고 코드로 구현해줘" → ["chatbot", "coding"]
+
+보고서 요청 예시:
+- "Docker에 대한 보고서를 작성해줘" → ["report"]
+- "그 주제에 대해 보고서를 만들어줘" → ["report"] (이전 대화 컨텍스트에서 주제 추출)
+- "방금 얘기한 내용으로 리포트 생성해줘" → ["report"]
 
 사용자 메시지: {user_input}
 

@@ -4,6 +4,11 @@ ReportAgent - 웹 검색 기반 보고서 생성 에이전트
 검색 계획 → 웹 검색/크롤링 → 정보 정제 → 보고서 작성 → PDF 저장
 파이프라인을 통해 구조화된 보고서를 생성합니다.
 
+채팅에서 직접 호출 시:
+1. 사용자 입력에서 주제 추출 (명시적 또는 대화 히스토리에서)
+2. 확인 메시지 반환 ("~에 대한 보고서를 생성할까요?")
+3. 프론트엔드가 확인 후 /reports/create API 호출
+
 사용 모델: Gemini 2.5 Pro
 저장 경로: ~/Documents/JARVIS/Reports/
 """
@@ -11,6 +16,7 @@ ReportAgent - 웹 검색 기반 보고서 생성 에이전트
 import json
 import logging
 import asyncio
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -20,6 +26,7 @@ import google.generativeai as genai
 
 from ..base_agent import BaseAgent, AgentResponse
 from config.settings import settings
+from database.sqlite import SQLite
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +63,11 @@ class ReportAgent(BaseAgent):
         4. Context Filtering: 핵심 문단 필터링
         5. Report Generation: Markdown 보고서 작성
         6. PDF Export: PDF로 변환 및 저장
+    
+    채팅 연동:
+        - Supervisor에서 "보고서", "리포트" 등의 키워드 감지 시 호출
+        - 대화 컨텍스트에서 주제 추출 후 확인 메시지 반환
+        - 프론트엔드에서 확인 후 /reports/create API로 실제 생성
     """
     
     # 기본 설정
@@ -64,11 +76,19 @@ class ReportAgent(BaseAgent):
     MAX_CONTENT_LENGTH = 3000  # 각 문서당 최대 문자 수
     MAX_TOTAL_CONTEXT = 15000  # 전체 컨텍스트 최대 문자 수
     
+    # 확인 응답 패턴
+    CONFIRM_PATTERNS = [
+        r'^(네|예|응|ㅇㅇ|좋아|그래|확인|생성해|만들어|작성해)$',
+        r'^(네|예|응)\s*(해줘|부탁|해)$',
+        r'^(그|저)\s*(주제|내용|것).*보고서',
+    ]
+    
     def __init__(self):
         super().__init__(
             agent_type="report",
-            description="웹 검색을 통해 정보를 수집하고 구조화된 보고서를 생성합니다."
+            description="웹 검색을 통해 정보를 수집하고 구조화된 보고서를 생성합니다. 채팅에서 '~에 대한 보고서 작성해줘'와 같이 요청할 수 있습니다."
         )
+        self.sqlite = SQLite()
         self._init_llm()
         self._init_report_dir()
     
@@ -142,7 +162,14 @@ class ReportAgent(BaseAgent):
     # ============================================================
     
     def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """동기 처리 메서드 (langgraph 호환)"""
+        """
+        동기 처리 메서드 (langgraph 호환)
+        
+        채팅에서 보고서 요청 시:
+        1. 사용자 입력에서 주제 추출 시도
+        2. 주제가 모호하면 대화 히스토리에서 추출
+        3. 확인 메시지 반환 (프론트엔드가 확인 후 /reports/create 호출)
+        """
         question = state.get("question", "")
         user_id = state.get("user_id")
         
@@ -158,37 +185,180 @@ class ReportAgent(BaseAgent):
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # 이미 이벤트 루프가 실행 중이면 새 태스크 생성
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(
                         asyncio.run,
-                        self.create_report(user_id, question)
+                        self._process_report_request(user_id, question)
                     )
-                    result = future.result(timeout=180)
+                    result = future.result(timeout=60)
             else:
                 result = loop.run_until_complete(
-                    self.create_report(user_id, question)
+                    self._process_report_request(user_id, question)
                 )
         except Exception as e:
             logger.exception(f"ReportAgent process 오류: {e}")
             result = {
                 "success": False,
-                "summary": "",
-                "message": f"보고서 생성 중 오류: {str(e)}"
+                "answer": f"보고서 요청 처리 중 오류가 발생했습니다: {str(e)}",
+                "metadata": {}
             }
         
         return {
             **state,
-            "answer": result.get("summary", "보고서 생성에 실패했습니다."),
+            "answer": result.get("answer", "보고서 요청을 처리할 수 없습니다."),
             "success": result.get("success", False),
             "agent_type": self.agent_type,
+            "metadata": result.get("metadata", {})
+        }
+    
+    async def _process_report_request(self, user_id: Optional[int], question: str) -> Dict[str, Any]:
+        """
+        보고서 요청을 처리합니다.
+        
+        1. 사용자 입력에서 주제 추출
+        2. 주제가 모호하면 대화 히스토리 참조
+        3. 확인 메시지 반환
+        """
+        if not self.llm_available:
+            return {
+                "success": False,
+                "answer": "LLM 서비스를 사용할 수 없어 보고서 주제를 분석할 수 없습니다.",
+                "metadata": {}
+            }
+        
+        # 대화 히스토리 가져오기
+        chat_history = []
+        if user_id:
+            chat_history = self.sqlite.get_recent_chat_messages(user_id, limit=10)
+        
+        # 주제 추출
+        extracted_topic = await self._extract_report_topic(question, chat_history)
+        
+        if not extracted_topic or extracted_topic.get("topic") == "UNKNOWN":
+            return {
+                "success": True,
+                "answer": "어떤 주제에 대한 보고서를 작성해 드릴까요? 구체적인 주제를 말씀해 주세요.",
+                "metadata": {
+                    "action": "request_topic",
+                    "message": "보고서 주제가 명확하지 않습니다."
+                }
+            }
+        
+        topic = extracted_topic.get("topic", "")
+        brief_description = extracted_topic.get("brief_description", "")
+        confidence = extracted_topic.get("confidence", 0.0)
+        reasoning = extracted_topic.get("reasoning", "")
+        
+        # 확인 메시지 생성 (추천 에이전트와 유사한 형식)
+        confirm_message = f"**{topic}**에 대해서 궁금하시군요! {brief_description}\n\n"
+        confirm_message += "보고서에는 다음 내용이 포함됩니다:\n\n"
+        confirm_message += "- 주제 개요 및 정의\n"
+        confirm_message += "- 주요 특징 및 기능\n"
+        confirm_message += "- 관련 분야 및 활용 사례\n"
+        confirm_message += "- 참고 문헌\n\n"
+        confirm_message += "보고서를 작성해드릴까요?"
+        
+        return {
+            "success": True,
+            "answer": confirm_message,
             "metadata": {
-                "pdf_path": result.get("pdf_path", ""),
-                "pdf_filename": result.get("pdf_filename", ""),
-                "sources": result.get("sources", [])
+                "action": "confirm_report",
+                "keyword": topic,
+                "brief_description": brief_description,
+                "confidence": confidence,
+                "reasoning": reasoning,
+                "requires_confirmation": True
             }
         }
+    
+    async def _extract_report_topic(
+        self, 
+        user_input: str, 
+        chat_history: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        사용자 입력과 대화 히스토리에서 보고서 주제를 추출하고 간략한 설명을 생성합니다.
+        
+        Args:
+            user_input: 현재 사용자 입력
+            chat_history: 최근 대화 히스토리
+        
+        Returns:
+            {
+                "topic": "추출된 주제",
+                "brief_description": "주제에 대한 1-2문장 간략 설명",
+                "confidence": 0.0~1.0,
+                "reasoning": "추출 근거"
+            }
+        """
+        # 대화 히스토리 요약 생성
+        history_text = ""
+        if chat_history:
+            history_lines = []
+            for msg in chat_history[-6:]:  # 최근 6개 메시지만
+                role = msg.get("role", "user")
+                content = msg.get("content", "")[:200]  # 각 메시지 200자 제한
+                history_lines.append(f"- {role}: {content}")
+            history_text = "\n".join(history_lines)
+        
+        prompt = f"""당신은 사용자의 보고서 요청에서 주제를 추출하고 설명하는 전문가입니다.
+
+## 현재 사용자 입력
+"{user_input}"
+
+## 최근 대화 히스토리
+{history_text if history_text else "(대화 히스토리 없음)"}
+
+## 작업
+1. 사용자 입력에서 보고서 주제를 추출하세요.
+2. 주제가 명시적으로 언급되지 않았다면, 대화 히스토리에서 가장 관련성 높은 주제를 찾으세요.
+3. 추출된 주제에 대해 간략한 설명(1-2문장)을 작성하세요.
+4. 주제를 찾을 수 없다면 "UNKNOWN"을 반환하세요.
+
+## 주제 추출 기준
+- "~에 대한 보고서" → 보고서 주제 추출
+- "그것에 대해 보고서" → 대화 히스토리에서 "그것"이 가리키는 주제 찾기
+- "방금 얘기한 내용으로" → 대화 히스토리에서 주요 주제 추출
+- 주제가 너무 광범위하면 가장 구체적인 부분으로 좁히기
+
+## 출력 형식 (JSON)
+{{
+    "topic": "추출된 주제 (한 단어 또는 짧은 구문)",
+    "brief_description": "주제에 대한 간략한 설명 (1-2문장, 친근한 톤)",
+    "confidence": 0.0~1.0,
+    "reasoning": "추출 근거 설명"
+}}
+
+주제를 찾을 수 없는 경우:
+{{
+    "topic": "UNKNOWN",
+    "brief_description": "",
+    "confidence": 0.0,
+    "reasoning": "주제를 찾을 수 없는 이유"
+}}
+"""
+        
+        try:
+            response = self.llm_model_json.generate_content(
+                prompt,
+                request_options={"timeout": 30}
+            )
+            
+            response_text = self._extract_llm_response(response)
+            if not response_text:
+                return None
+            
+            # JSON 파싱
+            result = json.loads(response_text)
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"ReportAgent: 주제 추출 JSON 파싱 오류: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"ReportAgent: 주제 추출 오류: {e}")
+            return None
     
     async def process_async(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
         """비동기 처리 메서드"""

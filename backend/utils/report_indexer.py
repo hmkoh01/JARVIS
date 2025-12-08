@@ -124,7 +124,7 @@ def index_report_file(
             if extractor:
                 # 전체 텍스트에서 키워드 추출
                 full_text = " ".join(texts)
-                keywords = extractor.extract_keywords(full_text, top_n=10)
+                keywords = extractor.extract(full_text, top_n=10)
                 
                 if keywords:
                     for kw, score in keywords:

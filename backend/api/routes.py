@@ -222,6 +222,10 @@ async def process_message(request_data: dict, request: Request):
             if supervisor_response.success and hasattr(supervisor_response.response, 'metadata'):
                 response_metadata = supervisor_response.response.metadata or {}
             
+            # 디버그: 메타데이터 로깅
+            logger.info(f"[DEBUG] agent_type={supervisor_response.response.agent_type if supervisor_response.success else 'unknown'}")
+            logger.info(f"[DEBUG] response_metadata={response_metadata}")
+            
             async def generate_stream():
                 try:
                     if not content:
@@ -247,12 +251,13 @@ async def process_message(request_data: dict, request: Request):
                         yield chunk
                         await asyncio.sleep(0.01)
                     
-                    # 메타데이터에 action="open_file"이 있으면 구분자와 함께 전송
-                    if response_metadata.get("action") == "open_file":
+                    # 메타데이터에 특정 action이 있으면 구분자와 함께 전송
+                    action = response_metadata.get("action", "")
+                    if action in ("open_file", "confirm_report", "request_topic"):
                         import json as json_module
                         metadata_json = json_module.dumps(response_metadata, ensure_ascii=False)
                         yield f"\n\n---METADATA---\n{metadata_json}"
-                        logger.info("스트리밍 메타데이터 전송: action=open_file")
+                        logger.info(f"스트리밍 메타데이터 전송: action={action}")
                     
                     logger.info(
                         "스트리밍 응답 전송 완료 - 총 %d개 청크",
