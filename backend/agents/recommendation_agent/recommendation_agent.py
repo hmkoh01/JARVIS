@@ -104,29 +104,6 @@ class RecommendationAgent(BaseAgent):
                 "agent_type": "recommendation"
             }
     
-    async def process_async(self, user_input: str, user_id: Optional[int] = None) -> AgentResponse:
-        """사용자 입력을 비동기로 처리합니다."""
-        try:
-            pending = self.get_pending_recommendations(user_id) if user_id else []
-            
-            if pending:
-                content = f"대기 중인 추천이 {len(pending)}개 있습니다."
-            else:
-                content = "현재 대기 중인 추천이 없습니다."
-            
-            return AgentResponse(
-                success=True,
-                content=content,
-                agent_type=self.agent_type,
-                metadata={"user_id": user_id, "pending_count": len(pending)}
-            )
-        except Exception as e:
-            return AgentResponse(
-                success=False,
-                content=f"추천 에이전트 처리 중 오류: {str(e)}",
-                agent_type=self.agent_type
-            )
-    
     # ============================================================
     # Core Active Analysis Methods
     # ============================================================

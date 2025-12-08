@@ -9,14 +9,29 @@ class UserIntent(BaseModel):
     context: Dict[str, Any] = {}
 
 class ChatRequest(BaseModel):
-    """채팅 요청 모델"""
+    """채팅 요청 모델 (deprecated: MessageRequest 사용 권장)"""
     message: str
     user_id: Optional[int] = None
 
 class ChatResponse(BaseModel):
-    """채팅 응답 모델"""
+    """채팅 응답 모델 (deprecated: MessageResponse 사용 권장)"""
     success: bool
     message: str
+    agent_type: str
+    metadata: Dict[str, Any] = {}
+
+
+class MessageRequest(BaseModel):
+    """통합 메시지 요청 모델"""
+    message: str
+    user_id: Optional[int] = None
+    stream: bool = True  # 기본값 스트리밍
+
+
+class MessageResponse(BaseModel):
+    """통합 메시지 응답 모델"""
+    success: bool
+    content: str
     agent_type: str
     metadata: Dict[str, Any] = {}
 

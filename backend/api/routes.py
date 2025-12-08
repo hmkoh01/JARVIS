@@ -19,8 +19,8 @@ import asyncio
 import threading # 백그라운드 작업을 위해 추가
 
 from config.settings import settings
-from .schemas import UserIntent, ChatRequest, ChatResponse
-from core.supervisor import get_supervisor
+from .schemas import UserIntent, ChatRequest, ChatResponse, MessageRequest, MessageResponse
+from core.supervisor import get_supervisor, UserIntent as SupervisorUserIntent
 from core.agent_registry import agent_registry
 
 from database.data_collector import get_manager, data_collection_managers
@@ -53,9 +53,177 @@ def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(secu
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-@router.post("/chat")
+# =============================================================================
+# 통합 메시지 엔드포인트 (권장)
+# =============================================================================
+
+@router.post("/message")
+async def unified_message(message_request: MessageRequest, request: Request):
+    """
+    통합 메시지 처리 엔드포인트
+    
+    모든 채팅 요청이 이 엔드포인트를 통해 Supervisor로 라우팅됩니다.
+    - 의도 분석 (LLM 기반)
+    - 에이전트 선택 및 스케줄링
+    - 스트리밍/비스트리밍 응답
+    """
+    try:
+        message = message_request.message
+        user_id = message_request.user_id
+        stream_requested = message_request.stream
+        
+        # Accept 헤더로 스트리밍 요청 확인 (오버라이드)
+        accept_header = request.headers.get("accept", "")
+        if "text/event-stream" in accept_header:
+            stream_requested = True
+        
+        # 채팅 메시지 로깅 (사용자 메시지)
+        db = SQLite()
+        user_message_id = -1
+        if message.strip():
+            user_message_id = db.log_chat_message(
+                user_id=user_id,
+                role='user',
+                content=message,
+                metadata={"type": "user"}
+            )
+            # 백그라운드에서 키워드 추출 (10자 이상인 경우만)
+            if user_message_id > 0 and len(message.strip()) >= 10:
+                asyncio.create_task(_extract_and_store_keywords(user_id, message, user_message_id))
+        
+        # Supervisor를 통한 처리
+        supervisor_instance = get_supervisor()
+        user_intent = SupervisorUserIntent(message=message, user_id=user_id)
+        
+        # 스트리밍 모드
+        if stream_requested:
+            supervisor_response = await asyncio.wait_for(
+                supervisor_instance.process_user_intent(user_intent, stream=True),
+                timeout=settings.REQUEST_TIMEOUT
+            )
+            
+            # 스트리밍 generator가 있으면 스트리밍 응답
+            if supervisor_response.stream_generator:
+                async def generate_stream():
+                    try:
+                        full_content = ""
+                        for chunk in supervisor_response.stream_generator():
+                            full_content += chunk
+                            yield chunk
+                        
+                        # 스트리밍 완료 후 로깅
+                        if len(full_content.strip()) >= 10:
+                            db.log_chat_message(
+                                user_id=user_id,
+                                role='assistant',
+                                content=full_content,
+                                metadata={"agent_type": "chatbot", "success": True, "streaming": True}
+                            )
+                        
+                        # 메타데이터 전송 (필요시)
+                        metadata = supervisor_response.metadata or {}
+                        action = metadata.get("action", "")
+                        if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
+                            import json as json_module
+                            metadata_json = json_module.dumps(metadata, ensure_ascii=False)
+                            yield f"\n\n---METADATA---\n{metadata_json}"
+                            
+                    except Exception as e:
+                        logger.error(f"스트리밍 응답 생성 중 오류: {e}", exc_info=True)
+                        yield f"오류가 발생했습니다: {str(e)}"
+                
+                return StreamingResponse(generate_stream(), media_type="text/plain")
+            
+            # 스트리밍 generator가 없으면 일반 응답을 청크로 전송
+            content = supervisor_response.response.content or ""
+            response_metadata = supervisor_response.response.metadata or {}
+            
+            # Assistant 응답 로깅
+            agent_type = supervisor_response.response.agent_type
+            if len(content.strip()) >= 10:
+                db.log_chat_message(
+                    user_id=user_id,
+                    role='assistant',
+                    content=content,
+                    metadata={"agent_type": agent_type, "success": supervisor_response.success}
+                )
+            
+            async def generate_chunked_stream():
+                try:
+                    if not content:
+                        yield "응답이 비어 있습니다."
+                        return
+                    
+                    chunk_size = 80
+                    for i in range(0, len(content), chunk_size):
+                        chunk = content[i:i + chunk_size]
+                        yield chunk
+                        await asyncio.sleep(0.01)
+                    
+                    # 메타데이터 전송
+                    action = response_metadata.get("action", "")
+                    if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
+                        import json as json_module
+                        metadata_json = json_module.dumps(response_metadata, ensure_ascii=False)
+                        yield f"\n\n---METADATA---\n{metadata_json}"
+                        
+                except Exception as e:
+                    logger.error(f"청크 스트리밍 중 오류: {e}", exc_info=True)
+                    yield f"오류가 발생했습니다: {str(e)}"
+            
+            return StreamingResponse(generate_chunked_stream(), media_type="text/plain")
+        
+        # 비스트리밍 모드
+        else:
+            supervisor_response = await asyncio.wait_for(
+                supervisor_instance.process_user_intent(user_intent, stream=False),
+                timeout=settings.REQUEST_TIMEOUT
+            )
+            
+            content = supervisor_response.response.content or ""
+            agent_type = supervisor_response.response.agent_type
+            
+            # Assistant 응답 로깅
+            if len(content.strip()) >= 10:
+                db.log_chat_message(
+                    user_id=user_id,
+                    role='assistant',
+                    content=content,
+                    metadata={"agent_type": agent_type, "success": supervisor_response.success}
+                )
+            
+            return MessageResponse(
+                success=supervisor_response.success,
+                content=content,
+                agent_type=agent_type,
+                metadata=supervisor_response.response.metadata or {}
+            )
+            
+    except asyncio.TimeoutError:
+        logger.error("메시지 처리 시간 초과")
+        return MessageResponse(
+            success=False,
+            content="응답 시간이 초과되었습니다. 다시 시도해주세요.",
+            agent_type="error",
+            metadata={}
+        )
+    except Exception as e:
+        logger.error(f"메시지 처리 중 오류 발생: {e}", exc_info=True)
+        return MessageResponse(
+            success=False,
+            content=f"처리 중 오류가 발생했습니다: {str(e)}",
+            agent_type="error",
+            metadata={}
+        )
+
+
+# =============================================================================
+# 기존 엔드포인트 (deprecated - /message 사용 권장)
+# =============================================================================
+
+@router.post("/chat", deprecated=True)
 async def chat_with_agent(chat_request: ChatRequest, request: Request):
-    """사용자 메시지를 받아서 supervisor를 통해 적절한 에이전트로 라우팅합니다. (스트리밍 지원)"""
+    """[DEPRECATED] /message 엔드포인트 사용을 권장합니다."""
     try:
         # 스트리밍 요청 확인 (Accept 헤더 또는 stream 파라미터)
         accept_header = request.headers.get("accept", "")
@@ -151,9 +319,9 @@ async def _extract_and_store_keywords(user_id: int, message: str, message_id: in
     except Exception as e:
         logger.warning(f"채팅 키워드 추출 실패 (무시됨): {e}")
 
-@router.post("/process")
+@router.post("/process", deprecated=True)
 async def process_message(request_data: dict, request: Request):
-    """프론트엔드용 메시지 처리 엔드포인트 (스트리밍 지원)"""
+    """[DEPRECATED] /message 엔드포인트 사용을 권장합니다."""
     try:
         message = request_data.get("message", "")
         user_id = request_data.get("user_id", 1)
