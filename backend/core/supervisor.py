@@ -484,6 +484,15 @@ JSON 응답만 제공해주세요:
                              for resp in result.get("agent_responses", [])
                          ])
             
+            # 주요 에이전트(첫 번째)의 메타데이터 추출
+            primary_agent_metadata = {}
+            agent_responses_list = result.get("agent_responses", [])
+            if agent_responses_list:
+                primary_agent_metadata = agent_responses_list[0].get("metadata", {})
+            
+            # agent_metadata와 primary_agent_metadata 병합
+            combined_metadata = {**result["agent_metadata"], **primary_agent_metadata}
+            
             # 결과를 SupervisorResponse로 변환
             return SupervisorResponse(
                 success=result["agent_success"],
@@ -492,7 +501,7 @@ JSON 응답만 제공해주세요:
                     success=result["agent_success"],
                     content=result["final_response"],
                     agent_type=result["agent_type"],
-                    metadata=result["agent_metadata"]
+                    metadata=combined_metadata  # 에이전트의 메타데이터 포함
                 ),
                 reasoning=result["reasoning"],
                 metadata={

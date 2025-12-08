@@ -2647,11 +2647,13 @@ class FloatingChatApp:
         
         # 스트리밍 관련 변수 초기화
         self.streaming_text_widget = bot_text
+        self.streaming_bot_container = bot_container  # 버튼 추가를 위해 저장
         self.streaming_text_buffer = ""
         self.streaming_displayed_length = 0
         self.streaming_typing_active = False
         self.stream_finished_flag = False  # 네트워크 수신 완료 여부 플래그
         self._reference_marker_logged = False
+        self.pending_metadata = None  # 스트리밍 중 수신한 메타데이터
         
         # 초기 높이 조정 (after_idle로 지연)
         self.root.after_idle(lambda: self._adjust_text_widget_height(bot_text) if bot_text.winfo_exists() else None)
@@ -2669,6 +2671,22 @@ class FloatingChatApp:
             self.streaming_text_buffer = ""
         
         self.streaming_text_buffer += chunk
+        
+        # 메타데이터 구분자 감지 및 처리
+        metadata_separator = "\n\n---METADATA---\n"
+        if metadata_separator in self.streaming_text_buffer:
+            parts = self.streaming_text_buffer.split(metadata_separator, 1)
+            self.streaming_text_buffer = parts[0]  # 텍스트 부분만 유지
+            
+            # 메타데이터 파싱
+            if len(parts) > 1:
+                try:
+                    metadata_json = parts[1].strip()
+                    self.pending_metadata = json.loads(metadata_json)
+                    print(f"[UI] 메타데이터 수신: {self.pending_metadata}")
+                except json.JSONDecodeError as e:
+                    print(f"[UI] 메타데이터 파싱 오류: {e}")
+                    self.pending_metadata = None
         
         # 타이핑 애니메이션이 진행 중이 아니면 시작
         if not self.streaming_typing_active:
@@ -2783,9 +2801,130 @@ class FloatingChatApp:
             self.root.after_idle(finalize_height)
             self.root.after(150, finalize_height)
             
+            # 4. 메타데이터에 따른 버튼 추가 (action="open_file")
+            if hasattr(self, 'pending_metadata') and self.pending_metadata:
+                if self.pending_metadata.get("action") == "open_file":
+                    file_path = self.pending_metadata.get("file_path", "")
+                    file_name = self.pending_metadata.get("file_name", "파일")
+                    if file_path and hasattr(self, 'streaming_bot_container'):
+                        self.add_open_file_button(
+                            self.streaming_bot_container,
+                            file_path,
+                            file_name
+                        )
+            
         # 변수 정리
         if hasattr(self, 'streaming_text_buffer'):
             delattr(self, 'streaming_text_buffer')
+        if hasattr(self, 'pending_metadata'):
+            self.pending_metadata = None
+    
+    # ============================================================
+    # 파일 열기 버튼 (CodingAgent 등에서 사용)
+    # ============================================================
+    
+    def add_open_file_button(self, container, file_path, file_name):
+        """
+        봇 메시지 하단에 파일/폴더 열기 버튼을 추가합니다.
+        
+        Args:
+            container: 버튼을 추가할 부모 위젯 (bot_container)
+            file_path: 열 파일의 전체 경로
+            file_name: 표시할 파일명
+        """
+        # 버튼 프레임 생성
+        button_frame = tk.Frame(container, bg=COLORS["panel_bg"])
+        button_frame.pack(fill='x', pady=(8, 4), padx=10)
+        self._bind_canvas_scroll_events(button_frame)
+        
+        # 파일 열기 버튼
+        open_file_btn = tk.Button(
+            button_frame,
+            text=f"📂 {file_name} 열기",
+            font=('맑은 고딕', 9),
+            bg='#3b82f6',
+            fg='white',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=lambda: self._open_code_file(file_path)
+        )
+        open_file_btn.pack(side='left', padx=(0, 8))
+        
+        # 폴더 열기 버튼
+        open_folder_btn = tk.Button(
+            button_frame,
+            text="📁 폴더 열기",
+            font=('맑은 고딕', 9),
+            bg='#6b7280',
+            fg='white',
+            relief='flat',
+            cursor='hand2',
+            padx=12,
+            pady=6,
+            command=lambda: self._open_code_folder(file_path)
+        )
+        open_folder_btn.pack(side='left')
+        
+        # 스크롤 영역 업데이트
+        self.root.after_idle(self._update_messages_scrollregion)
+        self.root.after(100, lambda: self.messages_canvas.yview_moveto(1))
+        
+        print(f"[UI] 파일 열기 버튼 추가: {file_name}")
+    
+    def _open_code_file(self, file_path):
+        """코드 파일을 OS 기본 편집기로 엽니다."""
+        try:
+            if not file_path or not os.path.exists(file_path):
+                print(f"[UI] 파일을 찾을 수 없습니다: {file_path}")
+                return
+            
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(file_path)
+            elif system == "Darwin":
+                subprocess.call(['open', file_path])
+            else:
+                subprocess.call(['xdg-open', file_path])
+            
+            print(f"[UI] 코드 파일 열기: {file_path}")
+        except Exception as e:
+            print(f"[UI] 파일 열기 오류: {e}")
+    
+    def _open_code_folder(self, file_path):
+        """코드 파일이 있는 폴더를 탐색기로 엽니다."""
+        try:
+            if not file_path:
+                print("[UI] 파일 경로가 없습니다.")
+                return
+            
+            # 폴더 경로 추출
+            folder_path = os.path.dirname(file_path)
+            if not os.path.exists(folder_path):
+                print(f"[UI] 폴더를 찾을 수 없습니다: {folder_path}")
+                return
+            
+            system = platform.system()
+            if system == "Windows":
+                # Windows: explorer로 폴더 열기 (파일 선택)
+                if os.path.isfile(file_path):
+                    subprocess.run(['explorer', '/select,', file_path])
+                else:
+                    os.startfile(folder_path)
+            elif system == "Darwin":
+                # macOS: Finder로 열기
+                if os.path.isfile(file_path):
+                    subprocess.call(['open', '-R', file_path])
+                else:
+                    subprocess.call(['open', folder_path])
+            else:
+                # Linux: xdg-open으로 열기
+                subprocess.call(['xdg-open', folder_path])
+            
+            print(f"[UI] 코드 폴더 열기: {folder_path}")
+        except Exception as e:
+            print(f"[UI] 폴더 열기 오류: {e}")
         
     # ============================================================
     # WebSocket 연결 (실시간 추천 알림)

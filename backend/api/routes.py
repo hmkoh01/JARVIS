@@ -217,6 +217,11 @@ async def process_message(request_data: dict, request: Request):
                     metadata={"agent_type": agent_type, "success": supervisor_response.success}
                 )
 
+            # 에이전트 메타데이터 추출 (파일 열기 액션 등)
+            response_metadata = {}
+            if supervisor_response.success and hasattr(supervisor_response.response, 'metadata'):
+                response_metadata = supervisor_response.response.metadata or {}
+            
             async def generate_stream():
                 try:
                     if not content:
@@ -241,6 +246,14 @@ async def process_message(request_data: dict, request: Request):
                         )
                         yield chunk
                         await asyncio.sleep(0.01)
+                    
+                    # 메타데이터에 action="open_file"이 있으면 구분자와 함께 전송
+                    if response_metadata.get("action") == "open_file":
+                        import json as json_module
+                        metadata_json = json_module.dumps(response_metadata, ensure_ascii=False)
+                        yield f"\n\n---METADATA---\n{metadata_json}"
+                        logger.info("스트리밍 메타데이터 전송: action=open_file")
+                    
                     logger.info(
                         "스트리밍 응답 전송 완료 - 총 %d개 청크",
                         chunk_count
