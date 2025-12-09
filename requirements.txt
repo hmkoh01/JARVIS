@@ -33,6 +33,7 @@ fastapi>=0.104.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 uvicorn>=0.24.0
+python-multipart>=0.0.6  # For file upload (Form, File) in FastAPI
 
 # Authentication and OAuth
 authlib>=1.2.0  # For Google OAuth 2.0
