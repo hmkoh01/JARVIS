@@ -1056,13 +1056,13 @@ async def upload_file_for_processing(
                 })
             
             # 임베딩 및 Qdrant 업로드
-            embeddings = embedder.encode(texts)
-            repository.upsert_batch(
-                texts=texts,
-                embeddings=embeddings,
-                metadatas=metas,
-                user_id=user_id
-            )
+            embeddings = embedder.encode_documents(texts)  # encode -> encode_documents
+            dense_vectors = embeddings['dense_vecs'].tolist()
+            sparse_vectors = [
+                embedder.convert_sparse_to_qdrant_format(lw)
+                for lw in embeddings['lexical_weights']
+            ]
+            repository.qdrant.upsert_vectors(metas, dense_vectors, sparse_vectors)
             
             # SQLite에 파일 메타데이터 저장
             db.insert_collected_file(file_info)
