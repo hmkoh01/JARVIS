@@ -11,9 +11,11 @@ backend_dir = Path(__file__).parent.parent.absolute()
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
-from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any, Optional
+import tempfile
+import hashlib
 from datetime import datetime
 import asyncio
 import threading # 백그라운드 작업을 위해 추가
@@ -938,6 +940,231 @@ async def get_data_collection_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"통계 조회 오류: {str(e)}")
+
+
+# =========================================================================
+# 파일 업로드 API (exe 클라이언트용)
+# =========================================================================
+
+@router.post("/files/upload/{user_id}")
+async def upload_file_for_processing(
+    user_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    original_path: str = Form(...),
+    file_category: str = Form("document")
+):
+    """
+    클라이언트에서 업로드한 파일을 처리합니다. (exe 환경용)
+    
+    - 파일을 임시 저장
+    - 파싱 및 청크 분할
+    - Qdrant에 인덱싱
+    - SQLite에 메타데이터 저장
+    """
+    try:
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+        
+        if repository is None or embedder is None:
+            raise HTTPException(
+                status_code=500,
+                detail="서버 리소스가 아직 초기화되지 않았습니다. 잠시 후 다시 시도해주세요."
+            )
+        
+        # 파일 내용 읽기
+        content = await file.read()
+        file_size = len(content)
+        
+        # 파일 크기 제한 (50MB)
+        if file_size > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="파일 크기가 50MB를 초과합니다.")
+        
+        # 임시 파일로 저장 (파서가 파일 경로를 필요로 함)
+        import os
+        from pathlib import Path as PathLib
+        
+        file_ext = PathLib(file.filename).suffix.lower()
+        temp_dir = tempfile.mkdtemp(prefix="jarvis_upload_")
+        temp_path = os.path.join(temp_dir, file.filename)
+        
+        try:
+            with open(temp_path, 'wb') as f:
+                f.write(content)
+            
+            # 파일 해시 계산 (중복 체크용)
+            file_hash = hashlib.md5(content).hexdigest()
+            
+            # SQLite에 파일 메타데이터 저장
+            db = SQLite()
+            file_info = {
+                'user_id': user_id,
+                'file_path': original_path,  # 원본 경로 저장
+                'file_name': file.filename,
+                'file_size': file_size,
+                'file_category': file_category,
+                'file_hash': file_hash,
+                'modified_date': datetime.utcnow()
+            }
+            
+            # 중복 체크
+            if db.is_file_already_collected(user_id, original_path, file_hash):
+                logger.info(f"파일 이미 수집됨, 스킵: {file.filename}")
+                return {
+                    "success": True,
+                    "message": f"파일이 이미 수집되어 있습니다: {file.filename}",
+                    "skipped": True
+                }
+            
+            # 문서 파싱 및 청크 분할
+            from database.document_parser import DocumentParser
+            parser = DocumentParser()
+            
+            try:
+                chunk_infos = parser.parse_and_chunk(temp_path)
+            except Exception as e:
+                logger.warning(f"파일 파싱 실패 ({file.filename}): {e}")
+                return {
+                    "success": False,
+                    "message": f"파일 파싱 실패: {str(e)}",
+                    "filename": file.filename
+                }
+            
+            if not chunk_infos:
+                logger.warning(f"청크 없음: {file.filename}")
+                return {
+                    "success": True,
+                    "message": f"파일에서 텍스트를 추출할 수 없습니다: {file.filename}",
+                    "chunks": 0
+                }
+            
+            # 청크를 Qdrant에 인덱싱
+            doc_id = f"file_{file_hash}"
+            texts = []
+            metas = []
+            
+            for chunk in chunk_infos:
+                texts.append(chunk['text'])
+                metas.append({
+                    'user_id': user_id,
+                    'source': 'file',
+                    'path': original_path,
+                    'doc_id': doc_id,
+                    'chunk_id': chunk['chunk_id'],
+                    'snippet': chunk['snippet'],
+                    'content': chunk['text']
+                })
+            
+            # 임베딩 및 Qdrant 업로드
+            embeddings = embedder.encode(texts)
+            repository.upsert_batch(
+                texts=texts,
+                embeddings=embeddings,
+                metadatas=metas,
+                user_id=user_id
+            )
+            
+            # SQLite에 파일 메타데이터 저장
+            db.insert_collected_file(file_info)
+            
+            # 키워드 추출 및 저장
+            from database.data_collector import extract_keywords_from_text, create_snippet
+            combined_text = '\n'.join(texts)
+            
+            if len(combined_text.strip()) >= 50:
+                keywords = extract_keywords_from_text(combined_text, top_n=10)
+                if keywords:
+                    snippet = create_snippet(combined_text, max_length=200)
+                    keyword_entries = []
+                    for keyword, score in keywords:
+                        keyword_entries.append({
+                            'user_id': user_id,
+                            'source_type': 'file',
+                            'source_id': doc_id,
+                            'keyword': keyword,
+                            'original_text': snippet
+                        })
+                    db.insert_content_keywords_batch(user_id, keyword_entries)
+            
+            logger.info(f"✅ 파일 업로드 처리 완료: {file.filename} ({len(chunk_infos)}개 청크)")
+            
+            return {
+                "success": True,
+                "message": f"파일 처리 완료: {file.filename}",
+                "filename": file.filename,
+                "chunks": len(chunk_infos),
+                "doc_id": doc_id
+            }
+            
+        finally:
+            # 임시 파일 정리
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except:
+                pass
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"파일 업로드 처리 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"파일 처리 오류: {str(e)}")
+
+
+@router.post("/files/upload-batch/{user_id}")
+async def upload_files_batch(
+    user_id: int,
+    request: Request,
+    files: List[UploadFile] = File(...),
+    original_paths: str = Form(...)  # JSON 배열로 전달
+):
+    """
+    여러 파일을 일괄 업로드합니다.
+    original_paths는 JSON 배열 문자열로 전달됩니다.
+    """
+    import json
+    
+    try:
+        paths = json.loads(original_paths)
+    except:
+        raise HTTPException(status_code=400, detail="original_paths는 JSON 배열이어야 합니다.")
+    
+    if len(files) != len(paths):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"파일 수({len(files)})와 경로 수({len(paths)})가 일치하지 않습니다."
+        )
+    
+    results = []
+    success_count = 0
+    
+    for file, path in zip(files, paths):
+        try:
+            # 개별 파일 처리 (단일 업로드 API 호출과 동일한 로직)
+            result = await upload_file_for_processing(
+                user_id=user_id,
+                request=request,
+                file=file,
+                original_path=path,
+                file_category="document"
+            )
+            results.append(result)
+            if result.get("success"):
+                success_count += 1
+        except Exception as e:
+            results.append({
+                "success": False,
+                "filename": file.filename,
+                "error": str(e)
+            })
+    
+    return {
+        "success": True,
+        "total": len(files),
+        "success_count": success_count,
+        "results": results
+    }
+
 
 @router.get("/user-survey/{user_id}")
 async def get_user_survey(user_id: int):

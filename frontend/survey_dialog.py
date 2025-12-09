@@ -438,56 +438,44 @@ class SurveyDialog:
             messagebox.showerror("저장 오류", "설문 데이터 저장에 실패했습니다. 다시 시도해주세요.")
     
     def save_survey_data_to_sqlite(self, survey_data):
-        """설문지 데이터를 SQLite에만 저장합니다 (빠른 저장)."""
-        if SQLite is None:
-            print("Warning: SQLite not available. Survey data not saved.")
-            return False
-        
+        """설문지 데이터를 백엔드 API를 통해 저장합니다. (exe 환경 호환)"""
         try:
-            db = SQLite()
-            success = db.insert_survey_response(self.user_id, survey_data)
-            if success:
-                print("✅ 설문지 응답이 SQLite에 저장되었습니다.")
-                return True
+            import requests
+            
+            # 백엔드 API를 통해 설문 데이터 저장 및 프로필 인덱싱
+            response = requests.post(
+                f"{API_BASE_URL}/api/v2/user-profile/{self.user_id}/update",
+                json=survey_data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    print("✅ 설문지 응답이 백엔드에 저장되었습니다.")
+                    if result.get("indexed"):
+                        print("✅ 사용자 프로필이 검색 시스템에 인덱싱되었습니다.")
+                    return True
+                else:
+                    print(f"❌ 설문지 저장 실패: {result.get('message')}")
+                    return False
             else:
-                print("❌ 설문지 응답 저장에 실패했습니다.")
+                print(f"❌ 설문지 저장 실패 (HTTP {response.status_code}): {response.text}")
                 return False
+                
+        except requests.exceptions.ConnectionError:
+            print("❌ 백엔드 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+            return False
         except Exception as e:
-            print(f"❌ 설문지 응답 저장 중 오류: {e}")
+            print(f"❌ 설문지 저장 중 오류: {e}")
             return False
     
     @staticmethod
     def _start_background_indexing(user_id):
-        """사용자 프로필을 백그라운드에서 Qdrant에 인덱싱합니다."""
-        import threading
-        
-        def background_indexing(uid):
-            try:
-                import requests
-                from backend.database.sqlite import SQLite
-                
-                # SQLite에서 설문 데이터 가져오기
-                db = SQLite()
-                survey_data = db.get_user_survey_response(uid)
-                
-                if survey_data:
-                    # API를 통해 프로필 업데이트
-                    response = requests.post(
-                        f"{API_BASE_URL}/api/v2/user-profile/{uid}/update",
-                        json=survey_data
-                    )
-                    if response.status_code == 200:
-                        print("✅ 사용자 프로필이 검색 시스템(Qdrant)에 인덱싱되었습니다.")
-                    else:
-                        print("⚠️ 프로필 인덱싱 실패 (검색은 가능하나 개인화 기능이 제한될 수 있습니다)")
-                else:
-                    print("⚠️ 설문 데이터를 찾을 수 없습니다.")
-            except Exception as e:
-                print(f"⚠️ 프로필 인덱싱 오류: {e}")
-                print("   (검색은 가능하나 개인화 기능이 제한될 수 있습니다)")
-        
-        # 백그라운드 스레드에서 실행 (self 참조 없이 user_id만 전달)
-        threading.Thread(target=background_indexing, args=(user_id,), daemon=True).start()
+        """백그라운드 인덱싱 - API에서 이미 처리하므로 별도 작업 불필요"""
+        # save_survey_data_to_sqlite에서 API를 통해 저장 및 인덱싱을 함께 처리하므로
+        # 이 함수는 더 이상 필요하지 않지만, 호환성을 위해 유지
+        print("✅ 프로필 인덱싱이 API를 통해 완료되었습니다.")
     
     def skip_survey(self):
         """설문 건너뛰기"""

@@ -509,16 +509,19 @@ class FloatingChatApp:
     
     def start_data_collection_mode(self, selected_folders: list = None):
         """
-        데이터 수집 모드를 시작합니다.
+        데이터 수집 모드를 시작합니다. (파일 업로드 방식)
         - 스피너 애니메이션 시작
         - '초기 데이터 수집을 시작합니다.' 말풍선 3초 표시
-        - 백엔드 API로 수집 시작 요청
-        - 진행률 모니터링 시작
+        - 로컬 파일 수집 및 업로드
+        - 진행률 모니터링
         """
         self.is_collecting_data = True
         self.collection_progress = 0.0
         self.collection_message = "초기화 중..."
         self.selected_folders_for_collection = selected_folders or []
+        
+        # 파일 업로더 인스턴스
+        self._file_uploader = None
         
         # 스피너 애니메이션 시작
         self._start_spinner_animation()
@@ -526,14 +529,92 @@ class FloatingChatApp:
         # 시작 말풍선 표시 (3초 후 자동 닫힘)
         self._show_temporary_message_bubble("🚀 초기 데이터 수집을 시작합니다.", 3000)
         
-        # 백엔드에 데이터 수집 시작 요청
-        threading.Thread(target=self._start_collection_api_call, daemon=True).start()
-        
-        # 진행률 모니터링 시작
-        self._start_collection_progress_monitoring()
+        # 파일 업로드 시작
+        threading.Thread(target=self._start_file_upload, daemon=True).start()
     
-    def _start_collection_api_call(self):
-        """백엔드 API를 호출하여 데이터 수집을 시작합니다."""
+    def _start_file_upload(self):
+        """로컬 파일을 수집하여 백엔드로 업로드합니다."""
+        try:
+            if not self.jwt_token or not self.user_id:
+                print("[Collection] 인증 정보가 없어 데이터 수집을 시작할 수 없습니다.")
+                self.root.after(0, lambda: self._on_collection_complete())
+                return
+            
+            # 폴더가 선택되지 않은 경우 홈 폴더 사용
+            folders = self.selected_folders_for_collection
+            if not folders:
+                from pathlib import Path
+                folders = [str(Path.home())]
+            
+            print(f"[Collection] 파일 업로드 모드 시작: {len(folders)}개 폴더")
+            
+            try:
+                from file_uploader import FileUploader
+            except ImportError:
+                print("[Collection] file_uploader 모듈을 찾을 수 없습니다. 기존 방식으로 대체합니다.")
+                self._start_collection_api_call_fallback()
+                return
+            
+            # 파일 업로더 생성
+            self._file_uploader = FileUploader(self.user_id, self.API_BASE_URL)
+            
+            # 진행 상황 콜백
+            def on_progress(progress):
+                # UI 업데이트는 메인 스레드에서
+                self.root.after(0, lambda p=progress: self._update_upload_progress(p))
+            
+            # 업로드 시작
+            self._file_uploader.start_upload(folders, progress_callback=on_progress)
+            
+            # 완료 대기
+            self._file_uploader.wait_for_completion()
+            
+            # 완료 처리
+            final_progress = self._file_uploader.progress
+            print(f"[Collection] 파일 업로드 완료 - 성공: {final_progress.uploaded_files}, "
+                  f"스킵: {final_progress.skipped_files}, 실패: {final_progress.failed_files}")
+            
+            # 초기 설정 완료 API 호출 (백엔드에 알림)
+            self._notify_initial_setup_complete()
+            
+            # UI 완료 처리
+            self.root.after(0, lambda: self._on_collection_complete())
+            
+        except Exception as e:
+            print(f"[Collection] 파일 업로드 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            self.root.after(0, lambda: self._on_collection_complete())
+    
+    def _update_upload_progress(self, progress):
+        """업로드 진행 상황을 UI에 반영합니다."""
+        self.collection_progress = progress.progress_percent
+        
+        if progress.current_file:
+            # 파일명이 너무 길면 축약
+            filename = progress.current_file
+            if len(filename) > 30:
+                filename = filename[:27] + "..."
+            self.collection_message = f"업로드 중: {filename}"
+        else:
+            self.collection_message = f"처리: {progress.processed_files}/{progress.total_files}"
+    
+    def _notify_initial_setup_complete(self):
+        """백엔드에 초기 설정 완료를 알립니다."""
+        try:
+            response = requests.post(
+                f"{self.API_BASE_URL}/api/v2/settings/initial-setup",
+                headers={"Authorization": f"Bearer {self.jwt_token}"},
+                json={"folder_path": self.selected_folders_for_collection[0] if self.selected_folders_for_collection else ""},
+                timeout=30
+            )
+            if response.status_code == 200:
+                print("[Collection] 초기 설정 완료 알림 성공")
+        except Exception as e:
+            print(f"[Collection] 초기 설정 완료 알림 실패: {e}")
+    
+    def _start_collection_api_call_fallback(self):
+        """기존 방식의 데이터 수집 (폴더 경로 전송) - 폴백용"""
         try:
             if not self.jwt_token or not self.user_id:
                 print("[Collection] 인증 정보가 없어 데이터 수집을 시작할 수 없습니다.")
@@ -547,11 +628,15 @@ class FloatingChatApp:
             )
             
             if response.status_code == 200:
-                print("[Collection] 데이터 수집 시작 요청 성공")
+                print("[Collection] 데이터 수집 시작 요청 성공 (폴백 모드)")
+                # 기존 진행률 모니터링 시작
+                self.root.after(0, lambda: self._start_collection_progress_monitoring())
             else:
                 print(f"[Collection] 데이터 수집 시작 실패: {response.text}")
+                self.root.after(0, lambda: self._on_collection_complete())
         except Exception as e:
             print(f"[Collection] 데이터 수집 시작 API 호출 오류: {e}")
+            self.root.after(0, lambda: self._on_collection_complete())
     
     def _start_collection_progress_monitoring(self):
         """데이터 수집 진행률을 주기적으로 모니터링합니다."""
@@ -5635,18 +5720,196 @@ class FloatingChatApp:
         except Exception as e:
             print(f"복사 중 오류: {e}")
 
+# =============================================================================
+# 초기 설정 관련 함수들 (start.py와 동일한 로직)
+# =============================================================================
+
+# 전역 변수: 선택된 폴더 목록
+_selected_folders_global = None
+
+
+def _perform_user_survey(user_id):
+    """사용자 설문지를 실행합니다."""
+    print("\n📋 사용자 설문지를 시작합니다...")
+    
+    try:
+        from survey_dialog import show_survey_dialog
+        
+        # 설문지 다이얼로그 실행
+        success = show_survey_dialog(user_id)
+        
+        if success:
+            print("✅ 설문지가 완료되었습니다.")
+            return True
+        else:
+            print("❌ 설문지가 취소되었습니다.")
+            return False
+        
+    except ImportError as e:
+        print(f"❌ 설문지 UI 모듈 import 오류: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ 설문지 실행 중 오류: {e}")
+        return False
+
+
+def _perform_folder_selection():
+    """폴더 선택 UI를 실행합니다."""
+    global _selected_folders_global
+    print("\n📁 폴더 선택을 시작합니다...")
+    
+    try:
+        from folder_selector import select_folders
+        
+        # 폴더 선택 UI 실행
+        selected_folders = select_folders()
+        
+        if selected_folders == "cancelled":
+            print("❌ 폴더 선택이 취소되었습니다.")
+            return False
+        elif selected_folders is None:
+            print("✅ 전체 사용자 폴더 스캔이 선택되었습니다.")
+            _selected_folders_global = None
+        else:
+            print(f"✅ 선택된 폴더: {len(selected_folders)}개")
+            for folder in selected_folders:
+                print(f"  - {folder}")
+            _selected_folders_global = selected_folders
+        
+        return True
+        
+    except ImportError as e:
+        print(f"❌ 폴더 선택 UI 모듈 import 오류: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ 폴더 선택 중 오류: {e}")
+        return False
+
+
+def _submit_folder_setup(folder_path, token):
+    """폴더 경로를 백엔드에 전송"""
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/api/v2/settings/initial-setup",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"folder_path": folder_path},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print("✅ 폴더 경로가 백엔드에 저장되었습니다.")
+            return True
+        else:
+            print(f"❌ 백엔드 저장 실패: {response.text}")
+            return False
+    
+    except Exception as e:
+        print(f"❌ 백엔드 저장 중 오류: {e}")
+        return False
+
+
 def main():
-    """메인 함수"""
+    """메인 함수 - start.py와 동일한 로직"""
+    global _selected_folders_global
+    
     print("JARVIS Floating Chat Desktop App")
-    print("=" * 50)
+    print("=" * 60)
+    
+    # =========================================================================
+    # 1단계: 항상 Google 로그인 창 표시 (start.py와 동일)
+    # =========================================================================
+    print("\n🔐 Google 계정으로 로그인합니다...")
+    print("📱 Google 로그인 창을 표시합니다...")
+    
+    try:
+        from login_view import main as login_main
+        user_info = login_main()
+        
+        if not user_info:
+            print("❌ 로그인이 취소되었습니다.")
+            print("   앱을 종료합니다.")
+            return
+        
+        print(f"\n✅ 로그인 성공!")
+        print(f"   이메일: {user_info.get('email')}")
+        print(f"   사용자 ID: {user_info.get('user_id')}")
+        
+    except ImportError as e:
+        print(f"❌ 로그인 모듈 import 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    except Exception as e:
+        print(f"❌ 로그인 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # 토큰과 사용자 정보 저장
+    token = user_info.get('jarvis_token') or load_token()
+    user_id = user_info.get('user_id')
+    has_completed_setup = user_info.get('has_completed_setup', 0)
+    
+    # =========================================================================
+    # 2단계: 신규 사용자 초기 설정 (설문지, 폴더 선택, 데이터 수집)
+    # =========================================================================
+    if has_completed_setup == 0:
+        print("\n" + "=" * 60)
+        print("📋 신규 사용자 설정을 진행합니다...")
+        print("   - 사용자 설문지 작성")
+        print("   - 폴더 선택")
+        print("   - 초기 데이터 수집")
+        print("=" * 60)
+        
+        # 설문지 실행
+        if not _perform_user_survey(user_id):
+            print("❌ 설문지가 취소되었습니다. 앱을 종료합니다.")
+            return
+        
+        # 폴더 선택 수행
+        if not _perform_folder_selection():
+            print("❌ 폴더 선택이 취소되었습니다. 앱을 종료합니다.")
+            return
+        
+        # 선택된 폴더를 백엔드에 전송
+        if _selected_folders_global:
+            folder_path = _selected_folders_global[0]
+        else:
+            folder_path = ""
+        
+        if not _submit_folder_setup(folder_path, token):
+            print("⚠️ 폴더 경로 저장에 실패했지만 계속 진행합니다.")
+        
+        print("\n✅ 초기 설정이 완료되었습니다.")
+        print("🎨 플로팅 앱을 시작하고 데이터 수집을 진행합니다...")
+        
+        # 데이터 수집 모드로 플로팅 앱 시작
+        import os
+        os.environ["JARVIS_START_COLLECTION"] = "1"
+        if _selected_folders_global:
+            os.environ["JARVIS_SELECTED_FOLDERS"] = json.dumps(_selected_folders_global)
+        else:
+            os.environ["JARVIS_SELECTED_FOLDERS"] = "[]"
+    else:
+        # 기존 사용자
+        print("\n✅ 기존 사용자입니다. 초기 설정을 건너뜁니다.")
+        print("   - 설문지: 이미 완료됨")
+        print("   - 폴더 선택: 이미 완료됨")
+        print("   - 기존 데이터 사용")
+    
+    # =========================================================================
+    # 3단계: 플로팅 앱 실행
+    # =========================================================================
+    print("\n" + "=" * 60)
     print("화면 우측 하단에 플로팅 버튼이 나타납니다.")
     print("버튼을 클릭하면 채팅창이 열립니다.")
     print("버튼을 드래그하여 이동할 수 있습니다.")
     print("ESC 키로 채팅창을 닫을 수 있습니다.")
-    print("=" * 50)
+    print("=" * 60)
     
     app = FloatingChatApp()
     app.run()
+
 
 if __name__ == "__main__":
     main()
