@@ -1860,6 +1860,20 @@ class SQLite:
             logger.error(f"유형별 분석 조회 오류: {e}")
             return []
 
+    def is_file_already_collected(self, user_id: int, file_path: str, file_hash: str) -> bool:
+        """파일이 이미 수집되었는지 확인 (경로 또는 해시로 확인)"""
+        try:
+            conn = self.get_user_connection(user_id)
+            cursor = conn.execute("""
+                SELECT 1 FROM files 
+                WHERE file_path = ? OR doc_id = ?
+                LIMIT 1
+            """, (file_path, f"file_{file_hash}"))
+            return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"파일 중복 확인 오류: {e}")
+            return False
+
 
 # Backward compatibility alias
 SQLiteMeta = SQLite
