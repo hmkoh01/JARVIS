@@ -14,6 +14,9 @@ from datetime import datetime
 # Theme 임포트
 from theme import COLORS, style_button
 
+# Config 임포트 (configs.yaml에서 설정 로드)
+from config import API_BASE_URL
+
 # Add the backend directory to Python path for database access
 backend_path = os.path.join(os.path.dirname(__file__), '..', 'backend')
 if backend_path not in sys.path:
@@ -396,7 +399,7 @@ class SurveyDialog:
                 try:
                     import requests
                     response = requests.post(
-                        f"http://localhost:8000/api/v2/user-profile/{self.user_id}/update",
+                        f"{API_BASE_URL}/api/v2/user-profile/{self.user_id}/update",
                         json=survey_data
                     )
                     if response.status_code == 200:
@@ -470,7 +473,7 @@ class SurveyDialog:
                 if survey_data:
                     # API를 통해 프로필 업데이트
                     response = requests.post(
-                        f"http://localhost:8000/api/v2/user-profile/{uid}/update",
+                        f"{API_BASE_URL}/api/v2/user-profile/{uid}/update",
                         json=survey_data
                     )
                     if response.status_code == 200:

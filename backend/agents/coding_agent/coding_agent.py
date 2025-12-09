@@ -479,17 +479,22 @@ class CodingAgent(BaseAgent):
 """
 
         try:
+            logger.info(f"CodingAgent: LLM 요청 시작 (timeout=120s)")
             response = self.llm_model.generate_content(
                 prompt,
-                request_options={"timeout": 60}
+                request_options={"timeout": 120}
             )
             
             response_text = self._extract_llm_response(response)
             if not response_text:
+                logger.error("CodingAgent: LLM 응답 텍스트 추출 실패 (Empty response)")
                 return None, ""
             
             # 코드 블록 추출
             generated_code = self._extract_code_block(response_text)
+            
+            if not generated_code:
+                logger.warning(f"CodingAgent: 코드 블록 추출 실패. 응답 내용: {response_text[:200]}...")
             
             # 설명 추출 (코드 블록 이전 텍스트)
             explanation = self._extract_explanation(response_text)
@@ -510,20 +515,48 @@ class CodingAgent(BaseAgent):
         Returns:
             추출된 코드 또는 None
         """
-        # ```python 또는 ```py 코드 블록 찾기
-        pattern = r'```(?:python|py)\n(.*?)```'
-        matches = re.findall(pattern, text, re.DOTALL)
+        # 1) 언어/개행 유연한 패턴 (python, py, Python 등)
+        pattern = r'```[ \t]*(?:python|py|Python|PY)?[ \t]*\r?\n?(.*?)```'
+        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
         
         if matches:
             # 가장 긴 코드 블록 선택 (보통 메인 코드)
-            return max(matches, key=len).strip()
+            code = max(matches, key=len).strip()
+            if code:
+                return code
         
-        # 일반 ``` 코드 블록 찾기
-        pattern = r'```\n(.*?)```'
+        # 2) 코드 펜스만 있는 경우 (언어 표시 없음)
+        pattern = r'```(.*?)```'
         matches = re.findall(pattern, text, re.DOTALL)
         
         if matches:
-            return max(matches, key=len).strip()
+            code = max(matches, key=len).strip()
+            if code:
+                return code
+        
+        # 3) 폴백: def/class/import 등이 포함된 코드 블록 추출
+        # 코드처럼 보이는 연속된 줄들을 찾기
+        code_lines = []
+        in_code_block = False
+        
+        for line in text.split('\n'):
+            stripped = line.strip()
+            # 코드 시작 패턴 감지
+            if re.match(r'^(import |from |def |class |if |for |while |try:|async |@)', stripped):
+                in_code_block = True
+            
+            if in_code_block:
+                # 빈 줄이 연속으로 2개 이상이면 코드 블록 종료로 간주
+                if not stripped and code_lines and not code_lines[-1].strip():
+                    break
+                code_lines.append(line)
+        
+        if code_lines:
+            code = '\n'.join(code_lines).strip()
+            # 최소 3줄 이상의 코드가 있어야 유효한 코드로 간주
+            if code and len(code_lines) >= 3:
+                logger.info(f"CodingAgent: 폴백으로 코드 추출 성공 ({len(code_lines)}줄)")
+                return code
         
         return None
     

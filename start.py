@@ -14,11 +14,29 @@ from tqdm import tqdm
 import logging
 import requests
 import json
+import yaml
 
 logger = logging.getLogger(__name__)
 
 # 전역 변수: 선택된 폴더 목록
 selected_folders_global = None
+
+# =============================================================================
+# configs.yaml에서 API URL 로드
+# =============================================================================
+def _load_api_url():
+    """configs.yaml에서 API URL을 로드합니다."""
+    config_path = Path(__file__).parent / "configs.yaml"
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                configs = yaml.safe_load(f)
+                return configs.get("api", {}).get("base_url", "http://localhost:8000")
+        except Exception as e:
+            logger.warning(f"configs.yaml 로드 실패: {e}")
+    return "http://localhost:8000"
+
+API_BASE_URL = _load_api_url()
 
 def check_docker():
     """Docker 설치 및 실행 상태 확인"""
@@ -305,7 +323,7 @@ def wait_for_backend_server():
     max_attempts = 30  # 최대 30초 대기
     for attempt in range(max_attempts):
         try:
-            response = requests.get("http://localhost:8000/api/v2/health", timeout=2)
+            response = requests.get(f"{API_BASE_URL}/api/v2/health", timeout=2)
             if response.status_code == 200:
                 print("✅ 백엔드 서버가 준비되었습니다.")
                 return True
@@ -384,7 +402,7 @@ def submit_folder_setup(folder_path, token):
     """폴더 경로를 백엔드에 전송"""
     try:
         response = requests.post(
-            "http://localhost:8000/api/v2/settings/initial-setup",
+            f"{API_BASE_URL}/api/v2/settings/initial-setup",
             headers={"Authorization": f"Bearer {token}"},
             json={"folder_path": folder_path},
             timeout=10
@@ -453,7 +471,7 @@ def perform_initial_data_collection_with_progress(user_id: int):
         
         # API 호출
         response = requests.post(
-            f"http://localhost:8000/api/v2/data-collection/start/{user_id}",
+            f"{API_BASE_URL}/api/v2/data-collection/start/{user_id}",
             headers={"Authorization": f"Bearer {token}"},
             json={"selected_folders": folders_to_send},
             timeout=10
@@ -466,7 +484,7 @@ def perform_initial_data_collection_with_progress(user_id: int):
         print("✅ 데이터 수집이 백그라운드에서 시작되었습니다.")
         print("   초기 수집이 완료될 때까지 기다리는 중...")
 
-        status_url = f"http://localhost:8000/api/v2/data-collection/status/{user_id}"
+        status_url = f"{API_BASE_URL}/api/v2/data-collection/status/{user_id}"
         import time
         import math
 
@@ -584,7 +602,7 @@ def start_backend():
         # 프로세스 상태 확인
         if process.poll() is None:
             print("✅ 백엔드 서버가 시작되었습니다.")
-            print("🌐 API 문서: http://localhost:8000/docs")
+            print(f"🌐 API 문서: {API_BASE_URL}/docs")
             logger.info("백엔드 서버 시작 성공")
             return process
         else:
@@ -804,8 +822,8 @@ def main():
         
     print("\n🎉 JARVIS Multi-Agent System이 성공적으로 시작되었습니다!")
     print("=" * 60)
-    print("🔗 API 문서: http://localhost:8000/docs")
-    print("📊 시스템 정보: http://localhost:8000/info")
+    print(f"🔗 API 문서: {API_BASE_URL}/docs")
+    print(f"📊 시스템 정보: {API_BASE_URL}/info")
     print("🔍 Qdrant 관리: http://localhost:6333/dashboard")
     print("=" * 60)
     print("\n시스템을 종료하려면 Ctrl+C를 누르세요...")

@@ -60,13 +60,23 @@ def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(secu
 @router.post("/message")
 async def unified_message(message_request: MessageRequest, request: Request):
     """
-    통합 메시지 처리 엔드포인트
+    통합 메시지 처리 엔드포인트 (멀티에이전트 스트리밍 지원)
     
     모든 채팅 요청이 이 엔드포인트를 통해 Supervisor로 라우팅됩니다.
     - 의도 분석 (LLM 기반)
     - 에이전트 선택 및 스케줄링
-    - 스트리밍/비스트리밍 응답
+    - 단계별 스트리밍 응답 (실행 계획 → 에이전트 실행 → 결과)
+    
+    스트리밍 응답 형식:
+    - ---PLAN---: 실행 계획 (JSON)
+    - ---START---: 에이전트 실행 시작
+    - ---RESULT---: 에이전트 결과
+    - ---ERROR---: 에이전트 오류
+    - ---COMPLETE---: 전체 완료
+    - ---METADATA---: 메타데이터 (버튼 표시용)
     """
+    import json as json_module
+    
     try:
         message = message_request.message
         user_id = message_request.user_id
@@ -95,83 +105,155 @@ async def unified_message(message_request: MessageRequest, request: Request):
         supervisor_instance = get_supervisor()
         user_intent = SupervisorUserIntent(message=message, user_id=user_id)
         
-        # 스트리밍 모드
+        # 스트리밍 모드 - 멀티에이전트 단계별 스트리밍
         if stream_requested:
-            supervisor_response = await asyncio.wait_for(
-                supervisor_instance.process_user_intent(user_intent, stream=True),
-                timeout=settings.REQUEST_TIMEOUT
-            )
-            
-            # 스트리밍 generator가 있으면 스트리밍 응답
-            if supervisor_response.stream_generator:
-                async def generate_stream():
-                    try:
-                        full_content = ""
-                        for chunk in supervisor_response.stream_generator():
-                            full_content += chunk
-                            yield chunk
-                        
-                        # 스트리밍 완료 후 로깅
-                        if len(full_content.strip()) >= 10:
-                            db.log_chat_message(
-                                user_id=user_id,
-                                role='assistant',
-                                content=full_content,
-                                metadata={"agent_type": "chatbot", "success": True, "streaming": True}
-                            )
-                        
-                        # 메타데이터 전송 (필요시)
-                        metadata = supervisor_response.metadata or {}
-                        action = metadata.get("action", "")
-                        if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
-                            import json as json_module
-                            metadata_json = json_module.dumps(metadata, ensure_ascii=False)
-                            yield f"\n\n---METADATA---\n{metadata_json}"
-                            
-                    except Exception as e:
-                        logger.error(f"스트리밍 응답 생성 중 오류: {e}", exc_info=True)
-                        yield f"오류가 발생했습니다: {str(e)}"
+            async def generate_multi_agent_stream():
+                """멀티에이전트 단계별 스트리밍 응답 생성"""
+                full_content_parts = []
+                final_metadata = {}
                 
-                return StreamingResponse(generate_stream(), media_type="text/plain")
-            
-            # 스트리밍 generator가 없으면 일반 응답을 청크로 전송
-            content = supervisor_response.response.content or ""
-            response_metadata = supervisor_response.response.metadata or {}
-            
-            # Assistant 응답 로깅
-            agent_type = supervisor_response.response.agent_type
-            if len(content.strip()) >= 10:
-                db.log_chat_message(
-                    user_id=user_id,
-                    role='assistant',
-                    content=content,
-                    metadata={"agent_type": agent_type, "success": supervisor_response.success}
-                )
-            
-            async def generate_chunked_stream():
                 try:
-                    if not content:
-                        yield "응답이 비어 있습니다."
-                        return
+                    async for event in supervisor_instance.process_user_intent_streaming(user_intent):
+                        event_type = event.get("type", "")
+                        
+                        if event_type == "analyzing":
+                            # 의도 분석 시작 - 프런트에서 로딩 상태 업데이트용
+                            message = event.get("message", "의도를 분석하고 있어요...")
+                            yield f"---ANALYZING---\n{message}\n\n"
+                        
+                        elif event_type == "analyzed":
+                            # 의도 분석 완료 - 서론 텍스트 먼저 전송
+                            intro_text = event.get("intro_text", "")
+                            if intro_text:
+                                yield intro_text + "\n\n"
+                            
+                            analyzed_data = {
+                                "agents": event.get("agents", []),
+                                "agent_count": event.get("agent_count", 1)
+                            }
+                            yield f"---ANALYZED---\n{json_module.dumps(analyzed_data, ensure_ascii=False)}\n\n"
+                        
+                        elif event_type == "plan":
+                            # 실행 계획 전송
+                            plan_data = {
+                                "agents": event.get("agents", []),
+                                "sub_tasks": event.get("sub_tasks", {}),
+                                "execution_mode": event.get("execution_mode", "sequential"),
+                                "confidence": event.get("confidence", 0.8)
+                            }
+                            yield f"---PLAN---\n{json_module.dumps(plan_data, ensure_ascii=False)}\n\n"
+                        
+                        elif event_type == "start":
+                            # 에이전트 실행 시작
+                            start_data = {
+                                "agent": event.get("agent", ""),
+                                "order": event.get("order", 0),
+                                "total": event.get("total", 0),
+                                "task": event.get("task", ""),
+                                "focus": event.get("focus", "")
+                            }
+                            yield f"---START---\n{json_module.dumps(start_data, ensure_ascii=False)}\n\n"
+                        
+                        elif event_type == "result":
+                            # 에이전트 결과
+                            agent_type = event.get("agent", "")
+                            content = event.get("content", "")
+                            success = event.get("success", True)
+                            metadata = event.get("metadata", {})
+                            
+                            result_data = {
+                                "agent": agent_type,
+                                "order": event.get("order", 0),
+                                "success": success,
+                                "elapsed_time": event.get("elapsed_time", 0),
+                                "metadata": metadata
+                            }
+                            yield f"---RESULT---\n{json_module.dumps(result_data, ensure_ascii=False)}\n"
+                            
+                            # 실제 내용 스트리밍 (청크 단위)
+                            if content:
+                                chunk_size = 80
+                                for i in range(0, len(content), chunk_size):
+                                    chunk = content[i:i + chunk_size]
+                                    yield chunk
+                                    await asyncio.sleep(0.01)
+                                yield "\n\n"
+                                
+                                full_content_parts.append(content)
+                            
+                            # 메타데이터 병합 (action이 있는 것 우선)
+                            if metadata:
+                                if metadata.get("action"):
+                                    final_metadata = metadata
+                                elif not final_metadata.get("action"):
+                                    final_metadata.update(metadata)
+                        
+                        elif event_type == "error":
+                            # 에이전트 오류 (계속 진행)
+                            error_data = {
+                                "agent": event.get("agent", ""),
+                                "order": event.get("order", 0),
+                                "error": event.get("error", "알 수 없는 오류")
+                            }
+                            yield f"---ERROR---\n{json_module.dumps(error_data, ensure_ascii=False)}\n\n"
+                        
+                        elif event_type == "cancelled":
+                            # 취소됨
+                            cancel_data = {
+                                "completed": event.get("completed", []),
+                                "remaining": event.get("remaining", [])
+                            }
+                            yield f"---CANCELLED---\n{json_module.dumps(cancel_data, ensure_ascii=False)}\n\n"
+                            break
+                        
+                        elif event_type == "waiting_confirmation":
+                            # 확인 대기
+                            waiting_data = {
+                                "agent": event.get("agent", ""),
+                                "remaining_agents": event.get("remaining_agents", []),
+                                "metadata": event.get("metadata", {})
+                            }
+                            yield f"---WAITING_CONFIRMATION---\n{json_module.dumps(waiting_data, ensure_ascii=False)}\n\n"
+                        
+                        elif event_type == "complete":
+                            # 전체 완료
+                            complete_data = {
+                                "total_agents": event.get("total_agents", 0),
+                                "successful": event.get("successful", 0),
+                                "failed": event.get("failed", 0),
+                                "total_time": event.get("total_time", 0),
+                                "waiting_confirmation": event.get("waiting_confirmation", False),
+                                "remaining_agents": event.get("remaining_agents", [])
+                            }
+                            yield f"---COMPLETE---\n{json_module.dumps(complete_data, ensure_ascii=False)}\n\n"
+                        
+                        elif event_type == "fatal_error":
+                            # 치명적 오류
+                            yield f"---FATAL_ERROR---\n{event.get('error', '알 수 없는 오류')}\n\n"
+                            break
                     
-                    chunk_size = 80
-                    for i in range(0, len(content), chunk_size):
-                        chunk = content[i:i + chunk_size]
-                        yield chunk
-                        await asyncio.sleep(0.01)
+                    # 스트리밍 완료 후 로깅
+                    full_content = "\n\n".join(full_content_parts)
+                    if len(full_content.strip()) >= 10:
+                        db.log_chat_message(
+                            user_id=user_id,
+                            role='assistant',
+                            content=full_content,
+                            metadata={"multi_agent": True, "streaming": True}
+                        )
                     
-                    # 메타데이터 전송
-                    action = response_metadata.get("action", "")
+                    # 메타데이터 전송 (버튼 표시용)
+                    action = final_metadata.get("action", "")
                     if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
-                        import json as json_module
-                        metadata_json = json_module.dumps(response_metadata, ensure_ascii=False)
-                        yield f"\n\n---METADATA---\n{metadata_json}"
+                        metadata_json = json_module.dumps(final_metadata, ensure_ascii=False)
+                        yield f"---METADATA---\n{metadata_json}\n"
+                        logger.info(f"[MAS] 메타데이터 전송: action={action}")
                         
                 except Exception as e:
-                    logger.error(f"청크 스트리밍 중 오류: {e}", exc_info=True)
-                    yield f"오류가 발생했습니다: {str(e)}"
+                    logger.error(f"멀티에이전트 스트리밍 중 오류: {e}", exc_info=True)
+                    yield f"---FATAL_ERROR---\n{str(e)}\n"
             
-            return StreamingResponse(generate_chunked_stream(), media_type="text/plain")
+            return StreamingResponse(generate_multi_agent_stream(), media_type="text/plain")
         
         # 비스트리밍 모드
         else:
@@ -215,6 +297,164 @@ async def unified_message(message_request: MessageRequest, request: Request):
             agent_type="error",
             metadata={}
         )
+
+
+# =============================================================================
+# 남은 에이전트 실행 엔드포인트 (멀티에이전트 continuation)
+# =============================================================================
+
+@router.post("/continue-agents")
+async def continue_agents(request_data: dict, request: Request):
+    """
+    남은 에이전트들을 실행합니다.
+    
+    이전 에이전트(예: report)가 확인을 받은 후 호출되어
+    남은 에이전트들(예: coding)을 실행합니다.
+    
+    요청 JSON:
+        {
+            "message": "원본 사용자 메시지",
+            "user_id": 1,
+            "remaining_agents": ["coding"],
+            "sub_tasks": {
+                "coding": {"task": "...", "focus": "..."}
+            },
+            "previous_results": [...]
+        }
+    
+    스트리밍 응답 형식 (멀티에이전트와 동일):
+        ---PLAN---, ---START---, ---RESULT---, ---COMPLETE--- 등
+    """
+    import json as json_module
+    
+    try:
+        message = request_data.get("message", "")
+        user_id = request_data.get("user_id", 1)
+        remaining_agents = request_data.get("remaining_agents", [])
+        sub_tasks = request_data.get("sub_tasks", {})
+        previous_results = request_data.get("previous_results", [])
+        
+        if not remaining_agents:
+            return {
+                "success": False,
+                "content": "실행할 에이전트가 없습니다.",
+                "agent_type": "error",
+                "metadata": {}
+            }
+        
+        logger.info(f"[MAS-CONTINUE] 남은 에이전트 실행 요청: {remaining_agents}")
+        
+        # Supervisor를 통한 처리
+        supervisor_instance = get_supervisor()
+        user_intent = SupervisorUserIntent(message=message, user_id=user_id)
+        
+        # 항상 스트리밍 모드로 응답
+        async def generate_continuation_stream():
+            """남은 에이전트 스트리밍 응답 생성"""
+            full_content_parts = []
+            final_metadata = {}
+            
+            try:
+                async for event in supervisor_instance.process_remaining_agents_streaming(
+                    user_intent, remaining_agents, sub_tasks, previous_results
+                ):
+                    event_type = event.get("type", "")
+                    
+                    if event_type == "plan":
+                        plan_data = {
+                            "agents": event.get("agents", []),
+                            "sub_tasks": event.get("sub_tasks", {}),
+                            "execution_mode": "sequential",
+                            "is_continuation": event.get("is_continuation", True)
+                        }
+                        yield f"---PLAN---\n{json_module.dumps(plan_data, ensure_ascii=False)}\n\n"
+                    
+                    elif event_type == "start":
+                        start_data = {
+                            "agent": event.get("agent", ""),
+                            "order": event.get("order", 0),
+                            "total": event.get("total", 0),
+                            "task": event.get("task", ""),
+                            "focus": event.get("focus", "")
+                        }
+                        yield f"---START---\n{json_module.dumps(start_data, ensure_ascii=False)}\n\n"
+                    
+                    elif event_type == "result":
+                        agent_type = event.get("agent", "")
+                        content = event.get("content", "")
+                        success = event.get("success", True)
+                        metadata = event.get("metadata", {})
+                        
+                        result_data = {
+                            "agent": agent_type,
+                            "order": event.get("order", 0),
+                            "success": success,
+                            "elapsed_time": event.get("elapsed_time", 0),
+                            "metadata": metadata
+                        }
+                        yield f"---RESULT---\n{json_module.dumps(result_data, ensure_ascii=False)}\n"
+                        
+                        # 실제 내용 스트리밍 (청크 단위)
+                        if content:
+                            chunk_size = 80
+                            for i in range(0, len(content), chunk_size):
+                                chunk = content[i:i + chunk_size]
+                                yield chunk
+                                await asyncio.sleep(0.01)
+                            yield "\n\n"
+                            
+                            full_content_parts.append(content)
+                        
+                        # 메타데이터 병합
+                        if metadata:
+                            if metadata.get("action"):
+                                final_metadata = metadata
+                            elif not final_metadata.get("action"):
+                                final_metadata.update(metadata)
+                    
+                    elif event_type == "error":
+                        error_data = {
+                            "agent": event.get("agent", ""),
+                            "order": event.get("order", 0),
+                            "error": event.get("error", "알 수 없는 오류")
+                        }
+                        yield f"---ERROR---\n{json_module.dumps(error_data, ensure_ascii=False)}\n\n"
+                    
+                    elif event_type == "complete":
+                        complete_data = {
+                            "total_agents": event.get("total_agents", 0),
+                            "successful": event.get("successful", 0),
+                            "failed": event.get("failed", 0),
+                            "total_time": event.get("total_time", 0),
+                            "is_continuation": event.get("is_continuation", True)
+                        }
+                        yield f"---COMPLETE---\n{json_module.dumps(complete_data, ensure_ascii=False)}\n\n"
+                    
+                    elif event_type == "fatal_error":
+                        yield f"---FATAL_ERROR---\n{event.get('error', '알 수 없는 오류')}\n\n"
+                        break
+                
+                # 메타데이터 전송 (버튼 표시용)
+                action = final_metadata.get("action", "")
+                if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
+                    metadata_json = json_module.dumps(final_metadata, ensure_ascii=False)
+                    yield f"---METADATA---\n{metadata_json}\n"
+                    logger.info(f"[MAS-CONTINUE] 메타데이터 전송: action={action}")
+                    
+            except Exception as e:
+                logger.error(f"남은 에이전트 스트리밍 중 오류: {e}", exc_info=True)
+                yield f"---FATAL_ERROR---\n{str(e)}\n"
+        
+        return StreamingResponse(generate_continuation_stream(), media_type="text/plain")
+        
+    except Exception as e:
+        logger.error(f"남은 에이전트 실행 중 오류 발생: {e}", exc_info=True)
+        return {
+            "success": False,
+            "content": f"처리 중 오류가 발생했습니다: {str(e)}",
+            "agent_type": "error",
+            "metadata": {}
+        }
 
 
 # =============================================================================
@@ -386,12 +626,14 @@ async def process_message(request_data: dict, request: Request):
                 )
 
             # 에이전트 메타데이터 추출 (파일 열기 액션 등)
+            # 부분 성공(일부 에이전트만 성공)인 경우에도 메타데이터는 추출해야 함
             response_metadata = {}
-            if supervisor_response.success and hasattr(supervisor_response.response, 'metadata'):
+            if hasattr(supervisor_response.response, 'metadata'):
                 response_metadata = supervisor_response.response.metadata or {}
             
             # 디버그: 메타데이터 로깅
-            logger.info(f"[DEBUG] agent_type={supervisor_response.response.agent_type if supervisor_response.success else 'unknown'}")
+            agent_type_debug = getattr(supervisor_response.response, 'agent_type', 'unknown')
+            logger.info(f"[DEBUG] agent_type={agent_type_debug}")
             logger.info(f"[DEBUG] response_metadata={response_metadata}")
             
             async def generate_stream():

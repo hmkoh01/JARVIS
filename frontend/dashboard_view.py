@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable
 
 from theme import COLORS, style_button, BUTTON_STYLES
+from config import API_BASE_URL
 
 
 class DashboardWindow:
@@ -27,7 +28,7 @@ class DashboardWindow:
         self.parent_app = parent_app
         self.user_id = user_id
         self.jwt_token = jwt_token
-        self.API_BASE_URL = "http://localhost:8000/api/v2"
+        self.API_BASE_URL = f"{API_BASE_URL}/api/v2"
         
         # 폰트 설정
         self.default_font = getattr(parent_app, 'default_font', 'Malgun Gothic')

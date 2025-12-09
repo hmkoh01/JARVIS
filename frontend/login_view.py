@@ -18,6 +18,9 @@ import os
 # Theme 임포트
 from theme import COLORS, style_button
 
+# Config 임포트 (configs.yaml에서 설정 로드)
+from config import API_BASE_URL, CALLBACK_PORT, CALLBACK_URI
+
 # keyring 라이브러리 임포트
 try:
     import keyring
@@ -25,13 +28,6 @@ try:
 except ImportError:
     KEYRING_AVAILABLE = False
     print("keyring 라이브러리가 설치되지 않았습니다. token.json 파일에 저장합니다.")
-
-# API 설정
-API_BASE_URL = "http://localhost:8000"
-
-# 로컬 콜백 서버 설정
-CALLBACK_PORT = 9090
-CALLBACK_URI = f"http://127.0.0.1:{CALLBACK_PORT}/auth/callback"
 
 # 전역 변수
 callback_code = None

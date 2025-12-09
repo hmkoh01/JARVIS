@@ -28,6 +28,9 @@ from token_store import (
 # Theme import (중앙 집중식 색상/스타일 관리)
 from theme import COLORS, BUTTON_STYLES, STATUS_BADGE_STYLES
 
+# Config import (API URL 등 설정)
+from config import API_BASE_URL, WS_BASE_URL
+
 class FloatingChatApp:
     def __init__(self):
         self.root = tk.Tk()
@@ -36,8 +39,8 @@ class FloatingChatApp:
         # 한글 폰트 설정
         self.setup_korean_fonts()
         
-        # API 설정
-        self.API_BASE_URL = "http://localhost:8000"
+        # API 설정 (config.py에서 가져옴)
+        self.API_BASE_URL = API_BASE_URL
         
         # =========================================================================
         # 토큰/유저 상태 초기화 (앱 시작 시 저장된 토큰 로드)
@@ -329,6 +332,14 @@ class FloatingChatApp:
                     elif message['type'] == 'stream_chunk':
                         # 스트리밍 청크 처리
                         self.handle_stream_chunk(message['chunk'])
+                    
+                    elif message['type'] == 'append_status':
+                        # 상태 메시지 즉시 추가 (멀티에이전트 UI)
+                        self._append_content_immediately(message['text'])
+                    
+                    elif message['type'] == 'add_agent_button':
+                        # 에이전트 결과에 따른 버튼 추가
+                        self._add_agent_action_button(message['agent'], message['metadata'])
                     
                     elif message['type'] == 'show_report_notification':
                         # 보고서 완료/실패 알림 표시
@@ -2515,6 +2526,9 @@ class FloatingChatApp:
         # 입력창 초기화
         self.message_input.delete(0, tk.END)
         
+        # 현재 사용자 메시지 저장 (남은 에이전트 실행 시 사용)
+        self.current_user_message = message
+        
         # 사용자 메시지 표시
         self.add_user_message(message)
         
@@ -2529,16 +2543,20 @@ class FloatingChatApp:
         })
         
     def process_api_request(self, message, loading_text_widget):
-        """봇 응답 가져오기 - 스트리밍 응답 지원"""
+        """봇 응답 가져오기 - 멀티에이전트 스트리밍 응답 지원"""
         max_retries = 3
         retry_delay = 2
-        timeout = 120
+        timeout = 300  # 멀티에이전트는 시간이 더 걸릴 수 있음
         
         for attempt in range(max_retries):
             try:
                 response = requests.post(
-                    f"{self.API_BASE_URL}/api/v2/process",
-                    json={"message": message, "user_id": 1},
+                    f"{self.API_BASE_URL}/api/v2/message",
+                    json={
+                        "message": message, 
+                        "user_id": self.user_id or 1,
+                        "stream": True
+                    },
                     headers={"Accept": "text/event-stream"},
                     timeout=timeout,
                     stream=True
@@ -2553,8 +2571,8 @@ class FloatingChatApp:
                     
                     # 스트리밍 응답 읽기 (decode_unicode=True로 설정하여 안전하게 읽기)
                     try:
-                        # chunk_size=None으로 설정하여 스트림이 도착하는 대로 받음
-                        for chunk_text in response.iter_content(chunk_size=None, decode_unicode=True):
+                        # 작은 chunk_size로 자주 흘려보내도록 설정
+                        for chunk_text in response.iter_content(chunk_size=64, decode_unicode=True):
                             if chunk_text:
                                 self.message_queue.put({
                                     'type': 'stream_chunk',
@@ -2618,8 +2636,30 @@ class FloatingChatApp:
         self.add_bot_message(bot_response)
     
     def create_streaming_bot_message(self, loading_text_widget):
-        """스트리밍용 빈 봇 메시지를 생성합니다."""
-        self.remove_loading_message(loading_text_widget)
+        """
+        스트리밍용 봇 메시지 준비.
+        빈 말풍선을 미리 만들지 않고 첫 청크가 도착할 때 생성하도록 로딩 위젯만 보관합니다.
+        """
+        # 로딩 위젯을 보관하고, 실제 말풍선 생성은 첫 청크에서 수행
+        self.streaming_loading_widget = loading_text_widget
+        self.streaming_text_widget = None
+        self.streaming_bot_container = None
+        self.streaming_text_buffer = ""
+        self.streaming_displayed_length = 0
+        self.streaming_typing_active = False
+        self.stream_finished_flag = False  # 네트워크 수신 완료 여부 플래그
+        self._reference_marker_logged = False
+        self.pending_metadata = None  # 스트리밍 중 수신한 메타데이터
+    
+    def _ensure_streaming_container(self):
+        """첫 스트리밍 청크 도착 시 말풍선을 생성합니다."""
+        if self.streaming_text_widget and self.streaming_text_widget.winfo_exists():
+            return
+        
+        # 로딩 메시지 제거
+        if hasattr(self, 'streaming_loading_widget') and self.streaming_loading_widget:
+            self.remove_loading_message(self.streaming_loading_widget)
+            self.streaming_loading_widget = None
         
         # 봇 메시지 프레임 생성
         message_frame = tk.Frame(self.scrollable_frame, bg='white')
@@ -2657,12 +2697,6 @@ class FloatingChatApp:
         # 스트리밍 관련 변수 초기화
         self.streaming_text_widget = bot_text
         self.streaming_bot_container = bot_container  # 버튼 추가를 위해 저장
-        self.streaming_text_buffer = ""
-        self.streaming_displayed_length = 0
-        self.streaming_typing_active = False
-        self.stream_finished_flag = False  # 네트워크 수신 완료 여부 플래그
-        self._reference_marker_logged = False
-        self.pending_metadata = None  # 스트리밍 중 수신한 메타데이터
         
         # 초기 높이 조정 (after_idle로 지연)
         self.root.after_idle(lambda: self._adjust_text_widget_height(bot_text) if bot_text.winfo_exists() else None)
@@ -2671,35 +2705,452 @@ class FloatingChatApp:
         self.messages_canvas.yview_moveto(1)
     
     def handle_stream_chunk(self, chunk):
-        """스트리밍 청크를 처리하고 누적합니다."""
-        if not hasattr(self, 'streaming_text_widget') or not self.streaming_text_widget.winfo_exists():
+        """스트리밍 청크를 처리하고 누적합니다. (멀티에이전트 스트리밍 지원)"""
+        # 첫 청크 도착 시 말풍선 생성/전환
+        if not hasattr(self, 'streaming_text_widget') or not self.streaming_text_widget:
+            self._ensure_streaming_container()
+        if not self.streaming_text_widget or not self.streaming_text_widget.winfo_exists():
             return
         
         # 청크를 버퍼에 추가
         if not hasattr(self, 'streaming_text_buffer'):
             self.streaming_text_buffer = ""
         
+        # 멀티에이전트 스트리밍 상태 초기화
+        if not hasattr(self, 'multi_agent_mode'):
+            self.multi_agent_mode = False
+            self.multi_agent_plan = None
+            self.displayed_content = ""  # 이미 화면에 표시된 내용
+        
         self.streaming_text_buffer += chunk
         
-        # 메타데이터 구분자 감지 및 처리
-        metadata_separator = "\n\n---METADATA---\n"
-        if metadata_separator in self.streaming_text_buffer:
-            parts = self.streaming_text_buffer.split(metadata_separator, 1)
-            self.streaming_text_buffer = parts[0]  # 텍스트 부분만 유지
-            
-            # 메타데이터 파싱
-            if len(parts) > 1:
-                try:
-                    metadata_json = parts[1].strip()
-                    self.pending_metadata = json.loads(metadata_json)
-                    print(f"[UI] 메타데이터 수신: {self.pending_metadata}")
-                except json.JSONDecodeError as e:
-                    print(f"[UI] 메타데이터 파싱 오류: {e}")
-                    self.pending_metadata = None
+        # 멀티에이전트 마커 처리 (상태 메시지는 즉시 표시)
+        self._process_multi_agent_markers()
         
         # 타이핑 애니메이션이 진행 중이 아니면 시작
         if not self.streaming_typing_active:
             self.animate_streaming_typing()
+    
+    def _process_multi_agent_markers(self):
+        """멀티에이전트 스트리밍 마커를 처리합니다. 상태 메시지는 즉시 화면에 표시."""
+        markers = ["---ANALYZING---", "---ANALYZED---", "---PLAN---", "---START---", 
+                   "---RESULT---", "---ERROR---", "---CANCELLED---", "---COMPLETE---", 
+                   "---WAITING_CONFIRMATION---", "---FATAL_ERROR---", "---METADATA---"]
+        
+        buffer = self.streaming_text_buffer
+        
+        for marker in markers:
+            marker_with_newline = f"{marker}\n"
+            while marker_with_newline in buffer:
+                parts = buffer.split(marker_with_newline, 1)
+                before_marker = parts[0]
+                after_marker = parts[1] if len(parts) > 1 else ""
+                
+                # 마커 전 내용이 있으면 먼저 처리 (실제 응답 내용)
+                if before_marker.strip():
+                    # 표시되지 않은 내용만 추가
+                    self._append_content_immediately(before_marker)
+                    
+                    # [FIX] 처리된 내용은 버퍼에서 제거하여 중복 표시 방지
+                    # before_marker를 제거하고 marker부터 다시 시작
+                    buffer = marker_with_newline + after_marker
+                    continue  # 변경된 버퍼로 루프 다시 시작
+                
+                if marker == "---ANALYZING---":
+                    # 의도 분석 시작 - 로딩 상태 업데이트
+                    line_end = after_marker.find("\n\n")
+                    if line_end == -1:
+                        break
+                    message = after_marker[:line_end].strip()
+                    self._handle_analyzing_event(message)
+                    buffer = after_marker[line_end+2:]
+                
+                elif marker == "---ANALYZED---":
+                    # 의도 분석 완료 - 서론 텍스트는 이미 before_marker로 처리됨
+                    json_end = after_marker.find("\n\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        analyzed_data = json.loads(json_str)
+                        self._handle_analyzed_event(analyzed_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] ANALYZED JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+2:]
+                
+                elif marker == "---PLAN---":
+                    json_end = after_marker.find("\n\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        plan_data = json.loads(json_str)
+                        self._handle_plan_event(plan_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] PLAN JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+2:]
+                    
+                elif marker == "---START---":
+                    json_end = after_marker.find("\n\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        start_data = json.loads(json_str)
+                        self._handle_start_event(start_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] START JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+2:]
+                    
+                elif marker == "---RESULT---":
+                    json_end = after_marker.find("\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        result_data = json.loads(json_str)
+                        self._handle_result_event(result_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] RESULT JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+1:]
+                    
+                elif marker == "---ERROR---":
+                    json_end = after_marker.find("\n\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        error_data = json.loads(json_str)
+                        self._handle_error_event(error_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] ERROR JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+2:]
+                    
+                elif marker == "---CANCELLED---":
+                    json_end = after_marker.find("\n\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        cancel_data = json.loads(json_str)
+                        self._handle_cancelled_event(cancel_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] CANCELLED JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+2:]
+                    
+                elif marker == "---COMPLETE---":
+                    json_end = after_marker.find("\n\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        complete_data = json.loads(json_str)
+                        self._handle_complete_event(complete_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] COMPLETE JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+2:]
+                
+                elif marker == "---WAITING_CONFIRMATION---":
+                    json_end = after_marker.find("\n\n")
+                    if json_end == -1:
+                        break
+                    json_str = after_marker[:json_end].strip()
+                    try:
+                        waiting_data = json.loads(json_str)
+                        self._handle_waiting_confirmation_event(waiting_data)
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] WAITING_CONFIRMATION JSON 파싱 오류: {e}")
+                    buffer = after_marker[json_end+2:]
+                    
+                elif marker == "---FATAL_ERROR---":
+                    line_end = after_marker.find("\n")
+                    if line_end == -1:
+                        break
+                    error_msg = after_marker[:line_end].strip()
+                    self._handle_fatal_error_event(error_msg)
+                    buffer = after_marker[line_end+1:]
+                    
+                elif marker == "---METADATA---":
+                    line_end = after_marker.find("\n")
+                    if line_end == -1:
+                        break
+                    json_str = after_marker[:line_end].strip()
+                    try:
+                        self.pending_metadata = json.loads(json_str)
+                        print(f"[UI] 메타데이터 수신: {self.pending_metadata}")
+                    except json.JSONDecodeError as e:
+                        print(f"[UI] 메타데이터 파싱 오류: {e}")
+                    buffer = after_marker[line_end+1:]
+        
+        self.streaming_text_buffer = buffer
+    
+    def _append_content_immediately(self, text):
+        """텍스트를 화면에 즉시 추가합니다. (메인 스레드에서 호출됨)"""
+        if not text or not hasattr(self, 'streaming_text_widget'):
+            return
+        if not self.streaming_text_widget.winfo_exists():
+            return
+        
+        try:
+            self.streaming_text_widget.config(state='normal')
+            self.streaming_text_widget.insert('end', text)
+            self.streaming_text_widget.config(state='disabled')
+            
+            # [제거] 버퍼에 다시 추가하면 중복 출력 발생
+            # 이미 화면에 표시했으므로 버퍼에 추가하지 않음
+            
+            # 높이 조정
+            self.root.after_idle(lambda: self._adjust_text_widget_height(self.streaming_text_widget) if self.streaming_text_widget.winfo_exists() else None)
+            
+            # 스크롤
+            self._update_messages_scrollregion()
+            self.messages_canvas.yview_moveto(1)
+        except tk.TclError:
+            pass
+    
+    def _add_agent_action_button(self, agent, metadata):
+        """에이전트 결과에 따른 버튼을 추가합니다."""
+        if not hasattr(self, 'streaming_bot_container'):
+            print(f"[UI] 버튼 추가 실패: streaming_bot_container 없음")
+            return
+        
+        action = metadata.get("action", "")
+        print(f"[UI] 버튼 추가: agent={agent}, action={action}")
+        
+        try:
+            if action == "confirm_report":
+                keyword = metadata.get("keyword", "")
+                if keyword:
+                    self.add_confirm_report_button(self.streaming_bot_container, keyword)
+                    print(f"[UI] 보고서 확인 버튼 추가됨: {keyword}")
+            
+            elif action == "open_file":
+                file_path = metadata.get("file_path", "")
+                file_name = metadata.get("file_name", "파일")
+                if file_path:
+                    self.add_open_file_button(self.streaming_bot_container, file_path, file_name)
+                    print(f"[UI] 파일 열기 버튼 추가됨: {file_name}")
+            
+            elif action == "confirm_analysis":
+                analysis_type = metadata.get("analysis_type", "custom")
+                title = metadata.get("title", "데이터 분석")
+                query = metadata.get("query", "")
+                self.add_confirm_analysis_button(self.streaming_bot_container, analysis_type, title, query)
+                print(f"[UI] 분석 확인 버튼 추가됨: {title}")
+        
+        except Exception as e:
+            print(f"[UI] 버튼 추가 오류: {e}")
+    
+    def _append_status_message(self, text):
+        """상태 메시지를 메시지 큐를 통해 안전하게 추가합니다."""
+        if not text:
+            return
+        # 메시지 큐를 통해 메인 스레드에서 처리하도록 전달
+        self.message_queue.put({
+            'type': 'append_status',
+            'text': text
+        })
+    
+    def _handle_analyzing_event(self, message):
+        """의도 분석 시작 이벤트 처리 - 로딩 상태 업데이트"""
+        print(f"[UI] 의도 분석 중: {message}")
+        
+        # 로딩 메시지 업데이트 (현재 로딩 위젯이 있으면)
+        status_text = f"🔍 {message}\n"
+        self._append_status_message(status_text)
+    
+    def _handle_analyzed_event(self, analyzed_data):
+        """의도 분석 완료 이벤트 처리 - 에이전트 정보 저장"""
+        agents = analyzed_data.get("agents", [])
+        agent_count = analyzed_data.get("agent_count", 1)
+        
+        print(f"[UI] 의도 분석 완료: {agents} ({agent_count}개 에이전트)")
+        
+        # 멀티에이전트 여부 미리 설정
+        self.multi_agent_mode = agent_count > 1
+        
+        # 분석 완료 메시지 (멀티에이전트인 경우에만)
+        if self.multi_agent_mode:
+            status_text = f"\n✨ {agent_count}개의 작업을 준비했어요!\n\n"
+            self._append_status_message(status_text)
+    
+    def _handle_plan_event(self, plan_data):
+        """실행 계획 이벤트 처리 - 즉시 화면에 표시"""
+        self.multi_agent_plan = plan_data
+        agents = plan_data.get("agents", [])
+        sub_tasks = plan_data.get("sub_tasks", {})
+        execution_mode = plan_data.get("execution_mode", "sequential")
+        
+        # 단일 에이전트인지 멀티에이전트인지 확인
+        self.multi_agent_mode = len(agents) > 1
+        
+        print(f"[UI] 실행 계획 수신: {agents}, mode={execution_mode}, multi={self.multi_agent_mode}")
+        
+        # 단일 에이전트인 경우 실행 계획을 표시하지 않음
+        if not self.multi_agent_mode:
+            return
+        
+        # 멀티에이전트인 경우에만 실행 계획 텍스트 생성
+        plan_text = "🤖 **실행 계획**\n"
+        for i, agent in enumerate(agents, 1):
+            task_info = sub_tasks.get(agent, {})
+            task = task_info.get("task", "")
+            plan_text += f"  {i}. {agent.upper()}"
+            if task:
+                plan_text += f" → {task[:40]}{'...' if len(task) > 40 else ''}"
+            plan_text += "\n"
+        plan_text += "\n"
+        
+        # 즉시 화면에 표시
+        self._append_status_message(plan_text)
+    
+    def _handle_start_event(self, start_data):
+        """에이전트 시작 이벤트 처리 - 즉시 화면에 표시"""
+        agent = start_data.get("agent", "")
+        order = start_data.get("order", 0)
+        total = start_data.get("total", 0)
+        task = start_data.get("task", "")
+        
+        print(f"[UI] 에이전트 시작: [{order}/{total}] {agent}")
+        
+        # 단일 에이전트인 경우 진행 상태를 표시하지 않음
+        if not getattr(self, 'multi_agent_mode', False):
+            return
+        
+        status_text = f"\n⏳ [{order}/{total}] **{agent.upper()}** 실행 중...\n"
+        if task:
+            status_text += f"   📋 태스크: {task[:50]}{'...' if len(task) > 50 else ''}\n"
+        
+        # 즉시 화면에 표시
+        self._append_status_message(status_text)
+    
+    def _handle_result_event(self, result_data):
+        """에이전트 결과 이벤트 처리 - 즉시 화면에 표시 및 버튼 추가"""
+        agent = result_data.get("agent", "")
+        order = result_data.get("order", 0)
+        success = result_data.get("success", True)
+        elapsed_time = result_data.get("elapsed_time", 0)
+        metadata = result_data.get("metadata", {})
+        
+        print(f"[UI] 에이전트 결과: [{order}] {agent}, success={success}")
+        
+        # 단일 에이전트인 경우 결과 헤더를 표시하지 않음
+        if not getattr(self, 'multi_agent_mode', False):
+            # 단일 에이전트인 경우 메타데이터만 저장 (나중에 finalize에서 처리)
+            if metadata and metadata.get("action"):
+                self.pending_metadata = metadata
+                print(f"[UI] 메타데이터 저장 (단일): {metadata.get('action')}")
+            return
+        
+        status_icon = "✅" if success else "❌"
+        result_header = f"\n{status_icon} [{order}] **{agent.upper()}** 완료 ({elapsed_time:.1f}초)\n"
+        result_header += "─" * 40 + "\n"
+        
+        # 즉시 화면에 표시
+        self._append_status_message(result_header)
+        
+        # 메타데이터에 action이 있으면 즉시 버튼 추가 요청
+        if metadata and metadata.get("action"):
+            action = metadata.get("action")
+            print(f"[UI] 에이전트 {agent} 버튼 추가 요청: action={action}")
+            
+            # 메시지 큐를 통해 버튼 추가
+            self.message_queue.put({
+                'type': 'add_agent_button',
+                'agent': agent,
+                'metadata': metadata
+            })
+    
+    def _handle_error_event(self, error_data):
+        """에이전트 오류 이벤트 처리 - 즉시 화면에 표시"""
+        agent = error_data.get("agent", "")
+        order = error_data.get("order", 0)
+        error_msg = error_data.get("error", "알 수 없는 오류")
+        
+        print(f"[UI] 에이전트 오류: [{order}] {agent}: {error_msg}")
+        
+        error_text = f"\n❌ [{order}] **{agent.upper()}** 오류\n"
+        error_text += f"   ⚠️ {error_msg}\n\n"
+        
+        # 즉시 화면에 표시
+        self._append_status_message(error_text)
+    
+    def _handle_cancelled_event(self, cancel_data):
+        """취소 이벤트 처리 - 즉시 화면에 표시"""
+        completed = cancel_data.get("completed", [])
+        remaining = cancel_data.get("remaining", [])
+        
+        print(f"[UI] 처리 취소됨: completed={completed}, remaining={remaining}")
+        
+        cancel_text = "\n\n🛑 **처리가 취소되었습니다**\n"
+        if completed:
+            cancel_text += f"   ✅ 완료됨: {', '.join(completed)}\n"
+        if remaining:
+            cancel_text += f"   ⏸️ 건너뜀: {', '.join(remaining)}\n"
+        
+        # 즉시 화면에 표시
+        self._append_status_message(cancel_text)
+    
+    def _handle_complete_event(self, complete_data):
+        """전체 완료 이벤트 처리 - 즉시 화면에 표시"""
+        total = complete_data.get("total_agents", 0)
+        successful = complete_data.get("successful", 0)
+        failed = complete_data.get("failed", 0)
+        total_time = complete_data.get("total_time", 0)
+        waiting_confirmation = complete_data.get("waiting_confirmation", False)
+        
+        print(f"[UI] 전체 완료: {successful}/{total} 성공, {failed} 실패, {total_time:.2f}초, waiting={waiting_confirmation}")
+        
+        # 확인 대기 중인 경우 완료 요약을 표시하지 않음
+        if waiting_confirmation:
+            remaining = complete_data.get("remaining_agents", [])
+            if remaining:
+                status_text = f"\n⏸️ **확인 대기 중** | 남은 에이전트: {', '.join(remaining)}\n"
+                self._append_status_message(status_text)
+            return
+        
+        # 완료 요약 추가 (멀티에이전트인 경우에만)
+        if getattr(self, 'multi_agent_mode', False) and total > 1:
+            summary_text = "\n" + "═" * 40 + "\n"
+            summary_text += f"📊 **실행 완료** | "
+            summary_text += f"성공: {successful}/{total}"
+            if failed > 0:
+                summary_text += f" | 실패: {failed}"
+            summary_text += f" | 총 {total_time:.1f}초\n"
+            
+            # 즉시 화면에 표시
+            self._append_status_message(summary_text)
+        
+        self.multi_agent_mode = False
+    
+    def _handle_waiting_confirmation_event(self, waiting_data):
+        """확인 대기 이벤트 처리 - 남은 에이전트 정보 저장"""
+        agent = waiting_data.get("agent", "")
+        remaining = waiting_data.get("remaining_agents", [])
+        metadata = waiting_data.get("metadata", {})
+        
+        print(f"[UI] 확인 대기: agent={agent}, remaining={remaining}")
+        
+        # 남은 에이전트 정보 저장 (보고서 확인 후 실행)
+        self.pending_remaining_agents = remaining
+        self.pending_sub_tasks = getattr(self, 'multi_agent_plan', {}).get('sub_tasks', {}) if hasattr(self, 'multi_agent_plan') else {}
+        
+        # 현재 메시지 저장 (남은 에이전트 실행 시 사용)
+        if hasattr(self, 'current_user_message'):
+            self.pending_original_message = self.current_user_message
+        
+        print(f"[UI] 남은 에이전트 저장: {remaining}, sub_tasks={self.pending_sub_tasks}")
+    
+    def _handle_fatal_error_event(self, error_msg):
+        """치명적 오류 이벤트 처리 - 즉시 화면에 표시"""
+        print(f"[UI] 치명적 오류: {error_msg}")
+        
+        error_text = f"\n\n💥 **오류가 발생했습니다**\n{error_msg}\n"
+        
+        # 즉시 화면에 표시
+        self._append_status_message(error_text)
+        
+        self.multi_agent_mode = False
     
     def animate_streaming_typing(self):
         """스트리밍 메시지를 타이핑 애니메이션으로 표시합니다 (참고문헌 숨김 처리)."""
@@ -2786,15 +3237,16 @@ class FloatingChatApp:
         if hasattr(self, 'streaming_text_widget') and self.streaming_text_widget.winfo_exists():
             # 최종 텍스트 (전체 버퍼)
             final_text = self.streaming_text_buffer if hasattr(self, 'streaming_text_buffer') else ""
-            
-            # 1. 화면에 전체 텍스트를 일단 넣음 (highlight_citations가 처리할 수 있도록)
+
+            # 1. 기존 화면을 유지하고, 비어있을 때만 버퍼를 주입
             self.streaming_text_widget.config(state='normal')
-            self.streaming_text_widget.delete('1.0', 'end')
-            self.streaming_text_widget.insert('1.0', final_text)
-            self._remove_trailing_newline(self.streaming_text_widget)
+            current_content = self.streaming_text_widget.get('1.0', 'end-1c')
+            if (not current_content.strip()) and final_text:
+                self.streaming_text_widget.insert('1.0', final_text)
+                self._remove_trailing_newline(self.streaming_text_widget)
             self.streaming_text_widget.config(state='disabled')
-            
-            # 2. 하이라이트 및 [참고 문헌] 정리 실행
+
+            # 2. 하이라이트 및 [참고 문헌] 정리 실행 (내용 유지)
             self.highlight_citations(self.streaming_text_widget)
             
             # 3. 최종 높이 및 스크롤 조정
@@ -2811,40 +3263,42 @@ class FloatingChatApp:
             self.root.after(150, finalize_height)
             
             # 4. 메타데이터에 따른 버튼 추가
-            if hasattr(self, 'pending_metadata') and self.pending_metadata:
-                action = self.pending_metadata.get("action", "")
-                
-                if action == "open_file":
-                    file_path = self.pending_metadata.get("file_path", "")
-                    file_name = self.pending_metadata.get("file_name", "파일")
-                    if file_path and hasattr(self, 'streaming_bot_container'):
-                        self.add_open_file_button(
-                            self.streaming_bot_container,
-                            file_path,
-                            file_name
-                        )
-                
-                elif action == "confirm_report":
-                    # 보고서 생성 확인 버튼 추가
-                    keyword = self.pending_metadata.get("keyword", "")
-                    if keyword and hasattr(self, 'streaming_bot_container'):
-                        self.add_confirm_report_button(
-                            self.streaming_bot_container,
-                            keyword
-                        )
-                
-                elif action == "confirm_analysis":
-                    # 대시보드 분석 확인 버튼 추가
-                    analysis_type = self.pending_metadata.get("analysis_type", "custom")
-                    title = self.pending_metadata.get("title", "데이터 분석")
-                    query = self.pending_metadata.get("query", "")
-                    if hasattr(self, 'streaming_bot_container'):
-                        self.add_confirm_analysis_button(
-                            self.streaming_bot_container,
-                            analysis_type,
-                            title,
-                            query
-                        )
+            # 멀티에이전트 모드에서는 _handle_result_event에서 이미 버튼을 추가했으므로 스킵
+            if not getattr(self, 'multi_agent_mode', False):
+                if hasattr(self, 'pending_metadata') and self.pending_metadata:
+                    action = self.pending_metadata.get("action", "")
+                    
+                    if action == "open_file":
+                        file_path = self.pending_metadata.get("file_path", "")
+                        file_name = self.pending_metadata.get("file_name", "파일")
+                        if file_path and hasattr(self, 'streaming_bot_container'):
+                            self.add_open_file_button(
+                                self.streaming_bot_container,
+                                file_path,
+                                file_name
+                            )
+                    
+                    elif action == "confirm_report":
+                        # 보고서 생성 확인 버튼 추가
+                        keyword = self.pending_metadata.get("keyword", "")
+                        if keyword and hasattr(self, 'streaming_bot_container'):
+                            self.add_confirm_report_button(
+                                self.streaming_bot_container,
+                                keyword
+                            )
+                    
+                    elif action == "confirm_analysis":
+                        # 대시보드 분석 확인 버튼 추가
+                        analysis_type = self.pending_metadata.get("analysis_type", "custom")
+                        title = self.pending_metadata.get("title", "데이터 분석")
+                        query = self.pending_metadata.get("query", "")
+                        if hasattr(self, 'streaming_bot_container'):
+                            self.add_confirm_analysis_button(
+                                self.streaming_bot_container,
+                                analysis_type,
+                                title,
+                                query
+                            )
             
         # 변수 정리
         if hasattr(self, 'streaming_text_buffer'):
@@ -3143,6 +3597,7 @@ class FloatingChatApp:
     def _cancel_report_creation_styled(self, offer_frame, keyword):
         """
         보고서 생성을 취소합니다 (show_deep_dive_offer 스타일).
+        남은 에이전트가 있으면 자동으로 실행합니다.
         
         Args:
             offer_frame: 제안 프레임 위젯 (제거용)
@@ -3154,32 +3609,68 @@ class FloatingChatApp:
         if offer_frame and offer_frame.winfo_exists():
             offer_frame.destroy()
         
-        # 거절 확인 메시지
-        reject_frame = tk.Frame(
-            self.scrollable_frame,
-            bg=COLORS["surface_alt"],
-            padx=12,
-            pady=8,
-            highlightbackground=COLORS["border"],
-            highlightthickness=1,
-            bd=0
-        )
-        reject_frame.pack(fill='x', padx=10, pady=(5, 10))
+        # 남은 에이전트가 있는지 확인
+        has_remaining_agents = hasattr(self, 'pending_remaining_agents') and self.pending_remaining_agents
         
-        reject_label = tk.Label(
-            reject_frame,
-            text="알겠어요! 다른 궁금한 점이 있으면 말씀해 주세요. 😊",
-            font=(self.default_font, 10),
-            bg=COLORS["surface_alt"],
-            fg='#4b5563',
-            wraplength=350,
-            justify='left'
-        )
-        reject_label.pack(anchor='w')
-        
-        # 스크롤 업데이트
-        self._update_messages_scrollregion()
-        self.messages_canvas.yview_moveto(1.0)
+        if has_remaining_agents:
+            # 남은 에이전트가 있으면 스킵 메시지 + 다음 에이전트 실행
+            skip_frame = tk.Frame(
+                self.scrollable_frame,
+                bg=COLORS["surface_alt"],
+                padx=12,
+                pady=8,
+                highlightbackground=COLORS["border"],
+                highlightthickness=1,
+                bd=0
+            )
+            skip_frame.pack(fill='x', padx=10, pady=(5, 10))
+            
+            remaining = self.pending_remaining_agents
+            skip_label = tk.Label(
+                skip_frame,
+                text=f"📝 보고서는 건너뛸게요! 이어서 {', '.join(remaining).upper()}를 진행합니다...",
+                font=(self.default_font, 10),
+                bg=COLORS["surface_alt"],
+                fg='#4b5563',
+                wraplength=350,
+                justify='left'
+            )
+            skip_label.pack(anchor='w')
+            
+            # 스크롤 업데이트
+            self._update_messages_scrollregion()
+            self.messages_canvas.yview_moveto(1.0)
+            
+            # 남은 에이전트 실행 (500ms 후)
+            print(f"[UI] 보고서 거절 후 남은 에이전트 실행: {remaining}")
+            self.root.after(500, self._execute_remaining_agents)
+        else:
+            # 남은 에이전트 없으면 기존 거절 메시지
+            reject_frame = tk.Frame(
+                self.scrollable_frame,
+                bg=COLORS["surface_alt"],
+                padx=12,
+                pady=8,
+                highlightbackground=COLORS["border"],
+                highlightthickness=1,
+                bd=0
+            )
+            reject_frame.pack(fill='x', padx=10, pady=(5, 10))
+            
+            reject_label = tk.Label(
+                reject_frame,
+                text="알겠어요! 다른 궁금한 점이 있으면 말씀해 주세요. 😊",
+                font=(self.default_font, 10),
+                bg=COLORS["surface_alt"],
+                fg='#4b5563',
+                wraplength=350,
+                justify='left'
+            )
+            reject_label.pack(anchor='w')
+            
+            # 스크롤 업데이트
+            self._update_messages_scrollregion()
+            self.messages_canvas.yview_moveto(1.0)
     
     # ============================================================
     # 대시보드 분석 확인 버튼 (DashboardAgent 연동)
@@ -4155,10 +4646,21 @@ class FloatingChatApp:
             file_path = data.get('file_path', '')
             file_name = data.get('file_name', '')
             self._create_report_success_bubble(keyword, file_path, file_name)
+            
+            # 남은 에이전트가 있으면 자동 실행
+            if hasattr(self, 'pending_remaining_agents') and self.pending_remaining_agents:
+                print(f"[UI] 보고서 완료 후 남은 에이전트 실행: {self.pending_remaining_agents}")
+                self.root.after(500, self._execute_remaining_agents)
         else:
             # 실패 알림
             reason = data.get('reason', '알 수 없는 오류')
             self._create_report_failure_bubble(keyword, reason)
+            
+            # 실패 시 남은 에이전트 정보 정리
+            if hasattr(self, 'pending_remaining_agents'):
+                self.pending_remaining_agents = None
+                self.pending_sub_tasks = None
+                self.pending_original_message = None
         
         self.report_notification_visible = True
         
@@ -4498,6 +5000,110 @@ class FloatingChatApp:
         
         self.report_notification_window = None
         self.report_notification_visible = False
+    
+    def _execute_remaining_agents(self):
+        """남은 에이전트들을 실행합니다 (보고서 완료 후 자동 호출)."""
+        remaining_agents = getattr(self, 'pending_remaining_agents', None)
+        sub_tasks = getattr(self, 'pending_sub_tasks', None) or {}
+        original_message = getattr(self, 'pending_original_message', None) or ""
+        
+        if not remaining_agents:
+            print("[UI] 남은 에이전트 없음")
+            return
+        
+        print(f"[UI] 남은 에이전트 실행 시작: {remaining_agents}")
+        
+        # 남은 에이전트 정보 정리
+        self.pending_remaining_agents = None
+        self.pending_sub_tasks = None
+        self.pending_original_message = None
+        
+        # [수정] 로딩 메시지로 추가하여 스트리밍 시작 시 대체되도록 함
+        loading_text_widget = self.show_loading_message()
+        self.update_loading_message(loading_text_widget, f"🤖 이어서 진행할게요! {', '.join(remaining_agents).upper()} 실행 중...")
+        
+        # API 호출 (백그라운드 스레드)
+        import threading
+        thread = threading.Thread(
+            target=self._call_continue_agents_api,
+            args=(original_message, remaining_agents, sub_tasks, loading_text_widget),
+            daemon=True
+        )
+        thread.start()
+    
+    def _call_continue_agents_api(self, message, remaining_agents, sub_tasks, loading_text_widget=None):
+        """[백그라운드 스레드] 남은 에이전트 실행 API를 호출합니다."""
+        try:
+            from login_view import get_stored_token
+            from token_store import get_user_id_from_token
+            token = get_stored_token()
+            user_id = get_user_id_from_token(token) if token else None
+            
+            if not token:
+                self.message_queue.put({
+                    'type': 'bot_response',
+                    'response': "오류: 로그인이 필요합니다.",
+                    'loading_widget': loading_text_widget
+                })
+                return
+            
+            payload = {
+                "message": message,
+                "user_id": user_id,
+                "remaining_agents": remaining_agents,
+                "sub_tasks": sub_tasks,
+                "previous_results": []
+            }
+            
+            # 스트리밍 요청
+            response = requests.post(
+                f"{self.API_BASE_URL}/api/v2/continue-agents",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "text/event-stream"
+                },
+                json=payload,
+                stream=True,
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                # 스트리밍 응답 처리 - 로딩 메시지를 스트리밍 메시지로 대체
+                self.message_queue.put({
+                    'type': 'create_streaming_message',
+                    'response': '',
+                    'loading_widget': loading_text_widget  # 로딩 위젯 전달
+                })
+                
+                # 작은 chunk_size로 자주 흘려보내도록 설정
+                for chunk in response.iter_content(chunk_size=64, decode_unicode=True):
+                    if chunk:
+                        self.message_queue.put({
+                            'type': 'stream_chunk',
+                            'chunk': chunk
+                        })
+                
+                # 스트리밍 완료
+                self.message_queue.put({
+                    'type': 'complete_streaming'
+                })
+                
+                print(f"[UI] 남은 에이전트 실행 완료")
+            else:
+                error_msg = f"남은 에이전트 실행 실패 (상태 코드: {response.status_code})"
+                self.message_queue.put({
+                    'type': 'bot_response',
+                    'response': error_msg,
+                    'loading_widget': None
+                })
+                
+        except Exception as e:
+            print(f"[UI] 남은 에이전트 실행 API 오류: {e}")
+            self.message_queue.put({
+                'type': 'bot_response',
+                'response': f"오류가 발생했습니다: {str(e)}",
+                'loading_widget': None
+            })
     
     # ============================================================
     # Dashboard Analysis Notification (말풍선 알림)

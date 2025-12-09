@@ -203,6 +203,20 @@ class LangGraphSupervisor:
             logger.error(f"LLM 의도 분석 오류: {e}", exc_info=True)
             raise
 
+    # ------------------------------------------------------------
+    # Helper: intro_text 축약
+    # ------------------------------------------------------------
+    def _shorten_intro_text(self, text: str) -> str:
+        """intro_text가 너무 길지 않도록 1문장, 최대 120자 이내로 축약합니다."""
+        if not text:
+            return ""
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        first_sentence = sentences[0].strip() if sentences else text.strip()
+        if len(first_sentence) > 120:
+            return first_sentence[:117] + "..."
+        return first_sentence
+
     def _create_llm_intent_prompt(self, user_input: str) -> str:
         """LLM 의도 분석을 위한 프롬프트를 생성합니다."""
         agent_descriptions = "\n".join([
@@ -221,13 +235,30 @@ class LangGraphSupervisor:
 분석 결과는 다음과 같은 JSON 형식으로 제공해주세요:
 {{
     "selected_agents": ["에이전트1", "에이전트2"],
+    "sub_tasks": {{
+        "에이전트1": {{"task": "에이전트1이 수행할 구체적인 태스크", "focus": "집중할 부분"}},
+        "에이전트2": {{"task": "에이전트2가 수행할 구체적인 태스크", "focus": "집중할 부분"}}
+    }},
     "primary_agent": "주요 에이전트명",
     "execution_mode": "sequential" | "parallel",
     "confidence": 0.95,
     "reasoning": "선택 이유와 에이전트 조합 이유 설명",
     "keywords": ["키워드1", "키워드2"],
-    "intent": "사용자 의도 요약"
+    "intent": "사용자 의도 요약",
+    "intro_text": "사용자에게 바로 보여줄 친근한 서론 메시지 (1-2문장)"
 }}
+
+intro_text 작성 기준:
+- 사용자의 요청을 이해했음을 알리는 친근한 메시지
+- 무엇을 할 것인지 간단히 예고 (예: "~에 대해 알아보고 코드도 작성해드릴게요!")
+- 반말로 친근하게 작성 (예: "~하시는군요!", "~해드릴게요!")
+- 1-2문장으로 간결하게
+
+sub_tasks 작성 기준:
+- 각 에이전트가 수행할 구체적인 태스크를 분리하여 작성
+- 복합 요청의 경우 사용자 메시지에서 각 에이전트에 해당하는 부분을 추출
+- task: 해당 에이전트가 처리할 구체적인 요청 (한 문장)
+- focus: 특별히 집중해야 할 부분이나 키워드
 
 에이전트 선택 기준:
 - coding: 코드 작성, 디버깅, 프로그래밍 관련 질문
@@ -283,6 +314,8 @@ JSON 응답만 제공해주세요:"""
                     parsed["keywords"] = []
                 if "intent" not in parsed:
                     parsed["intent"] = "사용자 의도 분석"
+                if "sub_tasks" not in parsed:
+                    parsed["sub_tasks"] = {}
                 
                 return parsed
             else:
@@ -561,6 +594,242 @@ JSON 응답만 제공해주세요:"""
                     return resp["content"]
             return "에이전트 응답 통합 중 오류가 발생했습니다."
     
+    async def process_user_intent_streaming(
+        self, 
+        user_intent: UserIntent
+    ):
+        """
+        사용자 의도를 처리하고 단계별로 스트리밍 응답을 생성합니다.
+        
+        **무조건 순차 실행**: 이전 에이전트가 완전히 끝나야 다음 에이전트가 시작됩니다.
+        
+        Yields:
+            dict: 이벤트 타입과 데이터
+                - {"type": "plan", "agents": [...], "sub_tasks": {...}, "execution_mode": "sequential"}
+                - {"type": "start", "agent": "...", "order": N, "total": M, "task": "..."}
+                - {"type": "result", "agent": "...", "content": "...", "success": True/False, "metadata": {...}}
+                - {"type": "error", "agent": "...", "error": "..."}
+                - {"type": "complete", "total_agents": N, "successful": N, "failed": N}
+        """
+        import time
+        start_time = time.time()
+        completed_agents = []
+        failed_agents = []
+        previous_results = []
+        
+        try:
+            # 1. 의도 분석 시작 이벤트 (프런트에서 로딩 상태 업데이트용)
+            logger.info("=" * 70)
+            logger.info("[MAS-STREAM] 의도 분석 시작 | user_id=%s | message='%s'",
+                user_intent.user_id, 
+                user_intent.message[:80] + "..." if len(user_intent.message) > 80 else user_intent.message)
+            
+            yield {
+                "type": "analyzing",
+                "message": "의도를 분석하고 있어요..."
+            }
+            
+            intent_analysis = await self._analyze_intent_with_llm(user_intent.message)
+            
+            selected_agents = intent_analysis.get("selected_agents", ["chatbot"])
+            sub_tasks = intent_analysis.get("sub_tasks", {})
+            
+            # 무조건 순차 실행 강제
+            execution_mode = "sequential"
+            
+            logger.info("[MAS-STREAM] 의도 분석 완료")
+            logger.info("  ├─ 선택된 에이전트: %s", selected_agents)
+            logger.info("  ├─ 실행 모드: %s (강제)", execution_mode.upper())
+            logger.info("  └─ 서브태스크: %d개", len(sub_tasks))
+            
+            # 2. 의도 분석 완료 이벤트 (서론 텍스트 먼저 전송)
+            intro_text = self._shorten_intro_text(intent_analysis.get("intro_text", ""))
+            yield {
+                "type": "analyzed",
+                "intro_text": intro_text,
+                "agents": selected_agents,
+                "agent_count": len(selected_agents)
+            }
+            
+            # 3. 실행 계획 yield
+            yield {
+                "type": "plan",
+                "agents": selected_agents,
+                "sub_tasks": sub_tasks,
+                "execution_mode": execution_mode,
+                "reasoning": intent_analysis.get("reasoning", ""),
+                "confidence": intent_analysis.get("confidence", 0.8)
+            }
+            
+            # 3. 각 에이전트 **순차** 실행 (이전 에이전트 완료 후 다음 에이전트 시작)
+            total_agents = len(selected_agents)
+            
+            logger.info("-" * 70)
+            logger.info("[MAS-STREAM] 에이전트 순차 실행 시작 | %d개 에이전트", total_agents)
+            
+            for i, agent_type in enumerate(selected_agents):
+                order = i + 1
+                
+                # 서브태스크 가져오기
+                task_info = sub_tasks.get(agent_type, {})
+                task = task_info.get("task", user_intent.message)
+                focus = task_info.get("focus", "")
+                
+                # 실행 시작 이벤트
+                logger.info("[MAS-STREAM]   ├─ [%d/%d] %s 시작 | task='%s'", 
+                    order, total_agents, agent_type, task[:50])
+                
+                yield {
+                    "type": "start",
+                    "agent": agent_type,
+                    "order": order,
+                    "total": total_agents,
+                    "task": task,
+                    "focus": focus
+                }
+                
+                # 에이전트 실행 (동기적으로 완료될 때까지 대기)
+                try:
+                    agent = agent_registry.get_agent(agent_type)
+                    
+                    if not agent:
+                        error_msg = f"에이전트를 찾을 수 없습니다: {agent_type}"
+                        logger.warning("[MAS-STREAM]   │  └─ %s: %s", agent_type, error_msg)
+                        failed_agents.append(agent_type)
+                        yield {
+                            "type": "error",
+                            "agent": agent_type,
+                            "order": order,
+                            "error": error_msg
+                        }
+                        continue  # 다음 에이전트로 진행
+                    
+                    # 에이전트 상태 구성 (이전 결과 포함)
+                    agent_state = {
+                        "question": task,  # 서브태스크 사용
+                        "original_query": user_intent.message,  # 원본 쿼리 참고용
+                        "focus": focus,
+                        "user_id": user_intent.user_id,
+                        "session_id": user_intent.context.get("session_id"),
+                        "filters": user_intent.context.get("filters", {}),
+                        "time_hint": user_intent.context.get("time_hint"),
+                        "context": user_intent.context,
+                        "previous_results": previous_results  # 이전 에이전트 결과들
+                    }
+                    
+                    agent_start = time.time()
+                    
+                    # **에이전트 실행 - 완전히 끝날 때까지 대기**
+                    result_state = agent.process(agent_state)
+                    
+                    elapsed = time.time() - agent_start
+                    
+                    success = result_state.get("success", True)
+                    content = result_state.get("answer", "")
+                    metadata = result_state.get("metadata", {})
+                    
+                    # 결과 저장 (다음 에이전트에 전달)
+                    agent_result = {
+                        "agent": agent_type,
+                        "task": task,
+                        "content": content,
+                        "success": success,
+                        "metadata": metadata
+                    }
+                    previous_results.append(agent_result)
+                    
+                    if success:
+                        completed_agents.append(agent_type)
+                        logger.info("[MAS-STREAM]   │  └─ %s 완료 (%.2f초)", agent_type, elapsed)
+                    else:
+                        failed_agents.append(agent_type)
+                        logger.warning("[MAS-STREAM]   │  └─ %s 실패 (%.2f초)", agent_type, elapsed)
+                    
+                    # 결과 이벤트 yield (이전 에이전트 완료 후에만 도달)
+                    yield {
+                        "type": "result",
+                        "agent": agent_type,
+                        "order": order,
+                        "content": content,
+                        "success": success,
+                        "metadata": metadata,
+                        "elapsed_time": elapsed
+                    }
+                    
+                    # requires_confirmation이 있으면 다음 에이전트 실행 중단
+                    # (사용자 확인 후 별도로 처리해야 함)
+                    if metadata.get("requires_confirmation"):
+                        remaining_agents = selected_agents[i+1:]
+                        if remaining_agents:
+                            logger.info("[MAS-STREAM] 확인 대기 중 | 남은 에이전트: %s", remaining_agents)
+                            yield {
+                                "type": "waiting_confirmation",
+                                "agent": agent_type,
+                                "remaining_agents": remaining_agents,
+                                "metadata": metadata
+                            }
+                        # 여기서 스트리밍 종료 (남은 에이전트는 사용자 확인 후 별도 처리)
+                        total_time = time.time() - start_time
+                        yield {
+                            "type": "complete",
+                            "total_agents": order,  # 현재까지 실행된 에이전트 수
+                            "successful": len(completed_agents),
+                            "failed": len(failed_agents),
+                            "completed_agents": completed_agents,
+                            "failed_agents": failed_agents,
+                            "total_time": total_time,
+                            "waiting_confirmation": True,
+                            "remaining_agents": remaining_agents
+                        }
+                        return  # 스트리밍 종료
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error("[MAS-STREAM]   │  └─ %s 오류: %s", agent_type, error_msg, exc_info=True)
+                    failed_agents.append(agent_type)
+                    
+                    # 실패해도 다음 에이전트 계속 진행
+                    previous_results.append({
+                        "agent": agent_type,
+                        "task": task,
+                        "content": f"오류: {error_msg}",
+                        "success": False,
+                        "metadata": {"error": error_msg}
+                    })
+                    
+                    yield {
+                        "type": "error",
+                        "agent": agent_type,
+                        "order": order,
+                        "error": error_msg
+                    }
+            
+            # 4. 완료 이벤트
+            total_time = time.time() - start_time
+            
+            logger.info("[MAS-STREAM] 전체 실행 완료 | %.2f초", total_time)
+            logger.info("  ├─ 성공: %s", completed_agents if completed_agents else "없음")
+            logger.info("  └─ 실패: %s", failed_agents if failed_agents else "없음")
+            logger.info("=" * 70)
+            
+            yield {
+                "type": "complete",
+                "total_agents": total_agents,
+                "successful": len(completed_agents),
+                "failed": len(failed_agents),
+                "completed_agents": completed_agents,
+                "failed_agents": failed_agents,
+                "total_time": total_time
+            }
+            
+        except Exception as e:
+            logger.error("[MAS-STREAM] 치명적 오류: %s", e, exc_info=True)
+            yield {
+                "type": "fatal_error",
+                "error": str(e),
+                "completed": completed_agents
+            }
+
     async def process_user_intent(
         self, 
         user_intent: UserIntent, 
@@ -704,6 +973,183 @@ JSON 응답만 제공해주세요:"""
         """에이전트를 제거합니다."""
         agent_registry.unregister_agent(agent_type)
         self.agent_descriptions = agent_registry.get_agent_descriptions()
+    
+    async def process_remaining_agents_streaming(
+        self,
+        user_intent: UserIntent,
+        remaining_agents: List[str],
+        sub_tasks: Dict[str, Any],
+        previous_results: List[Dict[str, Any]] = None
+    ):
+        """
+        남은 에이전트들을 순차적으로 실행합니다.
+        
+        이전 에이전트(예: report)가 확인을 받은 후 호출되어
+        남은 에이전트들(예: coding)을 실행합니다.
+        
+        Args:
+            user_intent: 사용자 의도
+            remaining_agents: 실행할 에이전트 목록
+            sub_tasks: 각 에이전트의 서브태스크 정보
+            previous_results: 이전 에이전트들의 실행 결과
+        
+        Yields:
+            dict: 이벤트 타입과 데이터
+        """
+        import time
+        start_time = time.time()
+        completed_agents = []
+        failed_agents = []
+        prev_results = previous_results or []
+        
+        try:
+            total_agents = len(remaining_agents)
+            
+            logger.info("-" * 70)
+            logger.info("[MAS-CONTINUE] 남은 에이전트 실행 시작 | %d개 에이전트", total_agents)
+            logger.info("  └─ 에이전트 목록: %s", " → ".join(remaining_agents))
+            
+            # 실행 계획 yield (남은 에이전트만)
+            yield {
+                "type": "plan",
+                "agents": remaining_agents,
+                "sub_tasks": sub_tasks,
+                "execution_mode": "sequential",
+                "is_continuation": True
+            }
+            
+            for i, agent_type in enumerate(remaining_agents):
+                order = i + 1
+                
+                # 서브태스크 가져오기
+                task_info = sub_tasks.get(agent_type, {})
+                task = task_info.get("task", user_intent.message)
+                focus = task_info.get("focus", "")
+                
+                # 실행 시작 이벤트
+                logger.info("[MAS-CONTINUE]   ├─ [%d/%d] %s 시작 | task='%s'", 
+                    order, total_agents, agent_type, task[:50])
+                
+                yield {
+                    "type": "start",
+                    "agent": agent_type,
+                    "order": order,
+                    "total": total_agents,
+                    "task": task,
+                    "focus": focus
+                }
+                
+                # 에이전트 실행
+                try:
+                    agent = agent_registry.get_agent(agent_type)
+                    
+                    if not agent:
+                        error_msg = f"에이전트를 찾을 수 없습니다: {agent_type}"
+                        logger.warning("[MAS-CONTINUE]   │  └─ %s: %s", agent_type, error_msg)
+                        failed_agents.append(agent_type)
+                        yield {
+                            "type": "error",
+                            "agent": agent_type,
+                            "order": order,
+                            "error": error_msg
+                        }
+                        continue
+                    
+                    # 에이전트 상태 구성 (이전 결과 포함)
+                    agent_state = {
+                        "question": task,
+                        "original_query": user_intent.message,
+                        "focus": focus,
+                        "user_id": user_intent.user_id,
+                        "session_id": user_intent.context.get("session_id"),
+                        "filters": user_intent.context.get("filters", {}),
+                        "time_hint": user_intent.context.get("time_hint"),
+                        "context": user_intent.context,
+                        "previous_results": prev_results
+                    }
+                    
+                    agent_start = time.time()
+                    result_state = agent.process(agent_state)
+                    elapsed = time.time() - agent_start
+                    
+                    success = result_state.get("success", True)
+                    content = result_state.get("answer", "")
+                    metadata = result_state.get("metadata", {})
+                    
+                    # 결과 저장
+                    agent_result = {
+                        "agent": agent_type,
+                        "task": task,
+                        "content": content,
+                        "success": success,
+                        "metadata": metadata
+                    }
+                    prev_results.append(agent_result)
+                    
+                    if success:
+                        completed_agents.append(agent_type)
+                        logger.info("[MAS-CONTINUE]   │  └─ %s 완료 (%.2f초)", agent_type, elapsed)
+                    else:
+                        failed_agents.append(agent_type)
+                        logger.warning("[MAS-CONTINUE]   │  └─ %s 실패 (%.2f초)", agent_type, elapsed)
+                    
+                    # 결과 이벤트 yield
+                    yield {
+                        "type": "result",
+                        "agent": agent_type,
+                        "order": order,
+                        "content": content,
+                        "success": success,
+                        "metadata": metadata,
+                        "elapsed_time": elapsed
+                    }
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error("[MAS-CONTINUE]   │  └─ %s 오류: %s", agent_type, error_msg, exc_info=True)
+                    failed_agents.append(agent_type)
+                    
+                    prev_results.append({
+                        "agent": agent_type,
+                        "task": task,
+                        "content": f"오류: {error_msg}",
+                        "success": False,
+                        "metadata": {"error": error_msg}
+                    })
+                    
+                    yield {
+                        "type": "error",
+                        "agent": agent_type,
+                        "order": order,
+                        "error": error_msg
+                    }
+            
+            # 완료 이벤트
+            total_time = time.time() - start_time
+            
+            logger.info("[MAS-CONTINUE] 남은 에이전트 실행 완료 | %.2f초", total_time)
+            logger.info("  ├─ 성공: %s", completed_agents if completed_agents else "없음")
+            logger.info("  └─ 실패: %s", failed_agents if failed_agents else "없음")
+            logger.info("=" * 70)
+            
+            yield {
+                "type": "complete",
+                "total_agents": total_agents,
+                "successful": len(completed_agents),
+                "failed": len(failed_agents),
+                "completed_agents": completed_agents,
+                "failed_agents": failed_agents,
+                "total_time": total_time,
+                "is_continuation": True
+            }
+            
+        except Exception as e:
+            logger.error("[MAS-CONTINUE] 치명적 오류: %s", e, exc_info=True)
+            yield {
+                "type": "fatal_error",
+                "error": str(e),
+                "completed": completed_agents
+            }
 
 
 # 전역 Supervisor 인스턴스 (LangGraph 기반)
