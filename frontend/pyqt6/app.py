@@ -523,7 +523,16 @@ class JARVISApp:
     
     def _start_client_data_collection(self, folders: list):
         """Start client-side data collection (로컬에서 파싱 후 서버로 업로드)."""
-        from services.data_collector import ClientDataCollector
+        print("🚀 _start_client_data_collection called with folders:", folders)
+        
+        try:
+            from services.data_collector import ClientDataCollector
+            print("✅ ClientDataCollector import 성공")
+        except ImportError as e:
+            print(f"❌ ClientDataCollector import 실패: {e}")
+            # 폴백: 기존 방식 사용
+            self._fallback_backend_collection(folders)
+            return
         
         token = self._auth_controller.get_token()
         user_id = self._auth_controller.get_user_id()
@@ -614,6 +623,35 @@ class JARVISApp:
                 error_msg,
                 duration_ms=5000
             )
+    
+    def _fallback_backend_collection(self, folders: list):
+        """Fallback to backend-side data collection (레거시 방식)."""
+        import requests
+        
+        print("⚠️ 클라이언트 수집기 import 실패 - 백엔드 수집 방식으로 폴백")
+        
+        token = self._auth_controller.get_token()
+        user_id = self._auth_controller.get_user_id()
+        
+        if not token or not user_id:
+            return
+        
+        try:
+            collection_response = requests.post(
+                f"{API_BASE_URL}/api/v2/data-collection/start/{user_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"selected_folders": folders},
+                timeout=10
+            )
+            
+            if collection_response.status_code == 200:
+                print("✅ Backend data collection started (fallback)")
+                self._start_initial_setup_tracking()
+            else:
+                print(f"⚠️ Backend data collection failed: {collection_response.status_code}")
+                
+        except Exception as e:
+            print(f"⚠️ Backend data collection error: {e}")
     
     def _start_initial_setup_tracking(self):
         """Start tracking initial setup progress (legacy - 백엔드 폴링 방식)."""

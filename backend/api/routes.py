@@ -886,6 +886,136 @@ class ClientCollectionProgress(BaseModel):
     is_done: bool = False
 
 
+@router.post("/data-collection/client-file-upload/{user_id}")
+async def client_file_upload(
+    user_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    file_path: str = Form(...),
+    file_category: str = Form("document")
+):
+    """
+    클라이언트에서 파일을 받아 백엔드에서 DocumentParser로 파싱 후 인덱싱합니다.
+    
+    기존 Docling 기반 DocumentParser를 그대로 사용하여 PDF, DOCX 등 모든 문서를 처리합니다.
+    """
+    try:
+        from database.document_parser import DocumentParser
+        
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+        
+        if repository is None or embedder is None:
+            raise HTTPException(
+                status_code=500,
+                detail="서버 리소스가 아직 초기화되지 않았습니다."
+            )
+        
+        db = SQLite()
+        
+        # 파일 내용 읽기
+        file_content = await file.read()
+        file_hash = hashlib.md5(file_content).hexdigest()
+        doc_id = f"file_{file_hash}"
+        
+        # 중복 체크
+        if db.is_file_exists(user_id, doc_id):
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "이미 수집된 파일입니다.",
+                "chunks_count": 0
+            }
+        
+        # 임시 파일로 저장 후 DocumentParser로 파싱
+        ext = Path(file_path).suffix.lower()
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+            tmp_file.write(file_content)
+            tmp_path = tmp_file.name
+        
+        try:
+            # DocumentParser로 파싱 (Docling 사용)
+            parser = DocumentParser()
+            chunks = parser.parse_and_chunk(tmp_path)
+            
+            if not chunks:
+                return {
+                    "success": True,
+                    "skipped": True,
+                    "message": "파싱된 내용이 없습니다.",
+                    "chunks_count": 0
+                }
+            
+            # 파일 메타데이터 저장
+            file_info = {
+                'user_id': user_id,
+                'file_path': file_path,
+                'file_category': file_category,
+                'modified_date': datetime.utcnow()
+            }
+            db.insert_collected_file(file_info)
+            
+            # 청크 임베딩 및 인덱싱
+            all_texts = []
+            all_metas = []
+            
+            for chunk in chunks:
+                text = chunk.get('text', '') if isinstance(chunk, dict) else str(chunk)
+                if not text or not text.strip():
+                    continue
+                
+                snippet = chunk.get('snippet', text[:200]) if isinstance(chunk, dict) else text[:200]
+                
+                all_texts.append(text)
+                all_metas.append({
+                    'user_id': user_id,
+                    'source': 'file',
+                    'path': file_path,
+                    'doc_id': doc_id,
+                    'chunk_id': chunk.get('chunk_id', len(all_texts) - 1) if isinstance(chunk, dict) else len(all_texts) - 1,
+                    'snippet': snippet,
+                    'content': text
+                })
+            
+            if all_texts:
+                # 배치 임베딩
+                batch_size = 64
+                for i in range(0, len(all_texts), batch_size):
+                    batch_texts = all_texts[i:i + batch_size]
+                    batch_metas = all_metas[i:i + batch_size]
+                    
+                    embeddings = embedder.encode_documents(batch_texts)
+                    dense_vectors = embeddings['dense_vecs'].tolist()
+                    sparse_vectors = [
+                        embedder.convert_sparse_to_qdrant_format(lw)
+                        for lw in embeddings['lexical_weights']
+                    ]
+                    repository.qdrant.upsert_vectors(batch_metas, dense_vectors, sparse_vectors)
+            
+            logger.info(f"✅ 파일 업로드 완료: {file_path} ({len(all_texts)}개 청크)")
+            
+            return {
+                "success": True,
+                "skipped": False,
+                "message": f"파일 처리 완료",
+                "chunks_count": len(all_texts)
+            }
+            
+        finally:
+            # 임시 파일 삭제
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"파일 업로드 오류 ({file_path}): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"파일 처리 오류: {str(e)}")
+
+
 @router.post("/data-collection/client-upload/{user_id}")
 async def client_upload_data(
     user_id: int,
@@ -894,11 +1024,7 @@ async def client_upload_data(
 ):
     """
     클라이언트에서 파싱된 데이터를 받아 인덱싱합니다.
-    
-    클라이언트(PyQt6 앱)가 로컬에서 파일을 스캔하고 파싱한 후,
-    텍스트 청크를 이 엔드포인트로 전송합니다.
-    
-    서버는 임베딩 생성 및 Qdrant 인덱싱만 수행합니다.
+    (텍스트 파일용 - 로컬에서 파싱한 경우)
     """
     try:
         repository: Repository = getattr(request.app.state, "repository", None)

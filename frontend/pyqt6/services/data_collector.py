@@ -1,34 +1,39 @@
 """
 JARVIS Client-Side Data Collector
-로컬에서 파일을 스캔하고 파싱한 후 백엔드로 업로드합니다.
+로컬에서 파일을 스캔하고 백엔드로 업로드합니다.
 
-원격 서버 환경에서 사용자의 로컬 파일을 수집하기 위한 클라이언트 측 구현.
+백엔드에서 DocumentParser(Docling)를 사용하여 파싱합니다.
 """
 
 import os
 import hashlib
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
-from threading import Thread, Event
+from typing import List, Dict, Any, Optional
+from threading import Event
 
 import requests
-from PyQt6.QtCore import QObject, pyqtSignal, QThread
+from PyQt6.QtCore import pyqtSignal, QThread
 
 try:
     from config import API_BASE_URL
-except ImportError:
+    print(f"✅ data_collector: config import 성공 - API_BASE_URL={API_BASE_URL}")
+except ImportError as e:
+    print(f"⚠️ data_collector: config import 실패: {e}")
     API_BASE_URL = "http://localhost:8000"
 
 logger = logging.getLogger(__name__)
+
+# 디버그: 모듈 로드 확인
+print(f"📦 data_collector.py 모듈 로드됨 - API: {API_BASE_URL}")
 
 
 class ClientDataCollector(QThread):
     """
     클라이언트 측 데이터 수집 워커.
     
-    로컬에서 파일을 스캔하고 텍스트를 추출한 후 백엔드로 업로드합니다.
+    로컬에서 파일을 스캔하고 백엔드로 업로드합니다.
+    백엔드에서 DocumentParser(Docling)를 사용하여 파싱합니다.
     
     Signals:
         progress_updated: (progress: float, message: str) 진행 상태 업데이트
@@ -42,9 +47,11 @@ class ClientDataCollector(QThread):
     collection_completed = pyqtSignal()
     collection_error = pyqtSignal(str)
     
-    # 지원하는 파일 확장자
+    # 지원하는 파일 확장자 (백엔드 DocumentParser와 동일)
     SUPPORTED_EXTENSIONS = {
-        'document': ['.txt', '.md', '.rtf'],
+        'document': ['.txt', '.md', '.rtf', '.pdf', '.docx', '.doc', '.odt', '.rst'],
+        'spreadsheet': ['.xlsx', '.xls', '.csv', '.tsv', '.ods'],
+        'presentation': ['.pptx', '.ppt', '.odp'],
         'code': ['.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', 
                  '.java', '.cpp', '.c', '.h', '.cs', '.php', '.rb', '.go', '.rs', 
                  '.swift', '.kt', '.r', '.sh', '.bat', '.ps1', '.sql', '.json', 
@@ -58,6 +65,9 @@ class ClientDataCollector(QThread):
         'site-packages', '.idea', '.vscode', 'build', 'dist', '.cache',
         'Library', 'Applications', 'System'
     ]
+    
+    # 최대 파일 크기 (50MB)
+    MAX_FILE_SIZE = 50 * 1024 * 1024
     
     def __init__(
         self,
@@ -84,60 +94,63 @@ class ClientDataCollector(QThread):
     
     def run(self):
         """데이터 수집 실행"""
+        print(f"🔄 ClientDataCollector.run() 시작 - folders: {self.selected_folders}")
+        print(f"   user_id: {self.user_id}, token: {self.token[:20]}...")
+        
         try:
             self.progress_updated.emit(0.0, "📁 파일 스캔 시작...")
             
             # 1. 파일 스캔
+            print("📁 파일 스캔 중...")
             files_to_process = self._scan_files()
+            print(f"📁 스캔 완료: {len(files_to_process)}개 파일 발견")
             
             if self._stop_event.is_set():
+                print("⏹️ 수집 중지됨")
                 return
             
             if not files_to_process:
+                print("⚠️ 수집할 파일이 없음")
                 self.progress_updated.emit(100.0, "⚠️ 수집할 파일이 없습니다.")
                 self._notify_completion()
                 self.collection_completed.emit()
                 return
             
             total_files = len(files_to_process)
-            self.progress_updated.emit(10.0, f"📄 {total_files}개 파일 발견")
+            self.progress_updated.emit(5.0, f"📄 {total_files}개 파일 발견")
             
-            # 2. 파일 파싱 및 업로드 (배치 처리)
-            batch_size = 10
+            # 2. 파일 업로드 (하나씩 업로드)
             processed_count = 0
+            success_count = 0
+            skipped_count = 0
             
-            for i in range(0, total_files, batch_size):
+            for file_path in files_to_process:
                 if self._stop_event.is_set():
                     return
                 
-                batch = files_to_process[i:i + batch_size]
-                batch_data = []
+                result = self._upload_file(file_path)
+                processed_count += 1
                 
-                for file_path in batch:
-                    if self._stop_event.is_set():
-                        return
-                    
-                    file_data = self._process_file(file_path)
-                    if file_data:
-                        batch_data.append(file_data)
-                        self.file_processed.emit(file_data['file_name'])
-                    
-                    processed_count += 1
-                    progress = 10.0 + (processed_count / total_files) * 70.0
-                    self.progress_updated.emit(
-                        progress, 
-                        f"📄 처리 중... ({processed_count}/{total_files})"
-                    )
+                if result:
+                    if result.get('skipped'):
+                        skipped_count += 1
+                    else:
+                        success_count += 1
+                        self.file_processed.emit(Path(file_path).name)
                 
-                # 배치 업로드
-                if batch_data:
-                    self._upload_batch(batch_data)
+                progress = 5.0 + (processed_count / total_files) * 85.0
+                self.progress_updated.emit(
+                    progress, 
+                    f"📤 업로드 중... ({processed_count}/{total_files})"
+                )
             
             # 3. 완료 알림
             self.progress_updated.emit(95.0, "📤 서버에 완료 알림...")
             self._notify_completion()
             
-            self.progress_updated.emit(100.0, "✅ 데이터 수집 완료!")
+            message = f"✅ 완료! {success_count}개 처리, {skipped_count}개 스킵"
+            self.progress_updated.emit(100.0, message)
+            print(message)
             self.collection_completed.emit()
             
         except Exception as e:
@@ -148,13 +161,23 @@ class ClientDataCollector(QThread):
         """선택된 폴더에서 파일 목록 스캔"""
         files = []
         
+        print(f"🔍 _scan_files: 스캔 대상 폴더 {len(self.selected_folders)}개")
+        
         for folder in self.selected_folders:
+            print(f"   📂 폴더 검사: {folder}")
+            
             if self._stop_event.is_set():
                 break
             
             folder_path = Path(folder)
-            if not folder_path.exists() or not folder_path.is_dir():
+            if not folder_path.exists():
+                print(f"   ⚠️ 폴더 존재하지 않음: {folder}")
                 continue
+            if not folder_path.is_dir():
+                print(f"   ⚠️ 디렉토리가 아님: {folder}")
+                continue
+            
+            print(f"   ✅ 폴더 유효함: {folder}")
             
             try:
                 for root, dirs, filenames in os.walk(folder_path):
@@ -180,7 +203,14 @@ class ClientDataCollector(QThread):
                         ext = Path(file_path).suffix.lower()
                         
                         if ext in self.allowed_extensions:
-                            files.append(file_path)
+                            # 파일 크기 체크
+                            try:
+                                if os.path.getsize(file_path) <= self.MAX_FILE_SIZE:
+                                    files.append(file_path)
+                                else:
+                                    print(f"   ⚠️ 파일 크기 초과: {filename}")
+                            except OSError:
+                                continue
                             
             except PermissionError:
                 continue
@@ -191,139 +221,53 @@ class ClientDataCollector(QThread):
         logger.info(f"스캔 완료: {len(files)}개 파일 발견")
         return files
     
-    def _process_file(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """파일을 파싱하고 청크로 분할"""
+    def _get_file_category(self, file_path: str) -> str:
+        """파일 카테고리 결정"""
+        ext = Path(file_path).suffix.lower()
+        for cat, exts in self.SUPPORTED_EXTENSIONS.items():
+            if ext in exts:
+                return cat
+        return 'document'
+    
+    def _upload_file(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """파일을 서버에 업로드 (백엔드에서 파싱)"""
         try:
-            # 파일 해시 계산
+            file_name = Path(file_path).name
+            file_category = self._get_file_category(file_path)
+            
             with open(file_path, 'rb') as f:
-                file_hash = hashlib.md5(f.read()).hexdigest()
-            
-            # 텍스트 추출
-            text = self._extract_text(file_path)
-            if not text or len(text.strip()) < 50:
-                return None
-            
-            # 청크 분할
-            chunks = self._chunk_text(text)
-            if not chunks:
-                return None
-            
-            # 파일 카테고리 결정
-            ext = Path(file_path).suffix.lower()
-            category = 'document'
-            for cat, exts in self.SUPPORTED_EXTENSIONS.items():
-                if ext in exts:
-                    category = cat
-                    break
-            
-            return {
-                'file_path': file_path,
-                'file_name': Path(file_path).name,
-                'file_category': category,
-                'file_hash': file_hash,
-                'chunks': [
-                    {'text': chunk, 'snippet': chunk[:200]}
-                    for chunk in chunks
-                ]
-            }
-            
-        except Exception as e:
-            logger.debug(f"파일 처리 오류 ({file_path}): {e}")
-            return None
-    
-    def _extract_text(self, file_path: str) -> Optional[str]:
-        """파일에서 텍스트 추출 (간단한 구현)"""
-        try:
-            ext = Path(file_path).suffix.lower()
-            
-            # 텍스트 파일
-            if ext in ['.txt', '.md', '.py', '.js', '.ts', '.jsx', '.tsx', 
-                      '.html', '.css', '.scss', '.java', '.cpp', '.c', '.h',
-                      '.cs', '.php', '.rb', '.go', '.rs', '.swift', '.kt',
-                      '.r', '.sh', '.bat', '.ps1', '.sql', '.json', '.xml',
-                      '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.rtf']:
+                files = {
+                    'file': (file_name, f, 'application/octet-stream')
+                }
+                data = {
+                    'file_path': file_path,
+                    'file_category': file_category
+                }
                 
-                # 다양한 인코딩 시도
-                for encoding in ['utf-8', 'utf-16', 'cp949', 'euc-kr', 'latin-1']:
-                    try:
-                        with open(file_path, 'r', encoding=encoding) as f:
-                            content = f.read()
-                            # RTF의 경우 기본 텍스트만 추출
-                            if ext == '.rtf':
-                                content = self._strip_rtf(content)
-                            return content
-                    except UnicodeDecodeError:
-                        continue
-                
-            return None
-            
-        except Exception as e:
-            logger.debug(f"텍스트 추출 오류 ({file_path}): {e}")
-            return None
-    
-    def _strip_rtf(self, rtf_text: str) -> str:
-        """간단한 RTF 태그 제거"""
-        import re
-        # RTF 컨트롤 워드 및 그룹 제거
-        text = re.sub(r'\\[a-z]+\d*\s?', '', rtf_text)
-        text = re.sub(r'[{}]', '', text)
-        return text
-    
-    def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-        """텍스트를 청크로 분할"""
-        if not text:
-            return []
-        
-        text = text.strip()
-        if len(text) <= chunk_size:
-            return [text]
-        
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = start + chunk_size
-            
-            if end < len(text):
-                # 문장 경계에서 분할 시도
-                boundary = text.rfind('.', start + chunk_size - 100, end)
-                if boundary == -1:
-                    boundary = text.rfind(' ', start + chunk_size - 100, end)
-                if boundary > start:
-                    end = boundary + 1
-            
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            
-            start = end - overlap
-        
-        return chunks
-    
-    def _upload_batch(self, batch_data: List[Dict[str, Any]]) -> bool:
-        """배치 데이터를 서버에 업로드"""
-        try:
-            response = requests.post(
-                f"{API_BASE_URL}/api/v2/data-collection/client-upload/{self.user_id}",
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Content-Type": "application/json"
-                },
-                json={"files": batch_data},
-                timeout=60
-            )
+                response = requests.post(
+                    f"{API_BASE_URL}/api/v2/data-collection/client-file-upload/{self.user_id}",
+                    headers={
+                        "Authorization": f"Bearer {self.token}"
+                    },
+                    files=files,
+                    data=data,
+                    timeout=120  # 큰 파일은 파싱에 시간이 걸릴 수 있음
+                )
             
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f"배치 업로드 성공: {result.get('processed_files', 0)}개 파일")
-                return True
+                if result.get('skipped'):
+                    logger.debug(f"파일 스킵: {file_name} - {result.get('message')}")
+                else:
+                    logger.info(f"파일 업로드 성공: {file_name} ({result.get('chunks_count', 0)}개 청크)")
+                return result
             else:
-                logger.warning(f"배치 업로드 실패: {response.status_code}")
-                return False
+                logger.warning(f"파일 업로드 실패 ({file_name}): {response.status_code}")
+                return None
                 
         except Exception as e:
-            logger.error(f"배치 업로드 오류: {e}")
-            return False
+            logger.debug(f"파일 업로드 오류 ({file_path}): {e}")
+            return None
     
     def _update_server_status(self, progress: float, message: str, is_done: bool = False):
         """서버에 진행 상태 업데이트"""
@@ -363,4 +307,3 @@ class ClientDataCollector(QThread):
                 
         except Exception as e:
             logger.error(f"수집 완료 알림 오류: {e}")
-
