@@ -93,7 +93,12 @@ async def trigger_recommendation_analysis(force_recommend: bool = False):
                         logger.info(f"⏸️ 사용자 {user_id}의 초기 데이터 수집이 진행 중입니다. 추천 분석을 스킵합니다.")
                         continue
                 
-                await recommendation_agent.run_active_analysis(user_id, force_recommend=force_recommend)
+                logger.info(f"🔍 사용자 {user_id} 추천 분석 시작...")
+                success, message = await recommendation_agent.run_active_analysis(user_id, force_recommend=force_recommend)
+                if success:
+                    logger.info(f"✅ 사용자 {user_id} 추천 분석 완료: {message}")
+                else:
+                    logger.info(f"ℹ️ 사용자 {user_id} 추천 미생성: {message}")
         else:
             logger.warning("Recommendation agent 또는 분석 메서드를 찾을 수 없습니다.")
 

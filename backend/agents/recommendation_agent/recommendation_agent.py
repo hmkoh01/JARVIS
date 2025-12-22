@@ -121,6 +121,7 @@ class RecommendationAgent(BaseAgent):
         """
         
         if not self.llm_available:
+            logger.warning(f"[User {user_id}] LLM 서비스 사용 불가")
             return False, "LLM 서비스를 사용할 수 없습니다."
         
         try:
@@ -129,7 +130,10 @@ class RecommendationAgent(BaseAgent):
             browser_logs = self.sqlite.get_browser_logs(user_id, limit=50)
             content_keywords = self.sqlite.get_content_keywords(user_id, limit=100)
             
+            logger.debug(f"[User {user_id}] 브라우저 로그: {len(browser_logs)}개, 콘텐츠 키워드: {len(content_keywords)}개")
+            
             if not browser_logs and not content_keywords:
+                logger.info(f"[User {user_id}] 분석할 활동 데이터 없음")
                 return False, "분석할 새로운 활동 데이터가 없습니다."
             
             # 참조 데이터 조회
@@ -151,6 +155,7 @@ class RecommendationAgent(BaseAgent):
                 force_recommend = True
             
             # Step 2: LLM Analysis & Decision
+            logger.info(f"[User {user_id}] LLM 분석 시작 (force_recommend={force_recommend})")
             analysis_result = await self._analyze_with_llm(
                 browser_logs=browser_logs,
                 content_keywords=content_keywords,
@@ -161,7 +166,12 @@ class RecommendationAgent(BaseAgent):
                 past_recommended_keywords=past_recommended_keywords
             )
             
-            if not analysis_result or not analysis_result.get('should_recommend'):
+            if not analysis_result:
+                logger.info(f"[User {user_id}] LLM 분석 결과 없음")
+                return False, "LLM 분석 결과가 없습니다."
+            
+            if not analysis_result.get('should_recommend'):
+                logger.info(f"[User {user_id}] LLM이 추천 생성 불필요로 판단: {analysis_result.get('reason', 'unknown')}")
                 return False, "현재 추천할 만한 특별한 활동이 감지되지 않았습니다."
             
             # 추천 생성

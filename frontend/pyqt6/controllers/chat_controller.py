@@ -267,7 +267,7 @@ class ChatController(QObject):
         
         # 새로운 형식: ---METADATA_START---{json}---METADATA_END---
         while True:
-            match = re.search(self.METADATA_PATTERN, self._stream_buffer)
+            match = re.search(self.METADATA_PATTERN, self._stream_buffer, re.DOTALL)
             
             if match:
                 # 메타데이터 앞의 텍스트를 결과에 추가
@@ -295,7 +295,7 @@ class ChatController(QObject):
                 self._stream_buffer = self._stream_buffer[match.end():]
             else:
                 # 레거시 형식도 확인 (호환성)
-                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, self._stream_buffer)
+                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, self._stream_buffer, re.DOTALL)
                 if legacy_match:
                     before_metadata = self._stream_buffer[:legacy_match.start()]
                     if before_metadata:
@@ -318,14 +318,27 @@ class ChatController(QObject):
                     
                     self._stream_buffer = self._stream_buffer[legacy_match.end():]
                 else:
-                    # 메타데이터 마커가 없으면 불완전한 마커 대비 끝부분만 남김
-                    # ---METADATA_START--- 길이가 19자, ---METADATA_END--- 길이가 17자
-                    # 안전하게 40자 정도 남김
-                    marker_buffer_size = 40
-                    if len(self._stream_buffer) > marker_buffer_size:
-                        result += self._stream_buffer[:-marker_buffer_size]
-                        self._stream_buffer = self._stream_buffer[-marker_buffer_size:]
-                    break
+                    # 메타데이터 시작 마커가 있는지 확인
+                    start_marker = "---METADATA_START---"
+                    end_marker = "---METADATA_END---"
+                    start_idx = self._stream_buffer.find(start_marker)
+                    
+                    if start_idx != -1:
+                        # 시작 마커는 있는데 끝 마커가 없으면 버퍼에 보관 (메타데이터 완성 대기)
+                        # 시작 마커 앞의 텍스트만 출력
+                        if start_idx > 0:
+                            result += self._stream_buffer[:start_idx]
+                            self._stream_buffer = self._stream_buffer[start_idx:]
+                        # 끝 마커가 올 때까지 대기
+                        break
+                    else:
+                        # 시작 마커가 없으면 불완전한 마커 대비 끝부분만 남김
+                        # ---METADATA_START--- 길이가 19자이므로 안전하게 20자 남김
+                        marker_buffer_size = 20
+                        if len(self._stream_buffer) > marker_buffer_size:
+                            result += self._stream_buffer[:-marker_buffer_size]
+                            self._stream_buffer = self._stream_buffer[-marker_buffer_size:]
+                        break
         
         return result
     
@@ -371,7 +384,7 @@ class ChatController(QObject):
             remaining = self._stream_buffer
             
             # 새로운 형식의 메타데이터 추출 및 처리
-            metadata_match = re.search(self.METADATA_PATTERN, remaining)
+            metadata_match = re.search(self.METADATA_PATTERN, remaining, re.DOTALL)
             if metadata_match:
                 try:
                     metadata_json = metadata_match.group(1).strip()
@@ -383,7 +396,7 @@ class ChatController(QObject):
             
             # 레거시 형식도 확인
             if not metadata_match:
-                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, remaining)
+                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, remaining, re.DOTALL)
                 if legacy_match:
                     try:
                         metadata_json = legacy_match.group(1).strip()
@@ -394,7 +407,7 @@ class ChatController(QObject):
                         print(f"[ChatController] Final legacy metadata parse error: {e}")
             
             # 메타데이터 마커 제거하고 남은 텍스트만 표시
-            remaining = re.sub(self.METADATA_PATTERN, '', remaining)
+            remaining = re.sub(self.METADATA_PATTERN, '', remaining, flags=re.DOTALL)
             remaining = re.sub(self.LEGACY_METADATA_PATTERN, '', remaining, flags=re.DOTALL)
             remaining = remaining.strip()
             if remaining:
