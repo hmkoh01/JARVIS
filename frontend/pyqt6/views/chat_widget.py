@@ -22,7 +22,8 @@ from PyQt6.QtWidgets import (
     QSpacerItem,
     QApplication
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QPropertyAnimation, QEasingCurve
+from PyQt6.QtWidgets import QGraphicsOpacityEffect
 from PyQt6.QtGui import QFont, QKeyEvent, QTextCursor, QColor
 
 from models.message import Message
@@ -34,6 +35,7 @@ class MessageBubble(QFrame):
     
     Displays user or assistant messages with appropriate styling.
     Supports streaming content updates for assistant messages.
+    Supports typing animation for non-streaming messages.
     """
     
     # Bubble colors - Modern Light Theme (all black text)
@@ -44,10 +46,21 @@ class MessageBubble(QFrame):
     ASSISTANT_BG_DARK = "#f0f0f0"
     ASSISTANT_TEXT_DARK = "#1a1a1a"
     
+    # Typing animation settings
+    TYPING_SPEED_MS = 15  # ms per character (faster than toast for chat flow)
+    TYPING_CHUNK_SIZE = 3  # Characters per tick (for faster typing)
+    
+    # Signal emitted when typing animation completes
+    typing_completed = pyqtSignal()
+    
     def __init__(self, message: Message, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
         self.message = message
+        self._typing_timer: Optional[QTimer] = None
+        self._typing_index = 0
+        self._full_content = ""
+        self._is_typing = False
         self._setup_ui()
     
     def _setup_ui(self):
@@ -174,6 +187,59 @@ class MessageBubble(QFrame):
         """Mark streaming as complete."""
         self.message.complete_streaming()
         self._update_content()
+    
+    def start_typing_animation(self, content: str):
+        """
+        Start typing animation for the message content.
+        
+        Args:
+            content: The full content to animate
+        """
+        self._full_content = content
+        self._typing_index = 0
+        self._is_typing = True
+        self.message.content = ""
+        self._content_label.setText("▌")  # Show cursor
+        
+        self._typing_timer = QTimer(self)
+        self._typing_timer.timeout.connect(self._type_next_chunk)
+        self._typing_timer.start(self.TYPING_SPEED_MS)
+    
+    def _type_next_chunk(self):
+        """Add the next chunk of characters to the message."""
+        if self._typing_index < len(self._full_content):
+            # Add chunk of characters
+            end_idx = min(self._typing_index + self.TYPING_CHUNK_SIZE, len(self._full_content))
+            self._typing_index = end_idx
+            
+            # Update message content
+            current_text = self._full_content[:self._typing_index]
+            self.message.content = current_text
+            
+            # Format and display with cursor
+            formatted = self._format_content(current_text)
+            if self._typing_index < len(self._full_content):
+                formatted += '<span style="color: #888;">▌</span>'
+            self._content_label.setText(formatted)
+        else:
+            # Typing complete
+            self._complete_typing()
+    
+    def _complete_typing(self):
+        """Complete the typing animation."""
+        if self._typing_timer:
+            self._typing_timer.stop()
+            self._typing_timer = None
+        
+        self._is_typing = False
+        self.message.content = self._full_content
+        self._update_content()
+        self.typing_completed.emit()
+    
+    def skip_typing_animation(self):
+        """Skip the typing animation and show full content immediately."""
+        if self._is_typing and self._full_content:
+            self._complete_typing()
 
 
 class ChatInputWidget(QTextEdit):
@@ -239,30 +305,29 @@ class ConfirmationWidget(QFrame):
     def _setup_ui(self, message: str):
         """Set up the confirmation UI."""
         self.setObjectName("confirmationWidget")
+        # 투명 배경 - 버튼만 표시
         self.setStyleSheet("""
             #confirmationWidget {
-                background-color: #F3F4F6;
-                border-radius: 12px;
-                margin: 8px;
-                padding: 12px;
+                background-color: transparent;
+                border: none;
+                margin: 4px 8px;
             }
         """)
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
         
-        # Message label
-        msg_label = QLabel(message)
-        msg_label.setWordWrap(True)
-        msg_label.setStyleSheet("color: #374151; font-size: 13px;")
-        layout.addWidget(msg_label)
+        # Message label (only show if message is provided)
+        if message and message.strip():
+            msg_label = QLabel(message)
+            msg_label.setWordWrap(True)
+            msg_label.setStyleSheet("color: #374151; font-size: 13px;")
+            layout.addWidget(msg_label)
         
-        # Buttons
+        # Buttons - 왼쪽 정렬 (AI 메시지처럼)
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
-        
-        btn_layout.addStretch()
         
         cancel_btn = QPushButton("❌ 취소")
         cancel_btn.setStyleSheet("""
@@ -297,6 +362,9 @@ class ConfirmationWidget(QFrame):
         """)
         confirm_btn.clicked.connect(self._on_confirm)
         btn_layout.addWidget(confirm_btn)
+        
+        # 왼쪽 정렬을 위해 오른쪽에 stretch 추가
+        btn_layout.addStretch()
         
         layout.addLayout(btn_layout)
     
@@ -472,10 +540,40 @@ class ChatWidget(QWidget):
         self._add_message_bubble(message)
         return message
     
-    def add_assistant_message(self, content: str) -> Message:
-        """Add an assistant message and return the Message object."""
-        message = Message.assistant_message(content)
-        self._add_message_bubble(message)
+    def add_assistant_message(
+        self, 
+        content: str, 
+        typing_animation: bool = True,
+        on_complete: callable = None
+    ) -> Message:
+        """
+        Add an assistant message with optional typing animation.
+        
+        Args:
+            content: Message content
+            typing_animation: If True, show typing animation. Default True.
+            on_complete: Optional callback to call when typing animation completes.
+            
+        Returns:
+            The Message object
+        """
+        # Create message with empty content initially if animating
+        if typing_animation and len(content) > 10:
+            message = Message.assistant_message("")
+            bubble = self._add_message_bubble(message, animate=True)
+            # Start typing animation
+            bubble.start_typing_animation(content)
+            # Connect to scroll when typing updates
+            bubble.typing_completed.connect(self._scroll_to_bottom)
+            # Connect completion callback if provided
+            if on_complete:
+                bubble.typing_completed.connect(on_complete)
+        else:
+            message = Message.assistant_message(content)
+            self._add_message_bubble(message)
+            # Call completion callback immediately for non-animated messages
+            if on_complete:
+                QTimer.singleShot(100, on_complete)
         return message
     
     def add_system_message(self, content: str) -> Message:
@@ -518,8 +616,8 @@ class ChatWidget(QWidget):
         self._is_sending = False
         self.set_status("Error", connected=False)
     
-    def _add_message_bubble(self, message: Message) -> MessageBubble:
-        """Add a message bubble to the display."""
+    def _add_message_bubble(self, message: Message, animate: bool = True) -> MessageBubble:
+        """Add a message bubble to the display with slide-in and fade-in animation."""
         self._messages.append(message)
         
         bubble = MessageBubble(message)
@@ -531,8 +629,64 @@ class ChatWidget(QWidget):
             bubble
         )
         
+        # Apply fade-in + slide-in animation for non-streaming messages
+        if animate and not message.is_streaming:
+            # Set up opacity effect for fade
+            opacity_effect = QGraphicsOpacityEffect(bubble)
+            bubble.setGraphicsEffect(opacity_effect)
+            opacity_effect.setOpacity(0)
+            
+            # Fade animation
+            fade_animation = QPropertyAnimation(opacity_effect, b"opacity")
+            fade_animation.setDuration(300)
+            fade_animation.setStartValue(0)
+            fade_animation.setEndValue(1)
+            fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            
+            # Store reference to prevent garbage collection
+            bubble._fade_animation = fade_animation
+            bubble._opacity_effect = opacity_effect
+            fade_animation.start()
+            
+            # Slide animation (slide up from below)
+            # Get initial position after layout
+            QTimer.singleShot(10, lambda: self._animate_slide_in(bubble, message.is_user))
+        
         self._scroll_to_bottom()
         return bubble
+    
+    def _animate_slide_in(self, bubble: MessageBubble, is_user: bool):
+        """Animate the bubble sliding in from the side."""
+        # Store original geometry
+        original_geometry = bubble.geometry()
+        
+        # Calculate start position (slide from side)
+        slide_distance = 30
+        if is_user:
+            # User messages slide from right
+            start_x = original_geometry.x() + slide_distance
+        else:
+            # Assistant messages slide from left
+            start_x = original_geometry.x() - slide_distance
+        
+        start_geometry = original_geometry.translated(
+            start_x - original_geometry.x(), 
+            15  # Also slide up slightly
+        )
+        
+        # Set start position
+        bubble.setGeometry(start_geometry)
+        
+        # Animate to final position
+        slide_animation = QPropertyAnimation(bubble, b"geometry")
+        slide_animation.setDuration(300)
+        slide_animation.setStartValue(start_geometry)
+        slide_animation.setEndValue(original_geometry)
+        slide_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        # Store reference to prevent garbage collection
+        bubble._slide_animation = slide_animation
+        slide_animation.start()
     
     def set_status(self, status: str, connected: bool = True, sending: bool = False):
         """Update the connection status indicator."""

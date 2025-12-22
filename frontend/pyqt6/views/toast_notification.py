@@ -16,7 +16,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QGraphicsOpacityEffect,
-    QApplication
+    QApplication,
+    QSizePolicy
 )
 from PyQt6.QtCore import (
     Qt,
@@ -92,6 +93,8 @@ class ToastNotification(QWidget):
     - Auto-dismiss after duration
     - Click to dismiss
     - Fade in/out animations
+    - Typing animation for messages
+    - Slide-in effect
     - Type-based styling (info/success/warning/error)
     - Optional action buttons
     """
@@ -103,6 +106,11 @@ class ToastNotification(QWidget):
     MAX_WIDTH = 400
     MIN_WIDTH = 300
     
+    # Animation settings
+    TYPING_SPEED_MS = 12  # ms per tick (faster typing)
+    TYPING_CHUNK_SIZE = 3  # Characters per tick
+    SLIDE_DURATION_MS = 300
+    
     def __init__(
         self,
         title: str,
@@ -110,6 +118,7 @@ class ToastNotification(QWidget):
         toast_type: ToastType = ToastType.INFO,
         duration_ms: int = 5000,
         actions: Optional[List[ToastAction]] = None,
+        typing_animation: bool = True,
         parent: Optional[QWidget] = None
     ):
         super().__init__(parent)
@@ -119,13 +128,18 @@ class ToastNotification(QWidget):
         self.toast_type = toast_type
         self.duration_ms = duration_ms
         self.actions = actions or []
+        self.typing_animation = typing_animation
         
         self._config = TOAST_CONFIGS[toast_type]
         self._dismiss_timer: Optional[QTimer] = None
+        self._typing_timer: Optional[QTimer] = None
+        self._typing_index = 0
+        self._msg_label: Optional[QLabel] = None
+        self._full_message = message
         
         self._setup_window()
         self._setup_ui()
-        self._start_dismiss_timer()
+        # Note: dismiss timer is started after animation completes
     
     def _setup_window(self):
         """Configure window properties."""
@@ -211,13 +225,20 @@ class ToastNotification(QWidget):
         
         # Message (if provided)
         if self.message:
-            msg_label = QLabel(self.message)
+            self._msg_label = QLabel(self._full_message)  # Set full text first for size calculation
             msg_font = QFont()
             msg_font.setPointSize(10)
-            msg_label.setFont(msg_font)
-            msg_label.setWordWrap(True)
-            msg_label.setStyleSheet(f"color: {self._config.text_color}; opacity: 0.9;")
-            container_layout.addWidget(msg_label)
+            self._msg_label.setFont(msg_font)
+            self._msg_label.setWordWrap(True)
+            self._msg_label.setStyleSheet(f"color: {self._config.text_color}; opacity: 0.9;")
+            self._msg_label.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Minimum
+            )
+            container_layout.addWidget(self._msg_label)
+            
+            # If typing animation is enabled, we'll clear and retype
+            # The size is already calculated with full text
         
         # Action buttons (if provided)
         if self.actions:
@@ -292,10 +313,27 @@ class ToastNotification(QWidget):
         self.dismiss()
     
     def dismiss(self):
-        """Close the toast with animation."""
+        """Close the toast with fade-out animation."""
         if self._dismiss_timer:
             self._dismiss_timer.stop()
         
+        if self._typing_timer:
+            self._typing_timer.stop()
+        
+        # Fade out animation
+        if hasattr(self, '_opacity_effect') and self._opacity_effect:
+            self._fade_out = QPropertyAnimation(self._opacity_effect, b"opacity")
+            self._fade_out.setDuration(150)
+            self._fade_out.setStartValue(1)
+            self._fade_out.setEndValue(0)
+            self._fade_out.setEasingCurve(QEasingCurve.Type.InCubic)
+            self._fade_out.finished.connect(self._on_fade_out_complete)
+            self._fade_out.start()
+        else:
+            self._on_fade_out_complete()
+    
+    def _on_fade_out_complete(self):
+        """Called when fade-out animation is complete."""
         # Emit closed signal
         self.closed.emit(self)
         
@@ -304,22 +342,80 @@ class ToastNotification(QWidget):
         self.deleteLater()
     
     def show_animated(self):
-        """Show with fade-in animation."""
+        """Show with slide-in and fade-in animation, then start typing animation."""
+        # Store original position for slide animation
+        original_pos = self.pos()
+        
         # Set up opacity effect
         self._opacity_effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self._opacity_effect)
         self._opacity_effect.setOpacity(0)
         
+        # Start position (slide from right)
+        start_x = original_pos.x() + 50
+        self.move(start_x, original_pos.y())
+        
         # Show first
         self.show()
         
-        # Animate opacity
+        # Animate opacity (fade in)
         self._fade_animation = QPropertyAnimation(self._opacity_effect, b"opacity")
-        self._fade_animation.setDuration(200)
+        self._fade_animation.setDuration(self.SLIDE_DURATION_MS)
         self._fade_animation.setStartValue(0)
         self._fade_animation.setEndValue(1)
         self._fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        # Animate position (slide in from right)
+        self._slide_animation = QPropertyAnimation(self, b"pos")
+        self._slide_animation.setDuration(self.SLIDE_DURATION_MS)
+        self._slide_animation.setStartValue(QPoint(start_x, original_pos.y()))
+        self._slide_animation.setEndValue(original_pos)
+        self._slide_animation.setEasingCurve(QEasingCurve.Type.OutBack)
+        
+        # Start animations
         self._fade_animation.start()
+        self._slide_animation.start()
+        
+        # Start typing animation after slide completes
+        if self.typing_animation and self._msg_label and self._full_message:
+            QTimer.singleShot(self.SLIDE_DURATION_MS, self._start_typing_animation)
+        elif self._msg_label and self._full_message:
+            # No typing animation - show full message immediately
+            self._msg_label.setText(self._full_message)
+            self._start_dismiss_timer()
+        else:
+            self._start_dismiss_timer()
+    
+    def _start_typing_animation(self):
+        """Start the character-by-character typing animation."""
+        self._typing_index = 0
+        # Clear label before starting (size is already calculated with full text)
+        self._msg_label.setText("▌")
+        self._typing_timer = QTimer(self)
+        self._typing_timer.timeout.connect(self._type_next_char)
+        self._typing_timer.start(self.TYPING_SPEED_MS)
+    
+    def _type_next_char(self):
+        """Add the next chunk of characters to the message."""
+        if self._typing_index < len(self._full_message):
+            # Add multiple characters per tick for faster typing
+            self._typing_index = min(
+                self._typing_index + self.TYPING_CHUNK_SIZE, 
+                len(self._full_message)
+            )
+            displayed_text = self._full_message[:self._typing_index]
+            # Add cursor effect
+            if self._typing_index < len(self._full_message):
+                displayed_text += "▌"
+            self._msg_label.setText(displayed_text)
+        else:
+            # Typing complete
+            if self._typing_timer:
+                self._typing_timer.stop()
+                self._typing_timer = None
+            self._msg_label.setText(self._full_message)
+            # Start dismiss timer after typing completes
+            self._start_dismiss_timer()
 
 
 class ToastManager(QWidget):
@@ -352,7 +448,8 @@ class ToastManager(QWidget):
         message: str = "",
         toast_type: ToastType = ToastType.INFO,
         duration_ms: int = 5000,
-        actions: Optional[List[ToastAction]] = None
+        actions: Optional[List[ToastAction]] = None,
+        typing_animation: bool = True
     ) -> ToastNotification:
         """
         Show a new toast notification.
@@ -363,6 +460,7 @@ class ToastManager(QWidget):
             toast_type: Type of toast (info/success/warning/error)
             duration_ms: Auto-dismiss duration (0 = no auto-dismiss)
             actions: Optional list of action buttons
+            typing_animation: Enable typing animation for message
             
         Returns:
             The created ToastNotification widget
@@ -382,7 +480,8 @@ class ToastManager(QWidget):
             message=message,
             toast_type=toast_type,
             duration_ms=duration_ms,
-            actions=actions
+            actions=actions,
+            typing_animation=typing_animation
         )
         
         # Connect closed signal

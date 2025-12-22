@@ -419,31 +419,40 @@ class RecommendationsWidget(QWidget):
         
         return header
     
+    def _is_widget_valid(self) -> bool:
+        """Check if the widget and its components are still valid."""
+        try:
+            # Try to access the status label to check if it's valid
+            _ = self._status_label.text()
+            return True
+        except (RuntimeError, AttributeError):
+            return False
+    
     def load_data(self):
         """Load recommendations from API."""
         # 위젯이 삭제되었는지 확인
+        if not self._is_widget_valid():
+            return
+        
         try:
-            if not self._status_label or not self._status_label.isVisible:
+            if not self._jwt_token:
+                self._status_label.setText("로그인이 필요합니다")
                 return
+            
+            # Emit loading started signal
+            self.loading_started.emit()
+            
+            self._status_label.setText("로딩 중...")
+            self._status_label.show()
+            
+            self._worker = RecommendationsWorker(self._jwt_token, self)
+            self._worker.data_loaded.connect(self._on_data_loaded)
+            self._worker.error_occurred.connect(self._on_error)
+            self._worker.finished.connect(lambda: self.loading_finished.emit())
+            self._worker.start()
         except RuntimeError:
-            # C++ 객체가 이미 삭제됨
-            return
-        
-        if not self._jwt_token:
-            self._status_label.setText("로그인이 필요합니다")
-            return
-        
-        # Emit loading started signal
-        self.loading_started.emit()
-        
-        self._status_label.setText("로딩 중...")
-        self._status_label.show()
-        
-        self._worker = RecommendationsWorker(self._jwt_token, self)
-        self._worker.data_loaded.connect(self._on_data_loaded)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.finished.connect(lambda: self.loading_finished.emit())
-        self._worker.start()
+            # 위젯이 삭제된 경우 무시
+            pass
     
     def _on_data_loaded(self, recommendations: list):
         """Handle recommendations loaded."""
@@ -551,11 +560,14 @@ class RecommendationsWidget(QWidget):
                     
                     # 애니메이션 완료 시 위젯 삭제 및 빈 상태 표시
                     def on_animation_finished(w=widget):
-                        w.deleteLater()
-                        # 모든 추천이 처리되었으면 빈 상태 표시
-                        if not self._recommendations:
-                            self._status_label.setText("📭 모든 추천을 확인했습니다!")
-                            self._status_label.show()
+                        try:
+                            w.deleteLater()
+                            # 모든 추천이 처리되었으면 빈 상태 표시
+                            if not self._recommendations and self._is_widget_valid():
+                                self._status_label.setText("📭 모든 추천을 확인했습니다!")
+                                self._status_label.show()
+                        except RuntimeError:
+                            pass  # 위젯이 이미 삭제됨
                     
                     animation.finished.connect(on_animation_finished)
                     animation.start()

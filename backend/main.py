@@ -311,15 +311,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         # WebSocket 연결 수락
         await ws_manager.connect(websocket, user_id)
         
-        # 연결 시 대기 중인 추천이 있으면 바로 전송
+        # 연결 시 대기 중인 추천이 있으면 첫 번째 하나만 전송
         db = SQLite()
         pending_recommendations = db.get_pending_recommendations(user_id)
         if pending_recommendations:
-            for rec in pending_recommendations:
-                await ws_manager.broadcast_recommendation(user_id, rec)
-        
-        # 사용자 접속 시 무조건 새 추천 생성 (백그라운드에서 실행)
-        asyncio.create_task(trigger_recommendation_for_user(user_id))
+            # 첫 번째 추천만 전송 (한 번에 하나씩만 표시)
+            await ws_manager.broadcast_recommendation(user_id, pending_recommendations[0])
+        else:
+            # 대기 중인 추천이 없을 때만 새 추천 생성 (백그라운드에서 실행)
+            asyncio.create_task(trigger_recommendation_for_user(user_id))
         
         # 연결 유지 (클라이언트로부터 메시지 대기)
         while True:

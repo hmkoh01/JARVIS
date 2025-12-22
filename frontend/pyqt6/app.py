@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 # =============================================================================
-# Windows Console Encoding Fix
+# Windows Console Encoding Fix & Qt Warning Suppression
 # =============================================================================
 if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -22,6 +22,19 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
         pass
+
+# Suppress Qt layered window warnings (must be set before PyQt6 import)
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false"
+
+def _qt_message_handler(mode, context, message):
+    """Custom Qt message handler to filter out known harmless warnings."""
+    # Suppress UpdateLayeredWindowIndirect warnings on Windows
+    if "UpdateLayeredWindowIndirect" in message:
+        return
+    # Print other messages normally
+    print(message)
+
+# Will be installed after PyQt6 import
 
 # =============================================================================
 # Path Setup
@@ -147,8 +160,11 @@ def get_resource_path(relative_path: str) -> str:
 # =============================================================================
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, qInstallMessageHandler, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QIcon
+
+# Install custom message handler to suppress known harmless warnings
+qInstallMessageHandler(_qt_message_handler)
 
 
 # =============================================================================
@@ -166,6 +182,54 @@ from services.api_client import APIClient
 from services.websocket_client import WebSocketManager
 from controllers.chat_controller import ChatController
 from controllers.auth_controller import AuthController
+
+
+# =============================================================================
+# Background Workers
+# =============================================================================
+
+class RecommendationResponseWorker(QThread):
+    """
+    Background worker for handling recommendation responses.
+    Prevents UI blocking during API calls.
+    """
+    finished = pyqtSignal(dict)  # {success, action, keyword, result}
+    error = pyqtSignal(str)
+    
+    def __init__(self, url: str, token: str, action: str, keyword: str, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.token = token
+        self.action = action
+        self.keyword = keyword
+    
+    def run(self):
+        import requests
+        try:
+            response = requests.post(
+                self.url,
+                headers={"Authorization": f"Bearer {self.token}"},
+                json={"action": self.action},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.finished.emit({
+                    "success": True,
+                    "action": self.action,
+                    "keyword": self.keyword,
+                    "result": result
+                })
+            else:
+                self.error.emit(f"서버 오류: {response.status_code}")
+                
+        except requests.exceptions.Timeout:
+            self.error.emit("서버 응답이 너무 오래 걸립니다.")
+        except requests.exceptions.ConnectionError:
+            self.error.emit("서버에 연결할 수 없습니다.")
+        except Exception as e:
+            self.error.emit(f"오류: {str(e)}")
 
 
 # =============================================================================
@@ -678,9 +742,25 @@ class JARVISApp:
         print("🚪 Logging out and closing application...")
         self._cleanup()
         
+        # 모든 윈도우 강제 종료 (closeEvent 무시 방지)
+        if self._main_window:
+            self._main_window.hide()
+            self._main_window.deleteLater()
+        
+        if self._floating_button:
+            self._floating_button.hide()
+            self._floating_button.deleteLater()
+        
+        if self._toast_manager:
+            self._toast_manager.hide()
+            self._toast_manager.deleteLater()
+        
         # 앱 종료
         if self._app:
             self._app.quit()
+        
+        # 강제 종료 (위 quit()가 동작하지 않을 경우 대비)
+        sys.exit(0)
     
     def _init_chat_controller(self):
         """Initialize the chat controller."""
@@ -711,26 +791,9 @@ class JARVISApp:
         print("✅ Chat controller initialized")
     
     def _on_confirm_action_requested(self, metadata: dict):
-        """Handle confirmation action request - show confirmation UI."""
-        action = metadata.get('action', '')
-        keyword = metadata.get('keyword', '')
-        description = metadata.get('brief_description', '')
-        
-        if action == 'confirm_report':
-            message = f"'{keyword}'에 대한 보고서를 작성할까요?"
-        elif action == 'confirm_analysis':
-            message = f"'{keyword}'에 대한 분석을 시작할까요?"
-        elif action == 'confirm_code':
-            message = f"'{keyword}'에 대한 코드를 작성할까요?"
-        elif action == 'confirm_dashboard':
-            message = f"대시보드 분석을 시작할까요?"
-        else:
-            message = f"'{keyword}' 작업을 진행할까요?"
-        
-        if description:
-            message += f"\n\n{description}"
-        
-        self._main_window.chat_widget.show_confirmation(message, metadata)
+        """Handle confirmation action request - show confirmation UI (buttons only)."""
+        # 버튼만 표시 - 메시지는 이미 스트리밍으로 표시됨
+        self._main_window.chat_widget.show_confirmation("", metadata)
     
     def _on_confirmation_accepted(self, metadata: dict):
         """Handle confirmation accepted - proceed with action."""
@@ -916,115 +979,142 @@ class JARVISApp:
             )
     
     def _handle_recommendation_response(self, recommendation_id: int, keyword: str, action: str):
-        """Handle user response to recommendation (accept/reject)."""
-        import requests
-        
+        """Handle user response to recommendation (accept/reject) - async."""
         token, user_id = self._auth_controller.get_credentials()
         if not token or not recommendation_id:
             self._toast_manager.error("오류", "추천 응답을 처리할 수 없습니다.")
             return
         
-        try:
-            # API 호출하여 추천 수락/거절 처리
-            response = requests.post(
-                f"{API_BASE_URL}/api/v2/recommendations/{recommendation_id}/respond",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"action": action},
-                timeout=30
-            )
+        # 로딩 표시
+        self._floating_button.set_loading(True)
+        
+        # 진행 중 토스트 표시
+        self._toast_manager.info(
+            "⏳ 처리 중",
+            f"'{keyword}' 요청을 처리하고 있습니다...",
+            duration_ms=2000
+        )
+        
+        # 비동기 워커 생성
+        url = f"{API_BASE_URL}/api/v2/recommendations/{recommendation_id}/respond"
+        worker = RecommendationResponseWorker(url, token, action, keyword)
+        
+        # 워커 완료 시 처리
+        worker.finished.connect(
+            lambda data: self._on_recommendation_response_finished(data, recommendation_id)
+        )
+        worker.error.connect(self._on_recommendation_response_error)
+        
+        # 워커 종료 시 정리
+        worker.finished.connect(lambda: self._cleanup_recommendation_worker(worker))
+        worker.error.connect(lambda: self._cleanup_recommendation_worker(worker))
+        
+        # 워커 저장 및 시작
+        if not hasattr(self, '_recommendation_workers'):
+            self._recommendation_workers = []
+        self._recommendation_workers.append(worker)
+        worker.start()
+    
+    def _cleanup_recommendation_worker(self, worker):
+        """Clean up finished recommendation worker."""
+        self._floating_button.set_loading(False)
+        if hasattr(self, '_recommendation_workers') and worker in self._recommendation_workers:
+            self._recommendation_workers.remove(worker)
+    
+    def _on_recommendation_response_finished(self, data: dict, recommendation_id: int):
+        """Handle successful recommendation response."""
+        action = data.get("action")
+        keyword = data.get("keyword", "")
+        result = data.get("result", {})
+        
+        if action == "accept" and result.get("success"):
+            # 수락 성공: 채팅창 열고 리포트 내용 표시
+            report_content = result.get("report_content", "")
+            offer_deep_dive = result.get("offer_deep_dive", False)
             
-            if response.status_code == 200:
-                result = response.json()
+            # 메인 윈도우 및 채팅 탭 열기
+            self._floating_button.on_click()
+            if hasattr(self._main_window, 'set_current_tab'):
+                self._main_window.set_current_tab(0)  # 채팅 탭
+            
+            # 채팅에 추천 관련 시스템 메시지 및 리포트 내용 추가
+            if hasattr(self._main_window, 'chat_widget'):
+                self._main_window.chat_widget.add_system_message(
+                    f"📌 **{keyword}**에 대한 정보입니다!"
+                )
                 
-                if action == "accept" and result.get("success"):
-                    # 수락 성공: 채팅창 열고 리포트 내용 표시
-                    report_content = result.get("report_content", "")
-                    offer_deep_dive = result.get("offer_deep_dive", False)
-                    
-                    # 메인 윈도우 및 채팅 탭 열기
-                    self._floating_button.on_click()
-                    if hasattr(self._main_window, 'set_current_tab'):
-                        self._main_window.set_current_tab(0)  # 채팅 탭
-                    
-                    # 채팅에 추천 관련 시스템 메시지 및 리포트 내용 추가
-                    if hasattr(self._main_window, 'chat_widget'):
-                        self._main_window.chat_widget.add_system_message(
-                            f"📌 **{keyword}**에 대한 정보입니다!"
+                # 심층 보고서 제안 (offer_deep_dive가 True면)
+                # 확인 버튼은 타이핑 애니메이션 완료 후 표시
+                def show_confirmation_after_typing():
+                    if offer_deep_dive and hasattr(self._main_window, 'chat_widget'):
+                        confirm_metadata = {
+                            "action": "confirm_report",
+                            "keyword": keyword,
+                            "recommendation_id": recommendation_id,
+                            "brief_description": f"{keyword}에 대한 심층 보고서를 PDF로 작성해드릴 수 있습니다."
+                        }
+                        self._main_window.chat_widget.show_confirmation(
+                            "",
+                            confirm_metadata
                         )
-                        if report_content:
-                            self._main_window.chat_widget.add_assistant_message(report_content)
-                        
-                        # 심층 보고서 제안 (offer_deep_dive가 True면)
-                        if offer_deep_dive:
-                            # 보고서 작성 확인 메타데이터 설정
-                            confirm_metadata = {
-                                "action": "confirm_report",
-                                "keyword": keyword,
-                                "recommendation_id": recommendation_id,
-                                "brief_description": f"{keyword}에 대한 심층 보고서를 PDF로 작성해드릴 수 있습니다."
-                            }
-                            self._main_window.chat_widget.show_confirmation(
-                                f"'{keyword}'에 대한 심층 보고서를 작성할까요?\n\n파일로 저장하여 나중에 참고할 수 있습니다.",
-                                confirm_metadata
-                            )
-                    
-                    self._toast_manager.success(
-                        "📌 추천 수락",
-                        f"'{keyword}'에 대한 정보를 채팅창에서 확인하세요!",
-                        duration_ms=4000
-                    )
-                    print(f"✅ Recommendation accepted: {keyword}")
-                    
-                elif action == "reject" and result.get("success"):
-                    # 거절 성공
-                    self._toast_manager.info(
-                        "🚫 추천 거절",
-                        f"'{keyword}'는 더 이상 추천되지 않습니다.",
-                        duration_ms=4000
-                    )
-                    print(f"❌ Recommendation rejected: {keyword}")
-                else:
-                    # 실패
-                    error_msg = result.get("message", "처리 중 오류가 발생했습니다.")
-                    self._toast_manager.error("오류", error_msg)
-            else:
-                self._toast_manager.error("오류", f"서버 오류: {response.status_code}")
                 
-        except requests.exceptions.Timeout:
-            self._toast_manager.error("시간 초과", "서버 응답이 너무 오래 걸립니다.")
-        except requests.exceptions.ConnectionError:
-            self._toast_manager.error("연결 오류", "서버에 연결할 수 없습니다.")
-        except Exception as e:
-            print(f"Error handling recommendation response: {e}")
-            self._toast_manager.error("오류", f"추천 응답 처리 중 오류: {str(e)}")
+                if report_content:
+                    # 타이핑 완료 후 확인 버튼 표시
+                    self._main_window.chat_widget.add_assistant_message(
+                        report_content,
+                        typing_animation=True,
+                        on_complete=show_confirmation_after_typing if offer_deep_dive else None
+                    )
+                elif offer_deep_dive:
+                    # 리포트 내용이 없어도 확인 버튼 표시
+                    show_confirmation_after_typing()
+            
+            self._toast_manager.success(
+                "📌 추천 수락",
+                f"'{keyword}'에 대한 정보를 채팅창에서 확인하세요!",
+                duration_ms=4000
+            )
+            print(f"✅ Recommendation accepted: {keyword}")
+            
+        elif action == "reject" and result.get("success"):
+            # 거절 성공
+            self._toast_manager.info(
+                "🚫 추천 거절",
+                f"'{keyword}'는 더 이상 추천되지 않습니다.",
+                duration_ms=4000
+            )
+            print(f"❌ Recommendation rejected: {keyword}")
+        else:
+            # 실패
+            error_msg = result.get("message", "처리 중 오류가 발생했습니다.")
+            self._toast_manager.error("오류", error_msg)
+    
+    def _on_recommendation_response_error(self, error_msg: str):
+        """Handle recommendation response error."""
+        print(f"Error handling recommendation response: {error_msg}")
+        self._toast_manager.error("오류", error_msg)
     
     def _on_report_notification(self, data: dict):
         """Handle report notification - Show toast with folder action."""
         success = data.get("success", False)
         keyword = data.get("keyword", "Report")
         message = data.get("message", "")
-        file_path = data.get("file_path", "")
         
         if success:
-            # 파일 경로가 있으면 폴더 열기 액션 추가
-            if file_path:
-                import os
-                folder_path = os.path.dirname(file_path)
-                self._toast_manager.success_with_folder_action(
-                    "📄 리포트 완료",
-                    f"{keyword} 리포트가 생성되었습니다.\n폴더를 열어 확인하시겠습니까?",
-                    folder_path
-                )
-            else:
-                # 파일 경로가 없으면 기본 Reports 폴더
-                import os
-                from pathlib import Path
-                default_folder = str(Path.home() / "Documents" / "JARVIS" / "Reports")
-                self._toast_manager.success_with_folder_action(
-                    "📄 리포트 완료",
-                    f"{keyword} 리포트가 생성되었습니다.\n폴더를 열어 확인하시겠습니까?",
-                    default_folder
-                )
+            # 항상 클라이언트 로컬의 기본 Reports 폴더 사용
+            # (서버 경로는 Linux 경로일 수 있으므로 사용하지 않음)
+            import os
+            from pathlib import Path
+            local_folder = str(Path.home() / "Documents" / "JARVIS" / "Reports")
+            
+            # 폴더가 없으면 생성
+            os.makedirs(local_folder, exist_ok=True)
+            
+            self._toast_manager.success_with_folder_action(
+                "📄 리포트 완료",
+                f"{keyword} 리포트가 생성되었습니다.\n폴더를 열어 확인하시겠습니까?",
+                local_folder
+            )
             print(f"📄 Report completed toast: {keyword}")
         else:
             self._toast_manager.error(
