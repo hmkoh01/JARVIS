@@ -51,7 +51,7 @@ class RecommendationAgent(BaseAgent):
                     "temperature": 0.7,
                     "top_p": 0.9,
                     "top_k": 40,
-                    "max_output_tokens": 2048,
+                    "max_output_tokens": 4096,  # 토큰 제한으로 JSON 잘림 방지
                     "response_mime_type": "application/json",
                 },
                 safety_settings=self.safety_settings,
@@ -286,21 +286,13 @@ class RecommendationAgent(BaseAgent):
 7. 추천 시, 사용자에게 건넬 **친근한 한국어 말풍선 메시지**를 작성하세요.
    - 예시: "요즘 Python에 관심이 많으시네요! 관련 자료를 찾아볼까요? 🐍"
 
-## 출력 형식 (JSON)
-{{
-    "should_recommend": true/false,
-    "trigger_type": "new_interest" 또는 "periodic_expansion" 또는 "initial_discovery",
-    "keyword": "핵심 키워드 (한 단어 또는 짧은 구문)",
-    "related_keywords": ["관련", "키워드", "목록"],
-    "bubble_message": "친근한 한국어 말풍선 메시지",
-    "reasoning": "판단 근거 (내부용)"
-}}
+## 출력 형식 (JSON) - 반드시 한 줄로 compact하게 출력
+{{"should_recommend":true,"trigger_type":"new_interest","keyword":"핵심키워드","related_keywords":["관련1","관련2"],"bubble_message":"친근한 메시지","reasoning":"판단근거"}}
 
 만약 추천할 내용이 없다면:
-{{
-    "should_recommend": false,
-    "reasoning": "추천하지 않는 이유"
-}}
+{{"should_recommend":false,"reasoning":"추천하지 않는 이유"}}
+
+⚠️ 중요: JSON은 반드시 한 줄로, 줄바꿈 없이 compact하게 출력하세요.
 """
 
         try:
@@ -421,7 +413,7 @@ class RecommendationAgent(BaseAgent):
         
         - 마크다운 코드 블록 제거
         - JSON 객체만 추출
-        - 불완전한 JSON 복구 시도
+        - 불완전한 JSON 복구 시도 (토큰 제한으로 잘린 경우)
         """
         if not text or not text.strip():
             logger.warning("LLM 응답이 비어있습니다.")
@@ -438,25 +430,40 @@ class RecommendationAgent(BaseAgent):
             
             # 2단계: JSON 객체 추출 시도 (가장 바깥쪽 중괄호)
             json_match = re.search(r'\{[\s\S]*\}', text)
+            
             if json_match:
                 json_str = json_match.group()
-                
-                # 3단계: 직접 파싱 시도
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError:
-                    pass
-                
-                # 4단계: 불완전한 JSON 복구 시도
-                fixed_json = self._fix_truncated_json(json_str)
-                if fixed_json:
-                    try:
-                        return json.loads(fixed_json)
-                    except json.JSONDecodeError:
-                        pass
+            elif text.startswith('{'):
+                # 닫는 중괄호가 없는 잘린 JSON일 수 있음 (토큰 제한으로 잘림)
+                logger.info("닫는 중괄호가 없는 잘린 JSON 감지, 복구 시도...")
+                json_str = text
+            else:
+                logger.warning(f"LLM 응답에서 JSON 객체를 찾을 수 없습니다. 응답 시작부분: {text[:200]}...")
+                return None
             
-            # JSON 객체를 찾지 못한 경우
-            logger.warning(f"LLM 응답에서 JSON 객체를 찾을 수 없습니다. 응답 시작부분: {text[:200]}...")
+            # 3단계: 직접 파싱 시도
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+            
+            # 4단계: 불완전한 JSON 복구 시도
+            fixed_json = self._fix_truncated_json(json_str)
+            if fixed_json:
+                try:
+                    result = json.loads(fixed_json)
+                    logger.info("잘린 JSON 복구 성공")
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.debug(f"복구된 JSON 파싱 실패: {e}")
+            
+            # 5단계: 최소한의 필수 필드만 추출 시도
+            minimal_result = self._extract_minimal_json(json_str)
+            if minimal_result:
+                logger.info("최소 필드 추출로 JSON 복구 성공")
+                return minimal_result
+            
+            logger.warning(f"JSON 파싱 최종 실패. 원본 시작부분: {json_str[:300]}...")
             return None
             
         except json.JSONDecodeError as e:
@@ -465,6 +472,64 @@ class RecommendationAgent(BaseAgent):
             return None
         except Exception as e:
             logger.error(f"JSON 파싱 중 예상치 못한 오류: {e}")
+            return None
+    
+    def _extract_minimal_json(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        잘린 JSON에서 최소한의 필수 필드만 추출합니다.
+        
+        추천 분석에 필요한 필드: should_recommend, trigger_type, keyword, bubble_message
+        """
+        try:
+            result = {}
+            
+            # should_recommend 추출
+            should_match = re.search(r'"should_recommend"\s*:\s*(true|false)', text, re.IGNORECASE)
+            if should_match:
+                result['should_recommend'] = should_match.group(1).lower() == 'true'
+            else:
+                return None  # 필수 필드 없음
+            
+            # trigger_type 추출
+            trigger_match = re.search(r'"trigger_type"\s*:\s*"([^"]+)"', text)
+            if trigger_match:
+                result['trigger_type'] = trigger_match.group(1)
+            
+            # keyword 추출
+            keyword_match = re.search(r'"keyword"\s*:\s*"([^"]+)"', text)
+            if keyword_match:
+                result['keyword'] = keyword_match.group(1)
+            
+            # bubble_message 추출
+            bubble_match = re.search(r'"bubble_message"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', text)
+            if bubble_match:
+                result['bubble_message'] = bubble_match.group(1).replace('\\"', '"')
+            
+            # related_keywords 추출 시도
+            related_match = re.search(r'"related_keywords"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+            if related_match:
+                keywords_str = related_match.group(1)
+                keywords = re.findall(r'"([^"]+)"', keywords_str)
+                result['related_keywords'] = keywords[:5]  # 최대 5개
+            else:
+                result['related_keywords'] = []
+            
+            # reasoning 추출 (선택)
+            reasoning_match = re.search(r'"reasoning"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', text)
+            if reasoning_match:
+                result['reasoning'] = reasoning_match.group(1).replace('\\"', '"')
+            
+            # 필수 필드 검증
+            if result.get('should_recommend') and result.get('keyword'):
+                return result
+            elif not result.get('should_recommend'):
+                # should_recommend가 false면 keyword 없어도 됨
+                return result
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"최소 JSON 추출 실패: {e}")
             return None
     
     def _fix_truncated_json(self, json_str: str) -> Optional[str]:
