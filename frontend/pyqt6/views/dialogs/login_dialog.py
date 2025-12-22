@@ -403,7 +403,15 @@ class LoginDialog(QDialog):
         self._oauth_worker.status_changed.connect(self._on_status_changed)
         self._oauth_worker.login_success.connect(self._on_login_success)
         self._oauth_worker.login_failed.connect(self._on_login_failed)
+        self._oauth_worker.finished.connect(self._on_worker_finished)
         self._oauth_worker.start()
+    
+    def _on_worker_finished(self):
+        """Handle worker thread finished."""
+        # 스레드가 정상 종료되면 worker 참조 정리
+        if self._oauth_worker:
+            self._oauth_worker.deleteLater()
+            self._oauth_worker = None
     
     def _on_status_changed(self, status: str):
         """Update status label."""
@@ -414,7 +422,34 @@ class LoginDialog(QDialog):
         """Handle successful login."""
         self._user_info = user_info
         self.login_success.emit(user_info)
+        
+        # 스레드가 종료될 시간을 주고 다이얼로그 닫기
+        # QTimer를 사용해 이벤트 루프가 처리될 수 있도록 함
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self._finish_login)
+    
+    def _finish_login(self):
+        """Finish login after giving thread time to complete."""
+        self._cleanup_worker()
         self.accept()
+    
+    def _cleanup_worker(self):
+        """Clean up the OAuth worker thread."""
+        if self._oauth_worker is None:
+            return
+        
+        try:
+            # 스레드 종료 요청
+            self._oauth_worker.stop()
+            
+            # 스레드가 아직 실행 중이면 대기
+            if self._oauth_worker.isRunning():
+                self._oauth_worker.wait(2000)  # 최대 2초 대기
+        except RuntimeError:
+            # 이미 삭제된 경우
+            pass
+        
+        self._oauth_worker = None
     
     def _on_login_failed(self, error: str):
         """Handle login failure."""
@@ -426,9 +461,7 @@ class LoginDialog(QDialog):
     
     def closeEvent(self, event):
         """Handle dialog close."""
-        if self._oauth_worker and self._oauth_worker.isRunning():
-            self._oauth_worker.stop()
-            self._oauth_worker.wait(2000)
+        self._cleanup_worker()
         
         if self._user_info is None:
             self.login_cancelled.emit()

@@ -48,6 +48,7 @@ class ChatController(QObject):
     report_notification = pyqtSignal(dict)  # {success: bool, ...}
     analysis_notification = pyqtSignal(dict)  # {success: bool, ...}
     confirm_action_requested = pyqtSignal(dict)  # {action: str, keyword: str, ...}
+    code_file_ready = pyqtSignal(dict)  # {file_path: str, file_name: str} - for code download
     
     # Status signals
     connection_status_changed = pyqtSignal(bool)  # True = connected
@@ -423,6 +424,16 @@ class ChatController(QObject):
                 self.confirm_action_requested.emit(self._current_metadata)
                 self._current_metadata = None  # 중복 emit 방지
                 return
+            elif action == 'open_file':
+                # 코드 파일 생성 완료 - 다운로드 시그널 emit
+                file_path = self._current_metadata.get('file_path', '')
+                file_name = self._current_metadata.get('file_name', '')
+                if file_path and file_name:
+                    print(f"[ChatController] Code file ready: {file_name}")
+                    self.code_file_ready.emit({
+                        'file_path': file_path,
+                        'file_name': file_name
+                    })
             elif action == 'request_topic':
                 print(f"[ChatController] Request topic - no confirmation button needed")
             self._current_metadata = None  # 메타데이터 처리 완료
@@ -475,10 +486,8 @@ class ChatController(QObject):
     def _on_notification(self, notification: Notification):
         """Called for any WebSocket notification."""
         self.notification_received.emit(notification)
-        
-        # Handle specific notification types directly to avoid timing issues
-        if notification.type == NotificationType.NEW_RECOMMENDATION:
-            self._on_recommendation(notification.data)
+        # Note: recommendation_received signal is handled by client.recommendation_received
+        # to avoid duplicate handling
     
     @pyqtSlot(dict)
     def _on_recommendation(self, data: dict):

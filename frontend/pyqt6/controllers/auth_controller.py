@@ -130,6 +130,11 @@ class AuthController(QObject):
         
         if 'user_id' in user_info:
             self._user_id = user_info['user_id']
+        
+        # OAuth 응답에서 설정 완료 여부를 바로 저장 (API 호출 불필요)
+        if 'has_completed_setup' in user_info:
+            self._has_completed_setup = bool(user_info['has_completed_setup'])
+            print(f"✅ 로그인 시 설정 완료 상태: has_completed_setup={self._has_completed_setup}")
     
     def logout(self) -> None:
         """Clear authentication state and delete stored token."""

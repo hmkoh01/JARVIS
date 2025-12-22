@@ -25,16 +25,9 @@ class BGEM3Embedder:
             device: 'cuda' 또는 'cpu'
             config_path: 설정 파일 경로
         """
-        # CUDA 사용을 우선시하고, 사용 불가 시 명확한 경고 출력
-        if torch.cuda.is_available():
-            self.device = "cuda"
-            logger.info("✅ CUDA (GPU) 사용이 감지되었습니다.")
-        else:
-            self.device = "cpu"
-            logger.error("!" * 79)
-            logger.error("! CUDA를 사용할 수 없어 CPU 모드로 폴백합니다. 임베딩 속도가 매우 느려집니다.")
-            logger.error("! NVIDIA 드라이버, CUDA Toolkit, PyTorch(CUDA) 설치를 확인하세요.")
-            logger.error("!" * 79)
+        # CPU 모드로 고정 (CUDA 의존성 제거)
+        self.device = "cpu"
+        logger.info("📌 CPU 모드로 임베딩을 실행합니다.")
         self.config = self._load_config(config_path)
         self.dense_dim = self.config.get('embedding', {}).get('dense_dim', 1024)
         self.batch_size = self.config.get('embedding', {}).get('batch_size', 12)

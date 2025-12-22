@@ -270,6 +270,9 @@ class JARVISApp:
         self._initial_setup_progress = 0
         self._initial_setup_message = ""
         self._progress_poll_timer: Optional[QTimer] = None
+        
+        # 중복 추천 표시 방지를 위한 ID 추적
+        self._shown_recommendation_ids: set = set()
     
     def initialize(self) -> bool:
         """Initialize the application."""
@@ -277,6 +280,8 @@ class JARVISApp:
         print("JARVIS PyQt6 Frontend - Phase 5")
         print("Complete Integration Flow")
         print("=" * 60)
+        print(f"📡 API 서버: {API_BASE_URL}")
+        print(f"📡 WebSocket: {WS_BASE_URL}")
         
         # High DPI 스케일링 환경 변수 설정 (QApplication 생성 전에 설정해야 함)
         os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
@@ -327,11 +332,14 @@ class JARVISApp:
         # Initial Setup Flow (if needed)
         # =====================================================================
         
-        if self._auth_controller.needs_initial_setup():
-            print("📋 Initial setup required...")
+        needs_setup = self._auth_controller.needs_initial_setup()
+        if needs_setup:
+            print("📋 신규 사용자 - 초기 설정 시작...")
             self._handle_initial_setup()
             # 초기 설정을 건너뛰거나 취소해도 앱은 계속 실행됨
-            print("✅ Continuing with app initialization...")
+            print("✅ 초기 설정 완료, 앱 초기화 계속...")
+        else:
+            print("✅ 기존 사용자 - 바로 앱 시작...")
         
         # =====================================================================
         # Create Main UI
@@ -397,22 +405,29 @@ class JARVISApp:
         
         if result == LoginDialog.DialogCode.Accepted:
             user_info = login_dialog.user_info
-            print(f"🔐 User info from dialog: {user_info}")
             
             if user_info:
-                self._auth_controller.set_user_info(user_info)
-                print(f"✅ Login successful (User ID: {user_info.get('user_id')})")
+                # 시그널로 이미 설정되었을 수 있지만, 확실하게 다시 설정
+                if not self._auth_controller.is_authenticated():
+                    self._auth_controller.set_user_info(user_info)
+                
+                user_id = user_info.get('user_id') or self._auth_controller.get_user_id()
+                has_setup = user_info.get('has_completed_setup', False)
+                print(f"✅ 로그인 성공! (User ID: {user_id}, 설정완료: {has_setup})")
+                print("🚀 앱 시작 플로우 진행 중...")
                 return True
             elif self._auth_controller.is_authenticated():
                 # 시그널을 통해 이미 인증 정보가 설정된 경우
-                print(f"✅ Login successful via signal (User ID: {self._auth_controller.get_user_id()})")
+                print(f"✅ 로그인 성공! (User ID: {self._auth_controller.get_user_id()})")
+                print("🚀 앱 시작 플로우 진행 중...")
                 return True
         
         print("❌ Login cancelled or failed")
         return False
     
     def _on_login_success(self, user_info: dict):
-        """Handle login success signal."""
+        """Handle login success signal - 즉시 인증 정보 설정."""
+        print("🔐 OAuth 로그인 완료, 인증 정보 설정 중...")
         self._auth_controller.set_user_info(user_info)
     
     def _handle_initial_setup(self) -> bool:
@@ -775,6 +790,7 @@ class JARVISApp:
         self._chat_controller.recommendation_received.connect(self._on_recommendation)
         self._chat_controller.report_notification.connect(self._on_report_notification)
         self._chat_controller.analysis_notification.connect(self._on_analysis_notification)
+        self._chat_controller.code_file_ready.connect(self._on_code_file_ready)
         
         # Connect confirmation action signal
         self._chat_controller.confirm_action_requested.connect(self._on_confirm_action_requested)
@@ -914,6 +930,14 @@ class JARVISApp:
         recommendation_id = data.get("id")
         bubble_message = data.get("bubble_message", "")
         
+        # 중복 추천 방지: 이미 표시된 추천은 무시
+        if recommendation_id in self._shown_recommendation_ids:
+            print(f"⏭️ 중복 추천 무시: {keyword} (id={recommendation_id})")
+            return
+        
+        # 표시된 추천 ID 기록
+        self._shown_recommendation_ids.add(recommendation_id)
+        
         # 말풍선 메시지가 있으면 사용, 없으면 기본 메시지
         message = bubble_message if bubble_message else f"{keyword}에 대해 알아볼까요?"
         
@@ -938,17 +962,25 @@ class JARVISApp:
         )
         print(f"📌 Recommendation toast shown: {keyword} (id={recommendation_id})")
     
-    def _show_pending_recommendations(self):
-        """앱 시작 시 대기 중인 추천을 API에서 가져와 토스트로 표시."""
+    def _show_recommendation_after_greeting(self):
+        """인사 메시지 후 추천을 표시 (WebSocket에서 오지 않은 경우 API에서 가져옴)."""
         import requests
         
         token, user_id = self._auth_controller.get_credentials()
         if not token:
             return
         
+        # 디버그: 실제 사용되는 URL 출력
+        request_url = f"{API_BASE_URL}/api/v2/recommendations"
+        print(f"🔍 대기 추천 조회 URL: {request_url}")
+        # URL 바이트 확인 (숨겨진 문자 체크)
+        from urllib.parse import urlparse
+        parsed = urlparse(request_url)
+        print(f"🔍 Host bytes: {[hex(ord(c)) for c in parsed.hostname]}")
+        
         try:
             response = requests.get(
-                f"{API_BASE_URL}/api/v2/recommendations",
+                request_url,
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=5
             )
@@ -958,25 +990,14 @@ class JARVISApp:
                 if data.get("success"):
                     recommendations = data.get("recommendations", [])
                     if recommendations:
-                        # 가장 최근 추천 1개만 토스트로 표시 (여러 개면 UI가 복잡해짐)
+                        # 가장 최근 추천 1개만 토스트로 표시
                         latest_rec = recommendations[0]
                         print(f"📌 대기 중인 추천 발견: {latest_rec.get('keyword')}")
                         self._on_recommendation(latest_rec)
                     else:
-                        # 추천이 없으면 환영 메시지 표시
-                        self._toast_manager.info(
-                            "JARVIS 시작됨",
-                            "안녕하세요! 무엇을 도와드릴까요?",
-                            duration_ms=4000
-                        )
+                        print("ℹ️ 대기 중인 추천 없음")
         except Exception as e:
             print(f"⚠️ 대기 중인 추천 조회 실패: {e}")
-            # 실패해도 환영 메시지 표시
-            self._toast_manager.info(
-                "JARVIS 시작됨",
-                "안녕하세요! 무엇을 도와드릴까요?",
-                duration_ms=4000
-            )
     
     def _handle_recommendation_response(self, recommendation_id: int, keyword: str, action: str):
         """Handle user response to recommendation (accept/reject) - async."""
@@ -1095,19 +1116,21 @@ class JARVISApp:
         self._toast_manager.error("오류", error_msg)
     
     def _on_report_notification(self, data: dict):
-        """Handle report notification - Show toast with folder action."""
+        """Handle report notification - Download report and save locally."""
         success = data.get("success", False)
         keyword = data.get("keyword", "Report")
         message = data.get("message", "")
+        server_file_path = data.get("file_path", "")
+        file_name = data.get("file_name", "")
         
-        if success:
-            # 항상 클라이언트 로컬의 기본 Reports 폴더 사용
-            # (서버 경로는 Linux 경로일 수 있으므로 사용하지 않음)
+        if success and server_file_path:
+            # 서버에서 보고서 다운로드 및 로컬 저장
+            self._download_and_save_report(keyword, server_file_path, file_name)
+        elif success:
+            # 파일 경로가 없는 경우 (예: 이미 로컬에 저장됨)
             import os
             from pathlib import Path
             local_folder = str(Path.home() / "Documents" / "JARVIS" / "Reports")
-            
-            # 폴더가 없으면 생성
             os.makedirs(local_folder, exist_ok=True)
             
             self._toast_manager.success_with_folder_action(
@@ -1123,6 +1146,234 @@ class JARVISApp:
                 duration_ms=8000
             )
             print(f"❌ Report failed toast: {keyword}")
+    
+    def _download_and_save_report(self, keyword: str, server_file_path: str, file_name: str):
+        """Download report from server and save to local folder."""
+        import os
+        from pathlib import Path
+        from urllib.parse import quote
+        
+        # 로컬 저장 폴더
+        local_folder = Path.home() / "Documents" / "JARVIS" / "Reports"
+        local_folder.mkdir(parents=True, exist_ok=True)
+        
+        # 로컬 파일 경로
+        local_file_path = local_folder / file_name
+        
+        # 토큰 가져오기
+        token = self._auth_controller.get_token()
+        if not token:
+            self._toast_manager.error(
+                "다운로드 실패",
+                "인증 토큰이 없습니다. 다시 로그인해주세요."
+            )
+            return
+        
+        # 백그라운드에서 다운로드
+        from PyQt6.QtCore import QThread, pyqtSignal
+        
+        class ReportDownloadWorker(QThread):
+            finished = pyqtSignal(str, str)  # local_path, error_msg
+            
+            def __init__(self, api_url: str, token: str, server_path: str, local_path: str):
+                super().__init__()
+                self._api_url = api_url
+                self._token = token
+                self._server_path = server_path
+                self._local_path = local_path
+            
+            def run(self):
+                import requests
+                from urllib.parse import quote
+                
+                try:
+                    # 서버의 다운로드 API 호출
+                    encoded_path = quote(self._server_path, safe='')
+                    url = f"{self._api_url}/api/v2/reports/download?file_path={encoded_path}"
+                    
+                    response = requests.get(
+                        url,
+                        headers={"Authorization": f"Bearer {self._token}"},
+                        timeout=60,
+                        stream=True
+                    )
+                    
+                    if response.status_code == 200:
+                        # 파일 저장
+                        with open(self._local_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                        self.finished.emit(self._local_path, "")
+                    else:
+                        error_msg = f"다운로드 실패: HTTP {response.status_code}"
+                        try:
+                            error_data = response.json()
+                            error_msg = error_data.get("detail", error_msg)
+                        except:
+                            pass
+                        self.finished.emit("", error_msg)
+                        
+                except Exception as e:
+                    self.finished.emit("", str(e))
+        
+        # 진행 중 토스트 표시
+        self._toast_manager.info(
+            "📥 다운로드 중",
+            f"{keyword} 리포트를 다운로드하고 있습니다...",
+            duration_ms=30000
+        )
+        
+        # 워커 생성 및 시작
+        worker = ReportDownloadWorker(
+            api_url=API_BASE_URL,
+            token=token,
+            server_path=server_file_path,
+            local_path=str(local_file_path)
+        )
+        
+        def on_download_finished(local_path: str, error_msg: str):
+            # 이전 토스트 숨기기 (새 토스트로 대체됨)
+            if local_path:
+                self._toast_manager.success_with_folder_action(
+                    "📄 리포트 완료",
+                    f"{keyword} 리포트가 저장되었습니다.\n폴더를 열어 확인하시겠습니까?",
+                    str(local_folder)
+                )
+                print(f"📄 Report downloaded and saved: {local_path}")
+            else:
+                self._toast_manager.error(
+                    "📥 다운로드 실패",
+                    f"리포트 다운로드에 실패했습니다: {error_msg}",
+                    duration_ms=8000
+                )
+                print(f"❌ Report download failed: {error_msg}")
+            
+            # 워커 정리
+            worker.deleteLater()
+        
+        worker.finished.connect(on_download_finished)
+        
+        # 워커 참조 유지
+        if not hasattr(self, '_download_workers'):
+            self._download_workers = []
+        self._download_workers.append(worker)
+        
+        worker.start()
+    
+    def _on_code_file_ready(self, data: dict):
+        """Handle code file ready - Download and save to local folder."""
+        server_file_path = data.get("file_path", "")
+        file_name = data.get("file_name", "")
+        
+        if server_file_path and file_name:
+            self._download_and_save_code(server_file_path, file_name)
+    
+    def _download_and_save_code(self, server_file_path: str, file_name: str):
+        """Download code file from server and save to local folder."""
+        import os
+        from pathlib import Path
+        from urllib.parse import quote
+        
+        # 로컬 저장 폴더
+        local_folder = Path.home() / "Documents" / "JARVIS" / "code"
+        local_folder.mkdir(parents=True, exist_ok=True)
+        
+        # 로컬 파일 경로
+        local_file_path = local_folder / file_name
+        
+        # 토큰 가져오기
+        token = self._auth_controller.get_token()
+        if not token:
+            self._toast_manager.error(
+                "다운로드 실패",
+                "인증 토큰이 없습니다. 다시 로그인해주세요."
+            )
+            return
+        
+        # 백그라운드에서 다운로드
+        from PyQt6.QtCore import QThread, pyqtSignal
+        
+        class CodeDownloadWorker(QThread):
+            finished = pyqtSignal(str, str)  # local_path, error_msg
+            
+            def __init__(self, api_url: str, token: str, server_path: str, local_path: str):
+                super().__init__()
+                self._api_url = api_url
+                self._token = token
+                self._server_path = server_path
+                self._local_path = local_path
+            
+            def run(self):
+                import requests
+                from urllib.parse import quote
+                
+                try:
+                    # 서버의 다운로드 API 호출
+                    encoded_path = quote(self._server_path, safe='')
+                    url = f"{self._api_url}/api/v2/code/download?file_path={encoded_path}"
+                    
+                    response = requests.get(
+                        url,
+                        headers={"Authorization": f"Bearer {self._token}"},
+                        timeout=60,
+                        stream=True
+                    )
+                    
+                    if response.status_code == 200:
+                        # 파일 저장
+                        with open(self._local_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                        self.finished.emit(self._local_path, "")
+                    else:
+                        error_msg = f"다운로드 실패: HTTP {response.status_code}"
+                        try:
+                            error_data = response.json()
+                            error_msg = error_data.get("detail", error_msg)
+                        except:
+                            pass
+                        self.finished.emit("", error_msg)
+                        
+                except Exception as e:
+                    self.finished.emit("", str(e))
+        
+        # 워커 생성 및 시작
+        worker = CodeDownloadWorker(
+            api_url=API_BASE_URL,
+            token=token,
+            server_path=server_file_path,
+            local_path=str(local_file_path)
+        )
+        
+        def on_download_finished(local_path: str, error_msg: str):
+            if local_path:
+                self._toast_manager.success_with_folder_action(
+                    "💾 코드 저장 완료",
+                    f"코드 파일이 저장되었습니다: {file_name}\n폴더를 열어 확인하시겠습니까?",
+                    str(local_folder)
+                )
+                print(f"💾 Code file downloaded and saved: {local_path}")
+            else:
+                self._toast_manager.error(
+                    "💾 코드 다운로드 실패",
+                    f"코드 파일 다운로드에 실패했습니다: {error_msg}",
+                    duration_ms=8000
+                )
+                print(f"❌ Code download failed: {error_msg}")
+            
+            # 워커 정리
+            worker.deleteLater()
+        
+        worker.finished.connect(on_download_finished)
+        
+        # 워커 참조 유지
+        if not hasattr(self, '_download_workers'):
+            self._download_workers = []
+        self._download_workers.append(worker)
+        
+        worker.start()
     
     def _on_analysis_notification(self, data: dict):
         """Handle analysis notification - Show toast with dashboard action."""
@@ -1182,9 +1433,16 @@ class JARVISApp:
                 )
                 print("🔄 Initial setup in progress - loading animation started")
             else:
-                # 앱 시작 시 대기 중인 추천 확인 및 표시
+                # 먼저 인사 메시지 표시
+                self._toast_manager.info(
+                    "👋 JARVIS 시작됨",
+                    "안녕하세요! 무엇을 도와드릴까요?",
+                    duration_ms=4000
+                )
+                
+                # 인사 메시지가 사라진 후 추천 메시지 표시 (4.5초 후)
                 from PyQt6.QtCore import QTimer
-                QTimer.singleShot(2000, self._show_pending_recommendations)
+                QTimer.singleShot(4500, self._show_recommendation_after_greeting)
         else:
             self._toast_manager.warning(
                 "로그인 필요",

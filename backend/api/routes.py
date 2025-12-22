@@ -12,7 +12,7 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from typing import List, Dict, Any, Optional
 import tempfile
 import hashlib
@@ -2047,3 +2047,129 @@ async def delete_analysis(
     except Exception as e:
         logger.error(f"분석 삭제 오류: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 보고서 다운로드 API
+# ============================================================================
+
+@router.get("/reports/download")
+async def download_report(
+    file_path: str,
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    서버에서 생성된 보고서 파일을 다운로드합니다.
+    
+    Args:
+        file_path: 서버상의 보고서 파일 경로 (WebSocket 알림에서 받은 경로)
+    
+    Returns:
+        FileResponse: 다운로드 가능한 파일 응답
+    """
+    import os
+    from pathlib import Path as PathLib
+    
+    logger.info(f"📥 보고서 다운로드 요청: user_id={user_id}, file_path={file_path}")
+    
+    # 보안: 경로 검증 - reports 디렉터리 내 파일만 허용
+    try:
+        # 서버의 reports 디렉터리 경로
+        reports_base = PathLib(settings.REPORTS_DIR).resolve()
+        requested_path = PathLib(file_path).resolve()
+        
+        # 경로가 reports 디렉터리 내에 있는지 확인
+        if not str(requested_path).startswith(str(reports_base)):
+            logger.warning(f"보안 경고: 허용되지 않은 경로 접근 시도: {file_path}")
+            raise HTTPException(status_code=403, detail="허용되지 않은 파일 경로입니다.")
+        
+        # 파일 존재 확인
+        if not requested_path.exists():
+            logger.error(f"파일을 찾을 수 없음: {file_path}")
+            raise HTTPException(status_code=404, detail="보고서 파일을 찾을 수 없습니다.")
+        
+        # 파일 이름 추출
+        file_name = requested_path.name
+        
+        # Content-Disposition 헤더를 위한 파일명 인코딩
+        from urllib.parse import quote
+        encoded_filename = quote(file_name)
+        
+        logger.info(f"📥 보고서 파일 전송: {file_name}")
+        
+        return FileResponse(
+            path=str(requested_path),
+            filename=file_name,
+            media_type="application/pdf" if file_name.endswith(".pdf") else "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"보고서 다운로드 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"파일 다운로드 중 오류 발생: {str(e)}")
+
+
+@router.get("/code/download")
+async def download_code_file(
+    file_path: str,
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    서버에서 생성된 코드 파일을 다운로드합니다.
+    
+    Args:
+        file_path: 서버상의 코드 파일 경로
+    
+    Returns:
+        FileResponse: 다운로드 가능한 파일 응답
+    """
+    import os
+    from pathlib import Path as PathLib
+    
+    logger.info(f"📥 코드 파일 다운로드 요청: user_id={user_id}, file_path={file_path}")
+    
+    # 보안: 경로 검증 - code 디렉터리 내 파일만 허용
+    try:
+        # 서버의 code 디렉터리 경로
+        home = os.path.expanduser("~")
+        code_base = PathLib(home) / "Documents" / "JARVIS" / "code"
+        code_base = code_base.resolve()
+        requested_path = PathLib(file_path).resolve()
+        
+        # 경로가 code 디렉터리 내에 있는지 확인
+        if not str(requested_path).startswith(str(code_base)):
+            logger.warning(f"보안 경고: 허용되지 않은 경로 접근 시도: {file_path}")
+            raise HTTPException(status_code=403, detail="허용되지 않은 파일 경로입니다.")
+        
+        # 파일 존재 확인
+        if not requested_path.exists():
+            logger.error(f"파일을 찾을 수 없음: {file_path}")
+            raise HTTPException(status_code=404, detail="코드 파일을 찾을 수 없습니다.")
+        
+        # 파일 이름 추출
+        file_name = requested_path.name
+        
+        # Content-Disposition 헤더를 위한 파일명 인코딩
+        from urllib.parse import quote
+        encoded_filename = quote(file_name)
+        
+        logger.info(f"📥 코드 파일 전송: {file_name}")
+        
+        return FileResponse(
+            path=str(requested_path),
+            filename=file_name,
+            media_type="text/x-python" if file_name.endswith(".py") else "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"코드 파일 다운로드 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"파일 다운로드 중 오류 발생: {str(e)}")

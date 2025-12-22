@@ -62,33 +62,53 @@ class DashboardDataWorker(QThread):
                 data = response.json()
                 if data.get("success"):
                     self.data_loaded.emit(data.get("data", {}))
+                else:
+                    # API returned success=False
+                    self.error_occurred.emit(data.get("message", "대시보드 요약 조회 실패"))
+                    return
+            elif response.status_code == 401:
+                self.error_occurred.emit("인증이 만료되었습니다. 다시 로그인해주세요.")
+                return
+            else:
+                self.error_occurred.emit(f"서버 오류: HTTP {response.status_code}")
+                return
             
-            # Notes
-            notes_response = requests.get(
-                f"{self._api_base}/dashboard/notes",
-                headers=headers,
-                timeout=10
-            )
+            # Notes (실패해도 계속 진행)
+            try:
+                notes_response = requests.get(
+                    f"{self._api_base}/dashboard/notes",
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if notes_response.status_code == 200:
+                    notes_data = notes_response.json()
+                    if notes_data.get("success"):
+                        self.notes_loaded.emit(notes_data.get("data", {}).get("notes", []))
+            except Exception as e:
+                print(f"⚠️ 노트 로드 실패 (무시): {e}")
             
-            if notes_response.status_code == 200:
-                notes_data = notes_response.json()
-                if notes_data.get("success"):
-                    self.notes_loaded.emit(notes_data.get("data", {}).get("notes", []))
-            
-            # Latest analysis
-            analysis_response = requests.get(
-                f"{self._api_base}/dashboard/analyses/latest",
-                headers=headers,
-                timeout=10
-            )
-            
-            if analysis_response.status_code == 200:
-                analysis_data = analysis_response.json()
-                if analysis_data.get("success"):
-                    analysis = analysis_data.get("data", {}).get("analysis")
-                    if analysis:
-                        self.analysis_loaded.emit(analysis)
+            # Latest analysis (실패해도 계속 진행)
+            try:
+                analysis_response = requests.get(
+                    f"{self._api_base}/dashboard/analyses/latest",
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if analysis_response.status_code == 200:
+                    analysis_data = analysis_response.json()
+                    if analysis_data.get("success"):
+                        analysis = analysis_data.get("data", {}).get("analysis")
+                        if analysis:
+                            self.analysis_loaded.emit(analysis)
+            except Exception as e:
+                print(f"⚠️ 분석 로드 실패 (무시): {e}")
                         
+        except requests.exceptions.Timeout:
+            self.error_occurred.emit("서버 응답 시간 초과")
+        except requests.exceptions.ConnectionError:
+            self.error_occurred.emit("서버에 연결할 수 없습니다")
         except Exception as e:
             self.error_occurred.emit(str(e))
 
@@ -565,7 +585,11 @@ class DashboardWidget(QWidget):
     
     def _on_error(self, error: str):
         """Handle data loading error."""
-        self._profile_content.setText(f"❌ 데이터 로드 실패: {error}")
+        try:
+            self._profile_content.setText(f"❌ 데이터 로드 실패: {error}")
+            print(f"⚠️ 대시보드 로드 에러: {error}")
+        except RuntimeError:
+            pass  # 위젯이 이미 삭제됨
     
     def _update_profile_ui(self):
         """Update profile section."""

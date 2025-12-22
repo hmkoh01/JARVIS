@@ -429,8 +429,10 @@ class ToastManager(QWidget):
     """
     
     # Configuration
-    MARGIN_RIGHT = 100
-    MARGIN_BOTTOM = 120  # 플로팅 아이콘(~80px) 위에 표시되도록 여유 공간 확보
+    # 플로팅 버튼: 120x120px, 화면 우하단에서 30px 여백
+    # 버튼 영역: x=right-150 ~ right-30, y=bottom-150 ~ bottom-30
+    MARGIN_RIGHT = 160   # 버튼 왼쪽 끝(right-150)보다 더 왼쪽에 표시
+    MARGIN_BOTTOM = 170  # 버튼 위쪽 끝(bottom-150)보다 더 위에 표시
     SPACING = 10
     MAX_TOASTS = 5
     
