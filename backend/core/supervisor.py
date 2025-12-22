@@ -1113,6 +1113,37 @@ JSON 응답만 제공해주세요:"""
                         "elapsed_time": elapsed
                     }
                     
+                    # requires_confirmation이 있으면 다음 에이전트 실행 중단
+                    if metadata.get("requires_confirmation"):
+                        remaining = remaining_agents[i+1:]
+                        logger.info("[MAS-CONTINUE] 확인 대기 중 | 남은 에이전트: %s", remaining)
+                        
+                        # waiting_confirmation 이벤트 yield
+                        yield {
+                            "type": "waiting_confirmation",
+                            "agent": agent_type,
+                            "remaining_agents": remaining,
+                            "sub_tasks": sub_tasks,
+                            "original_message": user_intent.message,
+                            "metadata": metadata,
+                            "previous_results": prev_results
+                        }
+                        
+                        # 스트리밍 종료
+                        total_time = time.time() - start_time
+                        yield {
+                            "type": "complete",
+                            "total_agents": order,
+                            "successful": len(completed_agents),
+                            "failed": len(failed_agents),
+                            "completed_agents": completed_agents,
+                            "failed_agents": failed_agents,
+                            "total_time": total_time,
+                            "waiting_confirmation": True,
+                            "remaining_agents": remaining
+                        }
+                        return  # 스트리밍 종료
+                    
                 except Exception as e:
                     error_msg = str(e)
                     logger.error("[MAS-CONTINUE]   │  └─ %s 오류: %s", agent_type, error_msg, exc_info=True)

@@ -29,6 +29,7 @@ class NotificationType(Enum):
     REPORT_FAILED = "report_failed"
     ANALYSIS_COMPLETED = "analysis_completed"
     ANALYSIS_FAILED = "analysis_failed"
+    INITIAL_SETUP_COMPLETE = "initial_setup_complete"
     CONNECTION_STATUS = "connection_status"
     UNKNOWN = "unknown"
 
@@ -98,6 +99,7 @@ class NotificationWebSocket(QObject):
     report_failed = pyqtSignal(dict)
     analysis_completed = pyqtSignal(dict)
     analysis_failed = pyqtSignal(dict)
+    initial_setup_complete = pyqtSignal(dict)
     
     # Configuration
     INITIAL_RECONNECT_DELAY = 5
@@ -249,6 +251,9 @@ class NotificationWebSocket(QObject):
                 
             elif notification.type == NotificationType.ANALYSIS_FAILED:
                 self.analysis_failed.emit(notification.data)
+            
+            elif notification.type == NotificationType.INITIAL_SETUP_COMPLETE:
+                self.initial_setup_complete.emit(notification.data)
                 
         except Exception as e:
             print(f"[WebSocket] Error processing message: {e}")

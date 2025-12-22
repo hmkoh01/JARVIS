@@ -272,6 +272,9 @@ class JARVISApp:
         self._progress_poll_timer: Optional[QTimer] = None
         self._last_progress_milestone = 0  # 진행률 마일스톤 추적
         self._data_collector = None  # 클라이언트 측 데이터 수집기
+        self._initial_setup_completed_time: Optional[float] = None  # 초기 설정 완료 시간 (토스트 억제용)
+        self._is_waiting_for_backend_analysis = False  # 백엔드 분석 대기 상태
+        self._backend_analysis_timeout_timer: Optional[QTimer] = None  # 백엔드 분석 타임아웃 타이머
         
         # 중복 추천 표시 방지를 위한 ID 추적
         self._shown_recommendation_ids: set = set()
@@ -362,9 +365,12 @@ class JARVISApp:
         self._setup_floating_button()
         
         # 초기 설정이 진행 중이면 로딩 애니메이션 시작
+        print(f"🔍 플로팅 버튼 생성 완료, _is_initial_setup_in_progress={self._is_initial_setup_in_progress}")
         if self._is_initial_setup_in_progress:
             self._floating_button.set_loading(True)
             print("🔄 플로팅 버튼 생성 후 로딩 애니메이션 시작")
+            # 로딩 상태 확인
+            print(f"🔍 플로팅 버튼 로딩 상태: {self._floating_button.is_loading()}")
         
         # Initialize chat controller
         self._init_chat_controller()
@@ -570,18 +576,17 @@ class JARVISApp:
         self._initial_setup_progress = 0
         self._initial_setup_message = "📁 클라이언트 데이터 수집 시작..."
         self._last_progress_milestone = 0  # 진행률 마일스톤 추적
+        print(f"🔍 _start_client_data_collection: _is_initial_setup_in_progress={self._is_initial_setup_in_progress}")
         
         # 플로팅 버튼에 로딩 표시
         if self._floating_button:
             self._floating_button.set_loading(True)
+            print("🔍 _start_client_data_collection: 플로팅 버튼에 로딩 시작")
+        else:
+            print("🔍 _start_client_data_collection: 플로팅 버튼이 아직 없음")
         
-        # 시작 알림
-        if self._toast_manager:
-            self._toast_manager.info(
-                "📁 데이터 수집 시작",
-                "로컬 파일을 스캔하고 있습니다...",
-                duration_ms=4000
-            )
+        # 시작 알림 제거 - 완료 토스트 하나만 표시
+        # (수집이 빨리 완료되면 시작/완료 토스트가 겹침)
         
         self._data_collector.start()
         print("✅ Client-side data collection started")
@@ -592,16 +597,11 @@ class JARVISApp:
         self._initial_setup_message = message
         print(f"📊 Collection progress: {progress:.1f}% - {message}")
         
-        # 25%, 50%, 75% 마일스톤에서 알림 표시
+        # 마일스톤 토스트 제거 - 완료 시에만 토스트 표시
+        # (수집이 빨리 완료되면 진행률 토스트들이 겹침)
         milestone = int(progress // 25) * 25
         if milestone > 0 and milestone > self._last_progress_milestone and milestone < 100:
             self._last_progress_milestone = milestone
-            if self._toast_manager:
-                self._toast_manager.info(
-                    f"📊 데이터 수집 {milestone}%",
-                    message,
-                    duration_ms=3000
-                )
     
     def _on_file_processed(self, file_name: str):
         """Handle individual file processed."""
@@ -609,9 +609,62 @@ class JARVISApp:
         pass
     
     def _on_collection_completed(self):
-        """Handle collection completion."""
+        """Handle collection completion - wait for backend analysis."""
         print("✅ Client-side data collection completed!")
+        print("⏳ Waiting for backend analysis...")
+        
+        # 백엔드 분석 대기 상태로 전환
+        self._is_waiting_for_backend_analysis = True
+        self._initial_setup_message = "백엔드에서 분석 중..."
+        
+        # 플로팅 버튼은 계속 로딩 상태 유지
+        if self._floating_button:
+            self._floating_button.set_loading(True)
+        
+        # 타임아웃 설정 (60초 후 자동 완료)
+        self._backend_analysis_timeout_timer = QTimer()
+        self._backend_analysis_timeout_timer.setSingleShot(True)
+        self._backend_analysis_timeout_timer.timeout.connect(self._on_backend_analysis_timeout)
+        self._backend_analysis_timeout_timer.start(60000)  # 60초
+    
+    def _on_backend_analysis_timeout(self):
+        """Handle backend analysis timeout - complete setup anyway."""
+        print("⏰ Backend analysis timeout - completing setup")
+        if self._is_waiting_for_backend_analysis:
+            self._is_waiting_for_backend_analysis = False
+            self._on_initial_setup_complete()
+    
+    def _on_backend_analysis_complete(self):
+        """Handle backend analysis completion (called when first recommendation arrives)."""
+        if not self._is_waiting_for_backend_analysis:
+            return
+        
+        print("✅ Backend analysis completed!")
+        self._is_waiting_for_backend_analysis = False
+        
+        # 타임아웃 타이머 취소
+        if self._backend_analysis_timeout_timer:
+            self._backend_analysis_timeout_timer.stop()
+            self._backend_analysis_timeout_timer = None
+        
         self._on_initial_setup_complete()
+    
+    def _on_backend_initial_setup_complete(self, data: dict):
+        """Handle initial setup complete WebSocket notification from backend.
+        
+        This is called when backend finishes all embedding/indexing work.
+        """
+        print(f"🎉 Backend initial setup complete notification: {data}")
+        
+        if not self._is_waiting_for_backend_analysis:
+            print("   ↳ Not waiting for backend analysis, ignoring")
+            return
+        
+        browser_count = data.get("browser_count", 0)
+        file_count = data.get("file_count", 0)
+        print(f"   ↳ Processed: {file_count} files, {browser_count} browser chunks")
+        
+        self._on_backend_analysis_complete()
     
     def _on_collection_error(self, error_msg: str):
         """Handle collection error."""
@@ -710,6 +763,7 @@ class JARVISApp:
     
     def _on_initial_setup_complete(self):
         """Handle initial setup completion."""
+        import time
         print("✅ Initial setup completed!")
         
         # Stop progress polling
@@ -720,15 +774,18 @@ class JARVISApp:
         self._is_initial_setup_in_progress = False
         self._initial_setup_progress = 100
         
+        # 초기 설정 완료 시간 기록 (다른 토스트 억제용)
+        self._initial_setup_completed_time = time.time()
+        
         # Stop loading animation on floating button
         if self._floating_button:
             self._floating_button.set_loading(False)
         
-        # Show completion toast
+        # Show completion toast (하나의 통합 메시지)
         if self._toast_manager:
             self._toast_manager.success(
                 "🎉 초기 설정 완료",
-                "데이터 수집이 완료되었습니다! 이제 JARVIS를 사용할 수 있습니다.",
+                "데이터 수집 및 분석이 완료되었습니다!\n이제 JARVIS를 사용할 수 있습니다.",
                 duration_ms=6000
             )
     
@@ -786,16 +843,22 @@ class JARVISApp:
     def _connect_loading_signals(self):
         """Connect loading state signals to floating button animation."""
         # API Client - general requests
+        # 초기 설정 중에는 로딩 종료 시그널 무시
         if self._api_client:
             self._api_client.request_started.connect(
                 lambda: self._floating_button.set_loading(True)
             )
             self._api_client.request_completed.connect(
-                lambda _: self._floating_button.set_loading(False)
+                lambda _: self._stop_loading_if_not_initial_setup()
             )
             self._api_client.request_error.connect(
-                lambda _: self._floating_button.set_loading(False)
+                lambda _: self._stop_loading_if_not_initial_setup()
             )
+    
+    def _stop_loading_if_not_initial_setup(self):
+        """초기 설정 중이 아닐 때만 로딩 애니메이션을 중지합니다."""
+        if not self._is_initial_setup_in_progress:
+            self._floating_button.set_loading(False)
     
     def _setup_dashboard(self):
         """Set up dashboard and recommendations with credentials."""
@@ -807,11 +870,12 @@ class JARVISApp:
                 self._main_window.dashboard_widget.set_credentials(token, user_id)
                 
                 # Connect dashboard loading signals to floating button
+                # 초기 설정 중에는 로딩 종료 시그널 무시
                 self._main_window.dashboard_widget.loading_started.connect(
                     lambda: self._floating_button.set_loading(True)
                 )
                 self._main_window.dashboard_widget.loading_finished.connect(
-                    lambda: self._floating_button.set_loading(False)
+                    self._stop_loading_if_not_initial_setup
                 )
                 
                 self._main_window.dashboard_widget.load_data()
@@ -822,11 +886,12 @@ class JARVISApp:
                 self._main_window.recommendations_widget.set_credentials(token, user_id)
                 
                 # Connect recommendations loading signals to floating button
+                # 초기 설정 중에는 로딩 종료 시그널 무시
                 self._main_window.recommendations_widget.loading_started.connect(
                     lambda: self._floating_button.set_loading(True)
                 )
                 self._main_window.recommendations_widget.loading_finished.connect(
-                    lambda: self._floating_button.set_loading(False)
+                    self._stop_loading_if_not_initial_setup
                 )
                 
                 self._main_window.recommendations_widget.load_data()
@@ -921,6 +986,7 @@ class JARVISApp:
         self._chat_controller.report_notification.connect(self._on_report_notification)
         self._chat_controller.analysis_notification.connect(self._on_analysis_notification)
         self._chat_controller.code_file_ready.connect(self._on_code_file_ready)
+        self._chat_controller.initial_setup_complete.connect(self._on_backend_initial_setup_complete)
         
         # Connect confirmation action signal
         self._chat_controller.confirm_action_requested.connect(self._on_confirm_action_requested)
@@ -1067,16 +1133,39 @@ class JARVISApp:
         self._create_report_direct(keyword, recommendation_id)
     
     def _on_confirmation_rejected(self, metadata: dict):
-        """Handle confirmation rejected."""
+        """Handle confirmation rejected - skip current agent and proceed to next."""
         keyword = metadata.get('keyword', '')
-        # pending continuation 클리어
-        if hasattr(self, '_pending_continuation'):
-            self._pending_continuation = None
-        self._toast_manager.info(
-            "작업 취소",
-            f"'{keyword}' 작업이 취소되었습니다.",
-            duration_ms=3000
-        )
+        action = metadata.get('action', '')
+        remaining_agents = metadata.get('remaining_agents', [])
+        
+        # 현재 에이전트를 건너뛰고 다음 에이전트로 진행
+        if remaining_agents:
+            # 다음 에이전트 정보
+            next_agents = remaining_agents.copy()
+            agent_names = ', '.join(next_agents)
+            
+            # 다음 에이전트 실행 (건너뛰기 메시지 포함)
+            pending_data = {
+                'remaining_agents': next_agents,
+                'sub_tasks': metadata.get('sub_tasks', {}),
+                'original_message': metadata.get('original_message', ''),
+                'previous_results': metadata.get('previous_results', [])
+            }
+            self._execute_remaining_agents(
+                pending_data, 
+                intro_message=f"⏭️ '{keyword}' 작업을 건너뛰었어요. {agent_names} 작업을 진행할게요."
+            )
+        else:
+            # 남은 에이전트가 없으면 전체 종료
+            if hasattr(self, '_pending_continuation'):
+                self._pending_continuation = None
+            
+            # 채팅에 취소 메시지 추가
+            if hasattr(self._main_window, 'chat_widget'):
+                self._main_window.chat_widget.add_assistant_message(
+                    f"⏭️ '{keyword}' 작업을 건너뛰었어요. 모든 작업이 완료되었습니다.",
+                    typing_animation=True
+                )
     
     def _execute_code_generation(self, keyword: str, metadata: dict):
         """
@@ -1130,9 +1219,9 @@ class JARVISApp:
         # ChatController의 스트리밍 메서드 사용
         self._chat_controller.send_continue_agents_request(request_data)
     
-    def _execute_remaining_agents(self, pending_data: dict):
+    def _execute_remaining_agents(self, pending_data: dict, intro_message: str = None):
         """
-        보고서 완료 후 남은 에이전트들을 실행합니다.
+        남은 에이전트들을 실행합니다.
         /continue-agents API를 호출하여 스트리밍 응답을 처리합니다.
         
         Args:
@@ -1142,18 +1231,20 @@ class JARVISApp:
                 'original_message': '원본 메시지',
                 'previous_results': [...]
             }
+            intro_message: 커스텀 안내 메시지 (None이면 기본 메시지 사용)
         """
         remaining_agents = pending_data.get('remaining_agents', [])
         if not remaining_agents:
             return
         
-        # 채팅에 안내 메시지 추가
+        # 채팅에 안내 메시지 추가 (커스텀 메시지 또는 기본 메시지)
         agent_names = ', '.join(remaining_agents)
         if hasattr(self._main_window, 'chat_widget'):
-            self._main_window.chat_widget.add_assistant_message(
-                f"🔄 보고서가 완료되었어요! 이어서 {agent_names} 작업을 진행할게요.",
-                typing_animation=True
-            )
+            if intro_message:
+                message = intro_message
+            else:
+                message = f"🔄 이어서 {agent_names} 작업을 진행할게요."
+            self._main_window.chat_widget.add_assistant_message(message, typing_animation=True)
         
         # ChatController를 통해 continue-agents 요청
         token, user_id = self._auth_controller.get_credentials()
@@ -1204,6 +1295,7 @@ class JARVISApp:
     
     def _on_recommendation(self, data: dict):
         """Handle recommendation notification - Show toast with action buttons."""
+        import time
         from views.toast_notification import ToastAction
         
         keyword = data.get("keyword", "")
@@ -1217,6 +1309,16 @@ class JARVISApp:
         
         # 표시된 추천 ID 기록
         self._shown_recommendation_ids.add(recommendation_id)
+        
+        # 추천 위젯에 직접 추가 (토스트 표시 여부와 관계없이)
+        if hasattr(self._main_window, 'recommendations_widget'):
+            self._main_window.recommendations_widget.add_recommendation(data)
+            print(f"📋 추천 위젯에 직접 추가 완료")
+        
+        # 초기 설정 완료 직후 5초 이내면 토스트 억제 (이미 통합 메시지로 표시됨)
+        if self._initial_setup_completed_time and (time.time() - self._initial_setup_completed_time) < 5:
+            print(f"📌 Recommendation added (toast suppressed - initial setup just completed): {keyword}")
+            return
         
         # 말풍선 메시지가 있으면 사용, 없으면 기본 메시지
         message = bubble_message if bubble_message else f"{keyword}에 대해 알아볼까요?"
@@ -1241,11 +1343,6 @@ class JARVISApp:
             actions=actions
         )
         print(f"📌 Recommendation toast shown: {keyword} (id={recommendation_id})")
-        
-        # 추천 위젯에 직접 추가 (API 재조회 대신)
-        if hasattr(self._main_window, 'recommendations_widget'):
-            self._main_window.recommendations_widget.add_recommendation(data)
-            print(f"📋 추천 위젯에 직접 추가 완료")
     
     def _show_recommendation_after_greeting(self):
         """인사 메시지 후 추천을 표시 (WebSocket에서 오지 않은 경우 API에서 가져옴)."""
@@ -1693,6 +1790,7 @@ class JARVISApp:
     
     def _on_analysis_notification(self, data: dict):
         """Handle analysis notification - Show toast with dashboard action."""
+        import time
         success = data.get("success", False)
         title = data.get("title", "Analysis")
         message = data.get("message", "")
@@ -1701,6 +1799,11 @@ class JARVISApp:
             # Refresh dashboard
             if hasattr(self._main_window, 'dashboard_widget'):
                 self._main_window.dashboard_widget.load_data()
+            
+            # 초기 설정 완료 직후 5초 이내면 토스트 억제 (이미 통합 메시지로 표시됨)
+            if self._initial_setup_completed_time and (time.time() - self._initial_setup_completed_time) < 5:
+                print(f"📊 Analysis completed (toast suppressed - initial setup just completed): {title}")
+                return
             
             # 대시보드 열기 액션과 함께 토스트 표시
             def open_dashboard():

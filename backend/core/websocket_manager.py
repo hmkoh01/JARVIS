@@ -220,6 +220,30 @@ class WebSocketManager:
         logger.warning(f"📊 분석 실패 알림 전송: user_id={user_id}, title={title}, reason={reason}")
         return await self.send_to_user(user_id, message)
     
+    async def broadcast_initial_setup_complete(
+        self, 
+        user_id: int,
+        file_count: int = 0,
+        browser_count: int = 0
+    ):
+        """초기 설정(임베딩 포함) 완료를 사용자에게 전송
+        
+        Args:
+            user_id: 사용자 ID
+            file_count: 처리된 파일 수
+            browser_count: 처리된 브라우저 히스토리 수
+        """
+        from datetime import datetime
+        
+        message = {
+            "type": "initial_setup_complete",
+            "file_count": file_count,
+            "browser_count": browser_count,
+            "timestamp": datetime.now().isoformat()
+        }
+        logger.info(f"🎉 초기 설정 완료 알림 전송: user_id={user_id}, files={file_count}, browser={browser_count}")
+        return await self.send_to_user(user_id, message)
+    
     def is_user_connected(self, user_id: int) -> bool:
         """사용자가 현재 연결되어 있는지 확인"""
         return user_id in self.active_connections and len(self.active_connections[user_id]) > 0

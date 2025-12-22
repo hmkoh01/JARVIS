@@ -1669,22 +1669,23 @@ class SQLite:
         try:
             conn = self.get_user_connection(user_id)
             
-            # 기준 시간 계산 (Python datetime으로 계산하여 SQLite 비교와 호환)
+            # 기준 시간 계산 (Python datetime으로 계산)
             from datetime import datetime, timedelta
             cutoff_time = datetime.now() - timedelta(days=days)
+            # 공백 형식으로 통일 (REPLACE로 T를 공백으로 변환하여 비교)
             cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
             
-            # 채팅 메시지 수
+            # 채팅 메시지 수 - ISO 형식(T)과 공백 형식 모두 지원
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM chat_messages 
-                WHERE created_at >= ?
+                WHERE REPLACE(created_at, 'T', ' ') >= ?
             """, (cutoff_str,))
             chat_count = cursor.fetchone()[0]
             
-            # 브라우저 로그 수
+            # 브라우저 로그 수 - visit_time의 T를 공백으로 변환하여 비교
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM browser_logs 
-                WHERE visit_time >= ?
+                WHERE REPLACE(visit_time, 'T', ' ') >= ?
             """, (cutoff_str,))
             browser_count = cursor.fetchone()[0]
             
@@ -1694,7 +1695,7 @@ class SQLite:
                        SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) as accepted,
                        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
                 FROM recommendations 
-                WHERE created_at >= ?
+                WHERE REPLACE(created_at, 'T', ' ') >= ?
             """, (cutoff_str,))
             rec_row = cursor.fetchone()
             rec_total = rec_row[0] or 0
@@ -1704,7 +1705,7 @@ class SQLite:
             # 파일 수
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM files 
-                WHERE processed_at >= ?
+                WHERE REPLACE(processed_at, 'T', ' ') >= ?
             """, (cutoff_str,))
             file_count = cursor.fetchone()[0]
             

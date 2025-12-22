@@ -51,6 +51,7 @@ class ChatController(QObject):
     analysis_notification = pyqtSignal(dict)  # {success: bool, ...}
     confirm_action_requested = pyqtSignal(dict)  # {action: str, keyword: str, ...}
     code_file_ready = pyqtSignal(dict)  # {file_path: str, file_name: str} - for code download
+    initial_setup_complete = pyqtSignal(dict)  # {file_count, browser_count} - for initial setup completion
     
     # Status signals
     connection_status_changed = pyqtSignal(bool)  # True = connected
@@ -209,7 +210,13 @@ class ChatController(QObject):
         client.analysis_failed.connect(
             lambda d: self._on_analysis_notification(False, d)
         )
+        client.initial_setup_complete.connect(self._on_initial_setup_complete)
         print("[ChatController] WebSocket client signals connected")
+    
+    def _on_initial_setup_complete(self, data: dict):
+        """Handle initial setup complete notification from backend."""
+        print(f"[ChatController] Initial setup complete: {data}")
+        self.initial_setup_complete.emit(data)
     
     # =========================================================================
     # Public Methods

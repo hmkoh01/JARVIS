@@ -390,6 +390,24 @@ async def continue_agents(request_data: dict, request: Request):
                         if metadata and metadata.get("action"):
                             final_metadata = metadata
                     
+                    elif event_type == "waiting_confirmation":
+                        # 확인 대기 - 메타데이터에 남은 에이전트 정보 추가
+                        metadata = event.get("metadata", {})
+                        remaining = event.get("remaining_agents", [])
+                        event_sub_tasks = event.get("sub_tasks", {})
+                        event_original_message = event.get("original_message", "")
+                        event_previous_results = event.get("previous_results", [])
+                        
+                        if metadata:
+                            final_metadata = metadata.copy()
+                            # 남은 에이전트 정보 추가
+                            if remaining:
+                                final_metadata["remaining_agents"] = remaining
+                                final_metadata["sub_tasks"] = event_sub_tasks
+                                final_metadata["original_message"] = event_original_message
+                                final_metadata["previous_results"] = event_previous_results
+                                logger.info(f"[MAS-CONTINUE] 확인 대기 - 남은 에이전트: {remaining}")
+                    
                     elif event_type == "error":
                         # 에이전트 오류 - 친근한 메시지
                         agent = event.get("agent", "")
@@ -407,7 +425,7 @@ async def continue_agents(request_data: dict, request: Request):
                 
                 # 메타데이터 전송 (버튼 표시용 - 필요한 경우만)
                 action = final_metadata.get("action", "")
-                if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
+                if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis", "confirm_code"):
                     # JSON을 한 줄로 직렬화 (줄바꿈 없이)
                     metadata_json = json_module.dumps(final_metadata, ensure_ascii=False, separators=(',', ':'))
                     # 명확한 시작/끝 마커 사용
@@ -1341,6 +1359,18 @@ async def _index_browser_history_background(
                 logger.error(f"웹 청크 임베딩 오류: {e}")
         
         logger.info(f"✅ 웹 콘텐츠 인덱싱 완료: {len(all_texts)}개 청크")
+    
+    # 초기 설정 완료 알림 전송
+    try:
+        from core.websocket_manager import get_websocket_manager
+        ws_manager = get_websocket_manager()
+        await ws_manager.broadcast_initial_setup_complete(
+            user_id=user_id,
+            browser_count=len(all_texts)
+        )
+        logger.info(f"🎉 초기 설정 완료 WebSocket 알림 전송: user_id={user_id}")
+    except Exception as e:
+        logger.warning(f"초기 설정 완료 알림 전송 실패: {e}")
 
 
 async def _crawl_url(session: aiohttp.ClientSession, url: str) -> Optional[str]:

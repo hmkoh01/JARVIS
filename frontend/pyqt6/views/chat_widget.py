@@ -839,5 +839,4 @@ class ChatWidget(QWidget):
         if self._pending_confirmation:
             self.confirmation_rejected.emit(self._pending_confirmation)
             self._pending_confirmation = None
-            # Add a message indicating cancellation
-            self.add_system_message("❌ 작업이 취소되었습니다.")
+            # 취소 메시지는 app.py의 _on_confirmation_rejected에서 처리
