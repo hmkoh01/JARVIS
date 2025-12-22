@@ -65,6 +65,7 @@ class FloatingButton(QWidget):
     # Button configuration
     BUTTON_SIZE = 64
     BUTTON_MARGIN = 8
+    SHADOW_PADDING = 20  # Extra padding for shadow effect to prevent clipping
     DRAG_THRESHOLD = 5  # Pixels to move before considering it a drag
     
     # Colors - Modern Monochrome (matching JARVIS icon)
@@ -122,8 +123,8 @@ class FloatingButton(QWidget):
         # Track mouse for hover effects
         self.setMouseTracking(True)
         
-        # Fixed size
-        total_size = self.BUTTON_SIZE + self.BUTTON_MARGIN * 2
+        # Fixed size - include shadow padding to prevent Windows layered window clipping errors
+        total_size = self.BUTTON_SIZE + self.BUTTON_MARGIN * 2 + self.SHADOW_PADDING * 2
         self.setFixedSize(total_size, total_size)
     
     def _setup_ui(self):
@@ -221,9 +222,9 @@ class FloatingButton(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Calculate button rect (centered with margin)
-        margin = self.BUTTON_MARGIN
-        button_rect = self.rect().adjusted(margin, margin, -margin, -margin)
+        # Calculate button rect (centered with margin + shadow padding)
+        total_padding = self.BUTTON_MARGIN + self.SHADOW_PADDING
+        button_rect = self.rect().adjusted(total_padding, total_padding, -total_padding, -total_padding)
         center = QPointF(button_rect.center())
         radius = button_rect.width() / 2
         
@@ -280,9 +281,25 @@ class FloatingButton(QWidget):
     # Mouse Events
     # =========================================================================
     
+    def _is_point_in_button(self, pos: QPoint) -> bool:
+        """Check if a point is within the circular button area."""
+        total_padding = self.BUTTON_MARGIN + self.SHADOW_PADDING
+        center_x = self.width() / 2
+        center_y = self.height() / 2
+        radius = self.BUTTON_SIZE / 2
+        
+        dx = pos.x() - center_x
+        dy = pos.y() - center_y
+        return (dx * dx + dy * dy) <= (radius * radius)
+    
     def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse press - start potential drag."""
         if event.button() == Qt.MouseButton.LeftButton:
+            # Only register press if within the button circle
+            if not self._is_point_in_button(event.pos()):
+                super().mousePressEvent(event)
+                return
+            
             self._drag_start_pos = event.globalPosition().toPoint()
             self._mouse_press_pos = event.globalPosition().toPoint()
             self._is_dragging = False
@@ -292,7 +309,13 @@ class FloatingButton(QWidget):
         super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event: QMouseEvent):
-        """Handle mouse move - drag if threshold exceeded."""
+        """Handle mouse move - drag if threshold exceeded, and update hover state."""
+        # Update hover state based on whether mouse is over the button circle
+        new_hovered = self._is_point_in_button(event.pos())
+        if new_hovered != self._is_hovered:
+            self._is_hovered = new_hovered
+            self.update()
+        
         if self._drag_start_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
             # Calculate distance moved
             diff = event.globalPosition().toPoint() - self._mouse_press_pos
@@ -331,6 +354,9 @@ class FloatingButton(QWidget):
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         """Handle double-click - optional exit confirmation."""
         if event.button() == Qt.MouseButton.LeftButton:
+            if not self._is_point_in_button(event.pos()):
+                super().mouseDoubleClickEvent(event)
+                return
             self.double_clicked.emit()
             # Optionally show exit confirmation
             # self._confirm_exit()
@@ -339,8 +365,7 @@ class FloatingButton(QWidget):
     
     def enterEvent(self, event: QEnterEvent):
         """Handle mouse enter - hover effect."""
-        self._is_hovered = True
-        self.update()
+        # Will be updated properly in mouseMoveEvent for accurate circle detection
         super().enterEvent(event)
     
     def leaveEvent(self, event):
@@ -350,7 +375,11 @@ class FloatingButton(QWidget):
         super().leaveEvent(event)
     
     def contextMenuEvent(self, event):
-        """Handle right-click - show context menu."""
+        """Handle right-click - show context menu only on button area."""
+        if not self._is_point_in_button(event.pos()):
+            super().contextMenuEvent(event)
+            return
+        
         menu = QMenu(self)
         
         # Style the menu

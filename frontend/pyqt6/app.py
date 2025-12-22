@@ -952,7 +952,7 @@ class JARVISApp:
                             f"📌 **{keyword}**에 대한 정보입니다!"
                         )
                         if report_content:
-                            self._main_window.chat_widget.add_ai_message(report_content)
+                            self._main_window.chat_widget.add_assistant_message(report_content)
                         
                         # 심층 보고서 제안 (offer_deep_dive가 True면)
                         if offer_deep_dive:

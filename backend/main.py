@@ -106,6 +106,39 @@ async def trigger_recommendation_analysis(force_recommend: bool = False):
         logger.error(f"추천 분석 중 오류 발생: {e}", exc_info=True)
 
 
+async def trigger_recommendation_for_user(user_id: int):
+    """
+    특정 사용자에 대해 추천 분석을 트리거합니다.
+    사용자가 앱에 접속(WebSocket 연결)할 때 호출되어 새 추천을 생성합니다.
+    
+    Args:
+        user_id: 사용자 ID
+    """
+    from database.data_collector import data_collection_managers
+    
+    logger.info(f"🎯 사용자 {user_id} 접속 - 새 추천 생성 시작 (force_recommend=True)")
+    try:
+        recommendation_agent = agent_registry.get_agent("recommendation")
+        if recommendation_agent and hasattr(recommendation_agent, 'run_active_analysis'):
+            # 초기 데이터 수집이 완료되지 않은 사용자는 스킵
+            if user_id in data_collection_managers:
+                manager = data_collection_managers[user_id]
+                if not manager.initial_collection_done:
+                    logger.info(f"⏸️ 사용자 {user_id}의 초기 데이터 수집이 진행 중입니다. 추천 생성을 스킵합니다.")
+                    return
+            
+            # force_recommend=True로 무조건 새 추천 생성
+            success, message = await recommendation_agent.run_active_analysis(user_id, force_recommend=True)
+            if success:
+                logger.info(f"✅ 사용자 {user_id} 접속 시 새 추천 생성 완료: {message}")
+            else:
+                logger.info(f"ℹ️ 사용자 {user_id} 접속 시 추천 생성 실패: {message}")
+        else:
+            logger.warning("Recommendation agent 또는 분석 메서드를 찾을 수 없습니다.")
+    except Exception as e:
+        logger.error(f"사용자 {user_id} 추천 생성 중 오류: {e}", exc_info=True)
+
+
 # -----------------------------------------------------------------------------
 # Lifespan 이벤트 핸들러 (FastAPI 최신 방식)
 # -----------------------------------------------------------------------------
@@ -284,6 +317,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         if pending_recommendations:
             for rec in pending_recommendations:
                 await ws_manager.broadcast_recommendation(user_id, rec)
+        
+        # 사용자 접속 시 무조건 새 추천 생성 (백그라운드에서 실행)
+        asyncio.create_task(trigger_recommendation_for_user(user_id))
         
         # 연결 유지 (클라이언트로부터 메시지 대기)
         while True:
