@@ -1,0 +1,458 @@
+"""
+JARVIS Floating Button
+Always-on-top floating button for quick access.
+
+Phase 2: Core UI component - Frameless, draggable, with context menu
+Features JARVIS icon with rotating loading animation.
+"""
+
+import sys
+import math
+from typing import Optional, TYPE_CHECKING
+
+from PyQt6.QtWidgets import (
+    QWidget, 
+    QApplication, 
+    QMenu, 
+    QMessageBox,
+    QGraphicsDropShadowEffect
+)
+from PyQt6.QtCore import (
+    Qt, 
+    QPoint, 
+    QPointF,
+    QSize, 
+    pyqtSignal,
+    QPropertyAnimation,
+    QEasingCurve,
+    QTimer
+)
+from PyQt6.QtGui import (
+    QPainter, 
+    QColor, 
+    QBrush, 
+    QPen, 
+    QFont,
+    QCursor,
+    QMouseEvent,
+    QPaintEvent,
+    QEnterEvent
+)
+
+if TYPE_CHECKING:
+    from .main_window import MainWindow
+
+
+class FloatingButton(QWidget):
+    """
+    Always-on-top floating button for quick access to JARVIS.
+    
+    Features:
+    - Frameless and transparent background
+    - Always on top of other windows
+    - Circular button with icon/text
+    - Draggable (distinguishes click from drag)
+    - Right-click context menu
+    - Hover effects
+    """
+    
+    # Signals
+    clicked = pyqtSignal()
+    double_clicked = pyqtSignal()
+    exit_requested = pyqtSignal()
+    settings_requested = pyqtSignal()
+    
+    # Button configuration
+    BUTTON_SIZE = 64
+    BUTTON_MARGIN = 8
+    DRAG_THRESHOLD = 5  # Pixels to move before considering it a drag
+    
+    # Colors - Modern Monochrome (matching JARVIS icon)
+    COLOR_PRIMARY = QColor("#1a1a1a")  # Dark charcoal
+    COLOR_PRIMARY_HOVER = QColor("#2a2a2a")  # Lighter charcoal
+    COLOR_PRIMARY_PRESSED = QColor("#0a0a0a")  # Darker
+    COLOR_TEXT = QColor("#e8e8e8")  # Off-white
+    
+    def __init__(self, main_window: Optional["MainWindow"] = None, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        
+        self._main_window = main_window
+        
+        # Drag state
+        self._drag_start_pos: Optional[QPoint] = None
+        self._is_dragging = False
+        self._mouse_press_pos: Optional[QPoint] = None
+        
+        # Visual state
+        self._is_hovered = False
+        self._is_pressed = False
+        
+        # Loading animation state
+        self._is_loading = False
+        self._rotation_angle = 225.0  # Default angle (bottom-left direction)
+        
+        # Rotation timer for smooth animation (~60 FPS)
+        self._rotation_timer = QTimer(self)
+        self._rotation_timer.timeout.connect(self._update_rotation)
+        self._rotation_timer.setInterval(16)
+        
+        # Animation
+        self._hover_animation: Optional[QPropertyAnimation] = None
+        self._current_scale = 1.0
+        
+        # Custom click handler (can be overridden)
+        self._custom_click_handler = None
+        
+        self._setup_window()
+        self._setup_ui()
+        self._position_default()
+    
+    def _setup_window(self):
+        """Configure window properties for floating button behavior."""
+        # Frameless window
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool  # Prevents taskbar entry
+        )
+        
+        # Transparent background
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Track mouse for hover effects
+        self.setMouseTracking(True)
+        
+        # Fixed size
+        total_size = self.BUTTON_SIZE + self.BUTTON_MARGIN * 2
+        self.setFixedSize(total_size, total_size)
+    
+    def _setup_ui(self):
+        """Set up the visual appearance."""
+        # Add drop shadow effect
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(15)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(0, 4)
+        self.setGraphicsEffect(shadow)
+        
+        # Set cursor
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+    
+    def _position_default(self):
+        """Position the button at the bottom-right of the primary screen."""
+        screen = QApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            x = geometry.right() - self.width() - 30
+            y = geometry.bottom() - self.height() - 30
+            self.move(x, y)
+    
+    def set_main_window(self, main_window: "MainWindow"):
+        """Set the main window reference for toggling."""
+        self._main_window = main_window
+    
+    # =========================================================================
+    # Loading Animation
+    # =========================================================================
+    
+    def _update_rotation(self):
+        """Smoothly update rotation angle for loading animation."""
+        self._rotation_angle = (self._rotation_angle + 4) % 360
+        self.update()
+    
+    def set_loading(self, loading: bool):
+        """
+        Set loading state - starts/stops the rotation animation.
+        
+        Args:
+            loading: True to start loading animation, False to stop
+        """
+        if self._is_loading == loading:
+            return
+            
+        self._is_loading = loading
+        if loading:
+            self._rotation_timer.start()
+        else:
+            self._rotation_timer.stop()
+            self._rotation_angle = 225.0  # Reset to default position
+        self.update()
+    
+    def is_loading(self) -> bool:
+        """Check if currently in loading state."""
+        return self._is_loading
+    
+    # =========================================================================
+    # Paint Event
+    # =========================================================================
+    
+    def paintEvent(self, event: QPaintEvent):
+        """Draw the JARVIS icon with optional loading animation."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Calculate button rect (centered with margin)
+        margin = self.BUTTON_MARGIN
+        button_rect = self.rect().adjusted(margin, margin, -margin, -margin)
+        center = QPointF(button_rect.center())
+        radius = button_rect.width() / 2
+        
+        # === Background ===
+        if self._is_pressed:
+            bg_color = self.COLOR_PRIMARY_PRESSED
+        elif self._is_hovered:
+            bg_color = self.COLOR_PRIMARY_HOVER
+        else:
+            bg_color = self.COLOR_PRIMARY
+        
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(bg_color))
+        painter.drawEllipse(button_rect)
+        
+        # === JARVIS Icon ===
+        icon_color = self.COLOR_TEXT
+        
+        # Proportions matching the original icon
+        outer_radius = radius * 0.72
+        ring_width = radius * 0.11  # Outer ring thickness
+        inner_circle_radius = radius * 0.20  # Inner filled circle
+        line_width = radius * 0.09  # Line thickness
+        
+        # 1. Outer ring (circular outline)
+        pen = QPen(icon_color, ring_width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(center, outer_radius, outer_radius)
+        
+        # 2. Calculate line endpoint based on rotation angle
+        angle_rad = math.radians(self._rotation_angle)
+        line_length = outer_radius * 0.55  # From center to inner circle center
+        
+        end_x = center.x() + line_length * math.cos(angle_rad)
+        end_y = center.y() + line_length * math.sin(angle_rad)
+        end_point = QPointF(end_x, end_y)
+        
+        # 3. Line from center to inner circle (with round cap)
+        line_pen = QPen(icon_color, line_width)
+        line_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(line_pen)
+        painter.drawLine(center, end_point)
+        
+        # 4. Inner filled circle
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(icon_color))
+        painter.drawEllipse(end_point, inner_circle_radius, inner_circle_radius)
+        
+        painter.end()
+    
+    # =========================================================================
+    # Mouse Events
+    # =========================================================================
+    
+    def mousePressEvent(self, event: QMouseEvent):
+        """Handle mouse press - start potential drag."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.globalPosition().toPoint()
+            self._mouse_press_pos = event.globalPosition().toPoint()
+            self._is_dragging = False
+            self._is_pressed = True
+            self.update()
+        
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event: QMouseEvent):
+        """Handle mouse move - drag if threshold exceeded."""
+        if self._drag_start_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            # Calculate distance moved
+            diff = event.globalPosition().toPoint() - self._mouse_press_pos
+            distance = (diff.x() ** 2 + diff.y() ** 2) ** 0.5
+            
+            # Start dragging if threshold exceeded
+            if distance >= self.DRAG_THRESHOLD:
+                self._is_dragging = True
+                
+                # Move window to follow cursor (center button on cursor)
+                new_pos = event.globalPosition().toPoint() - QPoint(self.width() // 2, self.height() // 2)
+                
+                # Constrain to screen bounds
+                new_pos = self._constrain_to_screen(new_pos)
+                
+                self.move(new_pos)
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        """Handle mouse release - click if not dragging."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_pressed = False
+            self.update()
+            
+            if not self._is_dragging:
+                # This was a click, not a drag
+                self._on_click()
+            
+            self._drag_start_pos = None
+            self._mouse_press_pos = None
+            self._is_dragging = False
+        
+        super().mouseReleaseEvent(event)
+    
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        """Handle double-click - optional exit confirmation."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+            # Optionally show exit confirmation
+            # self._confirm_exit()
+        
+        super().mouseDoubleClickEvent(event)
+    
+    def enterEvent(self, event: QEnterEvent):
+        """Handle mouse enter - hover effect."""
+        self._is_hovered = True
+        self.update()
+        super().enterEvent(event)
+    
+    def leaveEvent(self, event):
+        """Handle mouse leave - remove hover effect."""
+        self._is_hovered = False
+        self.update()
+        super().leaveEvent(event)
+    
+    def contextMenuEvent(self, event):
+        """Handle right-click - show context menu."""
+        menu = QMenu(self)
+        
+        # Style the menu
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #27272A;
+                color: #E4E4E7;
+                border: 1px solid #3D3D4D;
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 8px 24px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2e2e2e;
+                color: white;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #3D3D4D;
+                margin: 4px 8px;
+            }
+        """)
+        
+        # Add menu items
+        show_action = menu.addAction("📱 Show/Hide Window")
+        show_action.triggered.connect(self._toggle_main_window)
+        
+        menu.addSeparator()
+        
+        settings_action = menu.addAction("⚙️ Settings")
+        settings_action.triggered.connect(self._on_settings)
+        
+        menu.addSeparator()
+        
+        exit_action = menu.addAction("❌ Exit")
+        exit_action.triggered.connect(self._confirm_exit)
+        
+        menu.exec(event.globalPos())
+    
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+    
+    def _constrain_to_screen(self, pos: QPoint) -> QPoint:
+        """Constrain position to screen bounds."""
+        screen = QApplication.screenAt(pos)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        
+        if screen:
+            geometry = screen.availableGeometry()
+            
+            x = max(geometry.left(), min(pos.x(), geometry.right() - self.width()))
+            y = max(geometry.top(), min(pos.y(), geometry.bottom() - self.height()))
+            
+            return QPoint(x, y)
+        
+        return pos
+    
+    def set_click_handler(self, handler):
+        """Set a custom click handler to override default behavior.
+        
+        Args:
+            handler: Callable to execute on click. Set to None to restore default.
+        """
+        self._custom_click_handler = handler
+    
+    def on_click(self):
+        """Handle button click. Can be overridden via set_click_handler."""
+        self.clicked.emit()
+        
+        if self._custom_click_handler is not None:
+            self._custom_click_handler()
+        else:
+            self._toggle_main_window()
+    
+    def _on_click(self):
+        """Internal click handler called by mouseReleaseEvent."""
+        self.on_click()
+    
+    def _toggle_main_window(self):
+        """Toggle main window visibility."""
+        if self._main_window is not None:
+            if self._main_window.isVisible():
+                self._main_window.hide()
+            else:
+                self._main_window.show()
+                self._main_window.raise_()
+                self._main_window.activateWindow()
+    
+    def _on_settings(self):
+        """Handle settings request."""
+        self.settings_requested.emit()
+        # TODO: Phase 4 - Open settings dialog
+    
+    def _confirm_exit(self):
+        """Show exit confirmation dialog."""
+        reply = QMessageBox.question(
+            self,
+            "Exit JARVIS",
+            "Are you sure you want to exit JARVIS?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.exit_requested.emit()
+            QApplication.quit()
+    
+    # =========================================================================
+    # Public Methods
+    # =========================================================================
+    
+    def set_icon_text(self, text: str):
+        """Set the icon/emoji displayed on the button."""
+        # Store and repaint
+        self._icon_text = text
+        self.update()
+    
+    def set_colors(self, primary: QColor, hover: QColor = None, pressed: QColor = None):
+        """Set custom button colors."""
+        self.COLOR_PRIMARY = primary
+        if hover:
+            self.COLOR_PRIMARY_HOVER = hover
+        if pressed:
+            self.COLOR_PRIMARY_PRESSED = pressed
+        self.update()
+    
+    def show_notification(self, message: str, duration_ms: int = 3000):
+        """Show a brief notification near the button."""
+        # TODO: Implement tooltip/bubble notification
+        pass

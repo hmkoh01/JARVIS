@@ -110,69 +110,56 @@ async def unified_message(message_request: MessageRequest, request: Request):
         # 스트리밍 모드 - 멀티에이전트 단계별 스트리밍
         if stream_requested:
             async def generate_multi_agent_stream():
-                """멀티에이전트 단계별 스트리밍 응답 생성"""
+                """멀티에이전트 단계별 스트리밍 - 사용자 친화적 상태 메시지"""
                 full_content_parts = []
                 final_metadata = {}
+                
+                # 에이전트별 친근한 이름 매핑
+                agent_friendly_names = {
+                    "chatbot": ("💬", "답변을 준비"),
+                    "coding": ("💻", "코드를 작성"),
+                    "report": ("📝", "보고서를 작성"),
+                    "recommendation": ("🎯", "추천을 분석"),
+                    "dashboard": ("📊", "데이터를 분석"),
+                }
                 
                 try:
                     async for event in supervisor_instance.process_user_intent_streaming(user_intent):
                         event_type = event.get("type", "")
                         
                         if event_type == "analyzing":
-                            # 의도 분석 시작 - 프런트에서 로딩 상태 업데이트용
-                            message = event.get("message", "의도를 분석하고 있어요...")
-                            yield f"---ANALYZING---\n{message}\n\n"
+                            # 분석 시작 - 친근한 메시지
+                            yield "🔍 의도를 분석하고 있어요...\n\n"
                         
                         elif event_type == "analyzed":
-                            # 의도 분석 완료 - 서론 텍스트 먼저 전송
+                            # 분석 완료 - 서론 텍스트
                             intro_text = event.get("intro_text", "")
                             if intro_text:
-                                yield intro_text + "\n\n"
-                            
-                            analyzed_data = {
-                                "agents": event.get("agents", []),
-                                "agent_count": event.get("agent_count", 1)
-                            }
-                            yield f"---ANALYZED---\n{json_module.dumps(analyzed_data, ensure_ascii=False)}\n\n"
+                                yield f"{intro_text} ✨\n\n"
                         
                         elif event_type == "plan":
-                            # 실행 계획 전송
-                            plan_data = {
-                                "agents": event.get("agents", []),
-                                "sub_tasks": event.get("sub_tasks", {}),
-                                "execution_mode": event.get("execution_mode", "sequential"),
-                                "confidence": event.get("confidence", 0.8)
-                            }
-                            yield f"---PLAN---\n{json_module.dumps(plan_data, ensure_ascii=False)}\n\n"
+                            # 실행 계획 - 상태 메시지만 (JSON 제거)
+                            pass
                         
                         elif event_type == "start":
-                            # 에이전트 실행 시작
-                            start_data = {
-                                "agent": event.get("agent", ""),
-                                "order": event.get("order", 0),
-                                "total": event.get("total", 0),
-                                "task": event.get("task", ""),
-                                "focus": event.get("focus", "")
-                            }
-                            yield f"---START---\n{json_module.dumps(start_data, ensure_ascii=False)}\n\n"
+                            # 에이전트 실행 시작 - 친근한 상태 메시지
+                            agent = event.get("agent", "")
+                            order = event.get("order", 1)
+                            total = event.get("total", 1)
+                            
+                            emoji, action = agent_friendly_names.get(agent, ("🤖", "작업을 처리"))
+                            
+                            if total > 1:
+                                yield f"{emoji} [{order}/{total}] {agent} 에이전트가 {action}하고 있어요...\n\n"
+                            else:
+                                yield f"{emoji} {action}하고 있어요...\n\n"
                         
                         elif event_type == "result":
-                            # 에이전트 결과
-                            agent_type = event.get("agent", "")
+                            # 에이전트 결과 - 실제 답변만 스트리밍 (JSON 메타데이터 없이!)
                             content = event.get("content", "")
-                            success = event.get("success", True)
                             metadata = event.get("metadata", {})
                             
-                            result_data = {
-                                "agent": agent_type,
-                                "order": event.get("order", 0),
-                                "success": success,
-                                "elapsed_time": event.get("elapsed_time", 0),
-                                "metadata": metadata
-                            }
-                            yield f"---RESULT---\n{json_module.dumps(result_data, ensure_ascii=False)}\n"
-                            
-                            # 실제 내용 스트리밍 (청크 단위)
+                            # 실제 내용만 스트리밍
                             if content:
                                 chunk_size = 80
                                 for i in range(0, len(content), chunk_size):
@@ -180,58 +167,37 @@ async def unified_message(message_request: MessageRequest, request: Request):
                                     yield chunk
                                     await asyncio.sleep(0.01)
                                 yield "\n\n"
-                                
                                 full_content_parts.append(content)
                             
-                            # 메타데이터 병합 (action이 있는 것 우선)
-                            if metadata:
-                                if metadata.get("action"):
-                                    final_metadata = metadata
-                                elif not final_metadata.get("action"):
-                                    final_metadata.update(metadata)
+                            # 메타데이터는 저장만 (나중에 필요시 전송)
+                            if metadata and metadata.get("action"):
+                                final_metadata = metadata
                         
                         elif event_type == "error":
-                            # 에이전트 오류 (계속 진행)
-                            error_data = {
-                                "agent": event.get("agent", ""),
-                                "order": event.get("order", 0),
-                                "error": event.get("error", "알 수 없는 오류")
-                            }
-                            yield f"---ERROR---\n{json_module.dumps(error_data, ensure_ascii=False)}\n\n"
+                            # 에이전트 오류 - 친근한 메시지
+                            agent = event.get("agent", "")
+                            yield f"❌ {agent} 처리 중 문제가 발생했어요. 다른 방법을 시도할게요.\n\n"
                         
                         elif event_type == "cancelled":
                             # 취소됨
-                            cancel_data = {
-                                "completed": event.get("completed", []),
-                                "remaining": event.get("remaining", [])
-                            }
-                            yield f"---CANCELLED---\n{json_module.dumps(cancel_data, ensure_ascii=False)}\n\n"
+                            yield "⚠️ 작업이 취소되었어요.\n\n"
                             break
                         
                         elif event_type == "waiting_confirmation":
-                            # 확인 대기
-                            waiting_data = {
-                                "agent": event.get("agent", ""),
-                                "remaining_agents": event.get("remaining_agents", []),
-                                "metadata": event.get("metadata", {})
-                            }
-                            yield f"---WAITING_CONFIRMATION---\n{json_module.dumps(waiting_data, ensure_ascii=False)}\n\n"
+                            # 확인 대기 - 메타데이터만 저장
+                            metadata = event.get("metadata", {})
+                            if metadata:
+                                final_metadata = metadata
                         
                         elif event_type == "complete":
-                            # 전체 완료
-                            complete_data = {
-                                "total_agents": event.get("total_agents", 0),
-                                "successful": event.get("successful", 0),
-                                "failed": event.get("failed", 0),
-                                "total_time": event.get("total_time", 0),
-                                "waiting_confirmation": event.get("waiting_confirmation", False),
-                                "remaining_agents": event.get("remaining_agents", [])
-                            }
-                            yield f"---COMPLETE---\n{json_module.dumps(complete_data, ensure_ascii=False)}\n\n"
+                            # 완료 - 실패가 있으면 메시지 표시
+                            failed = event.get("failed", 0)
+                            if failed > 0:
+                                yield "⚠️ 일부 작업이 완료되지 않았어요.\n\n"
                         
                         elif event_type == "fatal_error":
                             # 치명적 오류
-                            yield f"---FATAL_ERROR---\n{event.get('error', '알 수 없는 오류')}\n\n"
+                            yield f"😥 죄송해요, 오류가 발생했어요: {event.get('error', '알 수 없는 오류')}\n\n"
                             break
                     
                     # 스트리밍 완료 후 로깅
@@ -244,7 +210,7 @@ async def unified_message(message_request: MessageRequest, request: Request):
                             metadata={"multi_agent": True, "streaming": True}
                         )
                     
-                    # 메타데이터 전송 (버튼 표시용)
+                    # 메타데이터 전송 (버튼 표시용 - 필요한 경우만)
                     action = final_metadata.get("action", "")
                     if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
                         metadata_json = json_module.dumps(final_metadata, ensure_ascii=False)
@@ -253,7 +219,7 @@ async def unified_message(message_request: MessageRequest, request: Request):
                         
                 except Exception as e:
                     logger.error(f"멀티에이전트 스트리밍 중 오류: {e}", exc_info=True)
-                    yield f"---FATAL_ERROR---\n{str(e)}\n"
+                    yield f"😥 죄송해요, 오류가 발생했어요.\n"
             
             return StreamingResponse(generate_multi_agent_stream(), media_type="text/plain")
         
@@ -352,9 +318,18 @@ async def continue_agents(request_data: dict, request: Request):
         
         # 항상 스트리밍 모드로 응답
         async def generate_continuation_stream():
-            """남은 에이전트 스트리밍 응답 생성"""
+            """남은 에이전트 스트리밍 - 사용자 친화적 상태 메시지"""
             full_content_parts = []
             final_metadata = {}
+            
+            # 에이전트별 친근한 이름 매핑
+            agent_friendly_names = {
+                "chatbot": ("💬", "답변을 준비"),
+                "coding": ("💻", "코드를 작성"),
+                "report": ("📝", "보고서를 작성"),
+                "recommendation": ("🎯", "추천을 분석"),
+                "dashboard": ("📊", "데이터를 분석"),
+            }
             
             try:
                 async for event in supervisor_instance.process_remaining_agents_streaming(
@@ -363,40 +338,28 @@ async def continue_agents(request_data: dict, request: Request):
                     event_type = event.get("type", "")
                     
                     if event_type == "plan":
-                        plan_data = {
-                            "agents": event.get("agents", []),
-                            "sub_tasks": event.get("sub_tasks", {}),
-                            "execution_mode": "sequential",
-                            "is_continuation": event.get("is_continuation", True)
-                        }
-                        yield f"---PLAN---\n{json_module.dumps(plan_data, ensure_ascii=False)}\n\n"
+                        # 실행 계획 - 친근한 메시지
+                        yield "✨ 이어서 작업을 진행할게요!\n\n"
                     
                     elif event_type == "start":
-                        start_data = {
-                            "agent": event.get("agent", ""),
-                            "order": event.get("order", 0),
-                            "total": event.get("total", 0),
-                            "task": event.get("task", ""),
-                            "focus": event.get("focus", "")
-                        }
-                        yield f"---START---\n{json_module.dumps(start_data, ensure_ascii=False)}\n\n"
+                        # 에이전트 실행 시작 - 친근한 상태 메시지
+                        agent = event.get("agent", "")
+                        order = event.get("order", 1)
+                        total = event.get("total", 1)
+                        
+                        emoji, action = agent_friendly_names.get(agent, ("🤖", "작업을 처리"))
+                        
+                        if total > 1:
+                            yield f"{emoji} [{order}/{total}] {agent} 에이전트가 {action}하고 있어요...\n\n"
+                        else:
+                            yield f"{emoji} {action}하고 있어요...\n\n"
                     
                     elif event_type == "result":
-                        agent_type = event.get("agent", "")
+                        # 에이전트 결과 - 실제 답변만 스트리밍 (JSON 없이!)
                         content = event.get("content", "")
-                        success = event.get("success", True)
                         metadata = event.get("metadata", {})
                         
-                        result_data = {
-                            "agent": agent_type,
-                            "order": event.get("order", 0),
-                            "success": success,
-                            "elapsed_time": event.get("elapsed_time", 0),
-                            "metadata": metadata
-                        }
-                        yield f"---RESULT---\n{json_module.dumps(result_data, ensure_ascii=False)}\n"
-                        
-                        # 실제 내용 스트리밍 (청크 단위)
+                        # 실제 내용만 스트리밍
                         if content:
                             chunk_size = 80
                             for i in range(0, len(content), chunk_size):
@@ -404,39 +367,28 @@ async def continue_agents(request_data: dict, request: Request):
                                 yield chunk
                                 await asyncio.sleep(0.01)
                             yield "\n\n"
-                            
                             full_content_parts.append(content)
                         
-                        # 메타데이터 병합
-                        if metadata:
-                            if metadata.get("action"):
-                                final_metadata = metadata
-                            elif not final_metadata.get("action"):
-                                final_metadata.update(metadata)
+                        # 메타데이터는 저장만
+                        if metadata and metadata.get("action"):
+                            final_metadata = metadata
                     
                     elif event_type == "error":
-                        error_data = {
-                            "agent": event.get("agent", ""),
-                            "order": event.get("order", 0),
-                            "error": event.get("error", "알 수 없는 오류")
-                        }
-                        yield f"---ERROR---\n{json_module.dumps(error_data, ensure_ascii=False)}\n\n"
+                        # 에이전트 오류 - 친근한 메시지
+                        agent = event.get("agent", "")
+                        yield f"❌ {agent} 처리 중 문제가 발생했어요.\n\n"
                     
                     elif event_type == "complete":
-                        complete_data = {
-                            "total_agents": event.get("total_agents", 0),
-                            "successful": event.get("successful", 0),
-                            "failed": event.get("failed", 0),
-                            "total_time": event.get("total_time", 0),
-                            "is_continuation": event.get("is_continuation", True)
-                        }
-                        yield f"---COMPLETE---\n{json_module.dumps(complete_data, ensure_ascii=False)}\n\n"
+                        # 완료 - 실패가 있으면 메시지 표시
+                        failed = event.get("failed", 0)
+                        if failed > 0:
+                            yield "⚠️ 일부 작업이 완료되지 않았어요.\n\n"
                     
                     elif event_type == "fatal_error":
-                        yield f"---FATAL_ERROR---\n{event.get('error', '알 수 없는 오류')}\n\n"
+                        yield f"😥 죄송해요, 오류가 발생했어요: {event.get('error', '알 수 없는 오류')}\n\n"
                         break
                 
-                # 메타데이터 전송 (버튼 표시용)
+                # 메타데이터 전송 (버튼 표시용 - 필요한 경우만)
                 action = final_metadata.get("action", "")
                 if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
                     metadata_json = json_module.dumps(final_metadata, ensure_ascii=False)
@@ -445,7 +397,7 @@ async def continue_agents(request_data: dict, request: Request):
                     
             except Exception as e:
                 logger.error(f"남은 에이전트 스트리밍 중 오류: {e}", exc_info=True)
-                yield f"---FATAL_ERROR---\n{str(e)}\n"
+                yield f"😥 죄송해요, 오류가 발생했어요.\n"
         
         return StreamingResponse(generate_continuation_stream(), media_type="text/plain")
         

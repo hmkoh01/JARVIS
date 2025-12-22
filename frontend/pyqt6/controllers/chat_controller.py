@@ -1,0 +1,474 @@
+"""
+JARVIS Chat Controller
+Manages chat state, API communication, and WebSocket notifications.
+
+Phase 3: Connects ChatWidget with API and WebSocket services
+"""
+
+import json
+import re
+from typing import Optional, List, Callable, Dict, Any
+from datetime import datetime
+
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+
+from models.message import Message
+from services.api_client import APIClient, StreamingWorker
+from services.websocket_client import (
+    NotificationWebSocket, 
+    WebSocketManager, 
+    Notification,
+    NotificationType
+)
+from views.chat_widget import ChatWidget
+
+
+class ChatController(QObject):
+    """
+    Controller for chat functionality.
+    
+    Manages:
+    - Message history
+    - Sending state (prevents duplicate sends)
+    - API streaming communication
+    - WebSocket notification handling
+    - UI updates through ChatWidget
+    
+    Signals:
+        notification_received: Emitted when a notification is received
+        recommendation_received: Emitted for new recommendation notifications
+        report_notification: Emitted for report completed/failed notifications
+        analysis_notification: Emitted for analysis completed/failed notifications
+        confirm_action_requested: Emitted when user confirmation is needed
+    """
+    
+    # Notification signals for external handlers (e.g., toast notifications)
+    notification_received = pyqtSignal(object)  # Notification object
+    recommendation_received = pyqtSignal(dict)
+    report_notification = pyqtSignal(dict)  # {success: bool, ...}
+    analysis_notification = pyqtSignal(dict)  # {success: bool, ...}
+    confirm_action_requested = pyqtSignal(dict)  # {action: str, keyword: str, ...}
+    
+    # Status signals
+    connection_status_changed = pyqtSignal(bool)  # True = connected
+    sending_status_changed = pyqtSignal(bool)  # True = sending
+    
+    # 메타데이터 마커 패턴 (버튼 표시용 - 유일하게 필터링 필요)
+    METADATA_PATTERN = r'---METADATA---\n(.+?)(?:\n|$)'
+    
+    # 확인 요청 감지 패턴 (채팅 텍스트에서 감지)
+    CONFIRMATION_PATTERNS = [
+        (r'(.+?)(?:에 대한|에 관한|에 대해|관련)?\s*보고서를?\s*(?:작성|생성)(?:할까요|하시겠습니까|해 드릴까요)\??', 'confirm_report'),
+        (r'(.+?)(?:에 대한|에 관한|에 대해|관련)?\s*분석을?\s*(?:시작|진행)(?:할까요|하시겠습니까|해 드릴까요)\??', 'confirm_analysis'),
+        (r'(.+?)(?:에 대한|에 관한|에 대해|관련)?\s*코드를?\s*(?:작성|생성)(?:할까요|하시겠습니까|해 드릴까요)\??', 'confirm_code'),
+        (r'대시보드\s*분석을?\s*(?:시작|진행|업데이트)(?:할까요|하시겠습니까|해 드릴까요)\??', 'confirm_dashboard'),
+    ]
+    
+    def __init__(
+        self,
+        chat_widget: ChatWidget,
+        api_client: APIClient,
+        ws_manager: Optional[WebSocketManager] = None,
+        parent: Optional[QObject] = None
+    ):
+        super().__init__(parent)
+        
+        self._chat_widget = chat_widget
+        self._api_client = api_client
+        self._ws_manager = ws_manager
+        
+        self._is_sending = False
+        self._current_worker: Optional[StreamingWorker] = None
+        self._message_history: List[Message] = []
+        
+        # 스트리밍 파서 상태
+        self._stream_buffer = ""
+        self._current_metadata: Optional[Dict[str, Any]] = None
+        
+        self._setup_connections()
+    
+    def _setup_connections(self):
+        """Set up signal connections."""
+        # Connect chat widget message_sent signal
+        self._chat_widget.message_sent.connect(self.send_message)
+        
+        # Connect WebSocket signals if available
+        if self._ws_manager:
+            self._setup_websocket_connections()
+    
+    def _setup_websocket_connections(self):
+        """Set up WebSocket signal connections."""
+        if not self._ws_manager:
+            return
+        
+        ws = self._ws_manager
+        
+        # Connection status
+        ws.connected.connect(self._on_ws_connected)
+        ws.disconnected.connect(self._on_ws_disconnected)
+        ws.error.connect(self._on_ws_error)
+        
+        # Notifications
+        ws.notification.connect(self._on_notification)
+        
+        # Try to connect client signals if client already exists
+        self._connect_client_signals()
+    
+    def _connect_client_signals(self):
+        """Connect signals from the WebSocket client (called when client is available)."""
+        if not self._ws_manager or not self._ws_manager.client:
+            return
+        
+        client = self._ws_manager.client
+        
+        # Check if already connected to avoid duplicate connections
+        # Using try/except to check if already connected
+        try:
+            client.recommendation_received.disconnect(self._on_recommendation)
+        except TypeError:
+            pass  # Not connected yet
+        
+        try:
+            client.report_completed.disconnect()
+        except TypeError:
+            pass
+        
+        try:
+            client.report_failed.disconnect()
+        except TypeError:
+            pass
+        
+        try:
+            client.analysis_completed.disconnect()
+        except TypeError:
+            pass
+        
+        try:
+            client.analysis_failed.disconnect()
+        except TypeError:
+            pass
+        
+        # Connect signals
+        client.recommendation_received.connect(self._on_recommendation)
+        client.report_completed.connect(
+            lambda d: self._on_report_notification(True, d)
+        )
+        client.report_failed.connect(
+            lambda d: self._on_report_notification(False, d)
+        )
+        client.analysis_completed.connect(
+            lambda d: self._on_analysis_notification(True, d)
+        )
+        client.analysis_failed.connect(
+            lambda d: self._on_analysis_notification(False, d)
+        )
+        print("[ChatController] WebSocket client signals connected")
+    
+    # =========================================================================
+    # Public Methods
+    # =========================================================================
+    
+    @pyqtSlot(str)
+    def send_message(self, text: str):
+        """
+        Send a message to the API.
+        
+        Args:
+            text: The message text to send
+        """
+        if self._is_sending:
+            print("[ChatController] Already sending, ignoring duplicate request")
+            return
+        
+        if not text.strip():
+            return
+        
+        self._is_sending = True
+        self.sending_status_changed.emit(True)
+        
+        # Add user message to UI
+        user_message = self._chat_widget.add_user_message(text)
+        self._message_history.append(user_message)
+        
+        # Start streaming response
+        self._chat_widget.start_streaming_response()
+        
+        # Make API request
+        self._current_worker = self._api_client.send_message_streaming(
+            message=text,
+            on_started=self._on_stream_started,
+            on_chunk=self._on_stream_chunk,
+            on_completed=self._on_stream_completed,
+            on_error=self._on_stream_error
+        )
+    
+    def cancel_sending(self):
+        """Cancel the current message send operation."""
+        if self._current_worker:
+            self._current_worker.stop()
+            self._current_worker = None
+        
+        self._is_sending = False
+        self.sending_status_changed.emit(False)
+        self._chat_widget.complete_streaming()
+    
+    def clear_history(self):
+        """Clear message history."""
+        self._message_history.clear()
+        self._chat_widget.clear_messages()
+    
+    def get_history(self) -> List[Message]:
+        """Get message history."""
+        return self._message_history.copy()
+    
+    @property
+    def is_sending(self) -> bool:
+        """Check if currently sending a message."""
+        return self._is_sending
+    
+    # =========================================================================
+    # Streaming Callbacks
+    # =========================================================================
+    
+    @pyqtSlot()
+    def _on_stream_started(self):
+        """Called when streaming begins."""
+        print("[ChatController] Streaming started")
+        self._stream_buffer = ""
+        self._current_metadata = None
+        self._chat_widget.set_status("Receiving...", sending=True)
+    
+    @pyqtSlot(str)
+    def _on_stream_chunk(self, chunk: str):
+        """Called for each chunk received. Filters metadata and displays content."""
+        # 버퍼에 청크 추가
+        self._stream_buffer += chunk
+        
+        # 메타데이터 마커 처리 및 필터링
+        filtered_content = self._parse_and_filter_stream()
+        
+        if filtered_content:
+            self._chat_widget.append_streaming_chunk(filtered_content)
+    
+    def _parse_and_filter_stream(self) -> str:
+        """
+        스트리밍 버퍼를 파싱하여 메타데이터를 처리하고 표시할 텍스트만 반환.
+        
+        백엔드에서 친근한 상태 메시지를 보내므로 복잡한 필터링 불필요.
+        ---METADATA--- 마커만 처리하면 됨.
+        
+        Returns:
+            사용자에게 표시할 텍스트
+        """
+        result = ""
+        
+        # ---METADATA--- 마커 처리
+        while True:
+            match = re.search(self.METADATA_PATTERN, self._stream_buffer)
+            
+            if match:
+                # 메타데이터 앞의 텍스트를 결과에 추가
+                before_metadata = self._stream_buffer[:match.start()]
+                if before_metadata:
+                    result += before_metadata
+                
+                # 메타데이터 파싱
+                try:
+                    metadata_json = match.group(1).strip()
+                    metadata = json.loads(metadata_json)
+                    self._current_metadata = metadata
+                    
+                    action = metadata.get('action', '')
+                    if action in ('confirm_report', 'confirm_analysis', 'open_file', 'confirm_code', 'confirm_dashboard'):
+                        self.confirm_action_requested.emit(metadata)
+                        print(f"[ChatController] Metadata action: {action}")
+                except json.JSONDecodeError as e:
+                    print(f"[ChatController] Metadata parse error: {e}")
+                
+                # 버퍼에서 메타데이터 제거
+                self._stream_buffer = self._stream_buffer[match.end():]
+            else:
+                # 메타데이터가 없으면 불완전한 마커 대비 끝부분만 남김
+                # ---METADATA--- 길이가 14자이므로 20자 정도 남김
+                if len(self._stream_buffer) > 20:
+                    result += self._stream_buffer[:-20]
+                    self._stream_buffer = self._stream_buffer[-20:]
+                break
+        
+        return result
+    
+    def _detect_confirmation_in_text(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        채팅 텍스트에서 확인 요청 패턴을 감지합니다.
+        
+        Args:
+            text: 분석할 텍스트
+            
+        Returns:
+            확인 요청 메타데이터 또는 None
+        """
+        for pattern, action_type in self.CONFIRMATION_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                # 키워드 추출 (첫 번째 그룹 또는 전체 매치)
+                keyword = ""
+                if match.groups():
+                    keyword = match.group(1).strip()
+                    # 불필요한 문자 제거
+                    keyword = re.sub(r'^["\'\s]+|["\'\s]+$', '', keyword)
+                    keyword = re.sub(r'^(그럼|그러면|네,?\s*)', '', keyword).strip()
+                
+                if not keyword:
+                    keyword = "요청된 작업"
+                
+                return {
+                    'action': action_type,
+                    'keyword': keyword,
+                    'brief_description': match.group(0),
+                    'detected_from_text': True
+                }
+        return None
+    
+    @pyqtSlot()
+    def _on_stream_completed(self):
+        """Called when streaming completes."""
+        print("[ChatController] Streaming completed")
+        
+        # 남은 버퍼 처리 (메타데이터 마커 제외하고 모두 표시)
+        if self._stream_buffer.strip():
+            remaining = self._stream_buffer
+            # ---METADATA--- 마커와 그 내용만 제거
+            remaining = re.sub(self.METADATA_PATTERN, '', remaining, flags=re.DOTALL)
+            remaining = remaining.strip()
+            if remaining:
+                self._chat_widget.append_streaming_chunk(remaining)
+        
+        # 버퍼 초기화
+        self._stream_buffer = ""
+        
+        # Get the streaming message and add to history
+        full_response_text = ""
+        if self._chat_widget._streaming_bubble:
+            message = self._chat_widget._streaming_bubble.message
+            self._message_history.append(message)
+            full_response_text = message.content
+        
+        self._chat_widget.complete_streaming()
+        self._current_worker = None
+        self._is_sending = False
+        self.sending_status_changed.emit(False)
+        
+        # 확인이 필요한 메타데이터가 있으면 처리
+        if self._current_metadata:
+            action = self._current_metadata.get('action', '')
+            if action in ('confirm_report', 'confirm_analysis', 'confirm_code', 'confirm_dashboard'):
+                self.confirm_action_requested.emit(self._current_metadata)
+                return
+        
+        # 메타데이터가 없으면 텍스트에서 확인 요청 감지
+        if full_response_text:
+            detected_metadata = self._detect_confirmation_in_text(full_response_text)
+            if detected_metadata:
+                print(f"[ChatController] Confirmation detected from text: {detected_metadata}")
+                self.confirm_action_requested.emit(detected_metadata)
+    
+    @pyqtSlot(str)
+    def _on_stream_error(self, error: str):
+        """Called when a streaming error occurs."""
+        print(f"[ChatController] Streaming error: {error}")
+        self._stream_buffer = ""
+        self._current_metadata = None
+        self._chat_widget.handle_streaming_error(error)
+        self._current_worker = None
+        self._is_sending = False
+        self.sending_status_changed.emit(False)
+    
+    # =========================================================================
+    # WebSocket Callbacks
+    # =========================================================================
+    
+    @pyqtSlot()
+    def _on_ws_connected(self):
+        """Called when WebSocket connects."""
+        print("[ChatController] WebSocket connected")
+        self._chat_widget.set_status("Connected")
+        self.connection_status_changed.emit(True)
+        
+        # Connect client-specific signals now that client exists
+        self._connect_client_signals()
+    
+    @pyqtSlot()
+    def _on_ws_disconnected(self):
+        """Called when WebSocket disconnects."""
+        print("[ChatController] WebSocket disconnected")
+        self._chat_widget.set_status("Disconnected", connected=False)
+        self.connection_status_changed.emit(False)
+    
+    @pyqtSlot(str)
+    def _on_ws_error(self, error: str):
+        """Called on WebSocket error."""
+        print(f"[ChatController] WebSocket error: {error}")
+    
+    @pyqtSlot(object)
+    def _on_notification(self, notification: Notification):
+        """Called for any WebSocket notification."""
+        self.notification_received.emit(notification)
+    
+    @pyqtSlot(dict)
+    def _on_recommendation(self, data: dict):
+        """Called for new recommendation notifications."""
+        print(f"[ChatController] New recommendation: {data}")
+        # Emit signal - app.py will handle showing toast with action buttons
+        self.recommendation_received.emit(data)
+    
+    def _on_report_notification(self, success: bool, data: dict):
+        """Called for report completed/failed notifications."""
+        notification_data = {"success": success, **data}
+        print(f"[ChatController] Report notification: {notification_data}")
+        self.report_notification.emit(notification_data)
+        
+        # Add system message
+        keyword = data.get("keyword", "Report")
+        if success:
+            self._chat_widget.add_system_message(
+                f"📄 Report completed: {keyword}"
+            )
+        else:
+            reason = data.get("reason", "Unknown error")
+            self._chat_widget.add_system_message(
+                f"❌ Report failed: {keyword} - {reason}"
+            )
+    
+    def _on_analysis_notification(self, success: bool, data: dict):
+        """Called for analysis completed/failed notifications."""
+        notification_data = {"success": success, **data}
+        print(f"[ChatController] Analysis notification: {notification_data}")
+        self.analysis_notification.emit(notification_data)
+        
+        # Add system message
+        title = data.get("title", "Analysis")
+        if success:
+            self._chat_widget.add_system_message(
+                f"📊 Analysis completed: {title}"
+            )
+        else:
+            reason = data.get("reason", "Unknown error")
+            self._chat_widget.add_system_message(
+                f"❌ Analysis failed: {title} - {reason}"
+            )
+    
+    # =========================================================================
+    # Lifecycle
+    # =========================================================================
+    
+    def start(self):
+        """Start the controller (connect WebSocket, etc.)."""
+        if self._ws_manager:
+            self._ws_manager.connect()
+    
+    def stop(self):
+        """Stop the controller (disconnect WebSocket, cancel requests)."""
+        self.cancel_sending()
+        
+        if self._ws_manager:
+            self._ws_manager.disconnect()

@@ -68,3 +68,8 @@ duckduckgo-search>=6.0.0  # Fallback for older installations
 reportlab>=4.0.0  # For PDF generation (primary method, platypus module)
 markdown2>=2.4.0  # For Markdown to HTML conversion
 xhtml2pdf>=0.2.11  # For HTML to PDF conversion (fallback method)
+
+# PyQt6 Frontend (Phase 0+)
+PyQt6>=6.6.0  # Main GUI framework
+# PyQt6-Charts>=6.6.0  # Uncomment when dashboard charts are needed
+# PyQt6-WebEngine  # Avoid for now - PyInstaller bundle issues
