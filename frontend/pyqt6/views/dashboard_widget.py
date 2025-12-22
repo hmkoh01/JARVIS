@@ -22,10 +22,37 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QTextEdit,
     QSizePolicy,
-    QMessageBox
+    QMessageBox,
+    QDialog,
+    QDialogButtonBox,
+    QTabWidget
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QUrl
 from PyQt6.QtGui import QFont
+
+# Matplotlib 차트 렌더링 (PyQt6 백엔드 사용)
+try:
+    import matplotlib
+    matplotlib.use('QtAgg')  # PyQt6 백엔드 설정
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.figure import Figure
+    import json
+    
+    # 한글 폰트 설정 (Windows: Malgun Gothic, Mac: AppleGothic, Linux: NanumGothic)
+    import platform
+    if platform.system() == 'Windows':
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+    elif platform.system() == 'Darwin':  # macOS
+        plt.rcParams['font.family'] = 'AppleGothic'
+    else:  # Linux
+        plt.rcParams['font.family'] = 'NanumGothic'
+    plt.rcParams['axes.unicode_minus'] = False  # 마이너스 기호 깨짐 방지
+    
+    HAS_MATPLOTLIB = True
+except ImportError as e:
+    HAS_MATPLOTLIB = False
+    print(f"⚠️ matplotlib 로드 실패: {e}")
 
 try:
     from config import API_BASE_URL
@@ -541,11 +568,26 @@ class DashboardWidget(QWidget):
     
     def _update_analysis_ui(self, analysis: dict):
         """Update AI analysis section with data."""
+        import re
+        
         # Clear existing
         while self._analysis_layout.count():
             item = self._analysis_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        
+        # 현재 분석 데이터 저장 (전체 보기용)
+        self._current_analysis = analysis
+        
+        # 디버그: 분석 데이터 확인
+        print(f"📊 [DEBUG] 분석 데이터 수신: {list(analysis.keys()) if analysis else 'None'}")
+        if analysis:
+            chart_data = analysis.get("chart_data", {})
+            charts = chart_data.get("charts", []) if chart_data else []
+            print(f"📊 [DEBUG] chart_data: {chart_data}")
+            print(f"📊 [DEBUG] charts 개수: {len(charts)}")
+            if charts:
+                print(f"📊 [DEBUG] 첫 번째 차트 키: {list(charts[0].keys()) if charts[0] else 'empty'}")
         
         if not analysis:
             empty_label = QLabel("분석 데이터가 없습니다.\n채팅을 통해 분석을 요청해보세요!")
@@ -553,7 +595,9 @@ class DashboardWidget(QWidget):
             self._analysis_layout.addWidget(empty_label)
             return
         
-        # Analysis title
+        # Header row (title + view full button)
+        header_layout = QHBoxLayout()
+        
         title = analysis.get("title", "최근 분석")
         title_label = QLabel(f"📊 {title}")
         title_font = QFont()
@@ -561,7 +605,31 @@ class DashboardWidget(QWidget):
         title_font.setBold(True)
         title_label.setFont(title_font)
         title_label.setStyleSheet("color: #1a1a1a;")
-        self._analysis_layout.addWidget(title_label)
+        header_layout.addWidget(title_label)
+        
+        header_layout.addStretch()
+        
+        # 전체 분석 보기 버튼
+        view_full_btn = QPushButton("📖 전체 보기")
+        view_full_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3B82F6;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #2563EB;
+            }
+        """)
+        view_full_btn.clicked.connect(self._show_full_analysis)
+        header_layout.addWidget(view_full_btn)
+        
+        header_widget = QWidget()
+        header_widget.setLayout(header_layout)
+        self._analysis_layout.addWidget(header_widget)
         
         # Analysis date
         created_at = analysis.get("created_at", "")
@@ -586,16 +654,44 @@ class DashboardWidget(QWidget):
             insights_label.setStyleSheet("color: #1a1a1a; margin-top: 12px;")
             self._analysis_layout.addWidget(insights_label)
             
-            for insight in insights[:5]:  # 최대 5개
+            for insight in insights[:5]:
                 insight_item = QLabel(f"  • {insight}")
                 insight_item.setWordWrap(True)
                 insight_item.setStyleSheet("color: #374151; font-size: 12px; margin-left: 8px;")
                 self._analysis_layout.addWidget(insight_item)
         
-        # Analysis content (분석 내용) - content 필드 사용
+        # Chart rendering (차트 시각화)
+        chart_data = analysis.get("chart_data", {})
+        charts = chart_data.get("charts", []) if chart_data else []
+        if charts and HAS_MATPLOTLIB:
+            chart_label = QLabel(f"📈 차트 ({len(charts)}개)")
+            chart_font = QFont()
+            chart_font.setPointSize(11)
+            chart_font.setBold(True)
+            chart_label.setFont(chart_font)
+            chart_label.setStyleSheet("color: #1a1a1a; margin-top: 12px;")
+            self._analysis_layout.addWidget(chart_label)
+            
+            # 첫 번째 차트만 대시보드에 표시 (나머지는 전체 보기에서)
+            first_chart = charts[0]
+            chart_view = self._create_chart_view(first_chart)
+            if chart_view:
+                self._analysis_layout.addWidget(chart_view)
+            
+            if len(charts) > 1:
+                more_charts_label = QLabel(f"  + {len(charts) - 1}개 차트 더 있음 (전체 보기에서 확인)")
+                more_charts_label.setStyleSheet("color: #6B7280; font-size: 11px; margin-left: 8px;")
+                self._analysis_layout.addWidget(more_charts_label)
+        elif charts and not HAS_MATPLOTLIB:
+            # matplotlib 없으면 차트 목록만 표시
+            chart_info = QLabel(f"📈 {len(charts)}개의 차트 (matplotlib 필요)")
+            chart_info.setStyleSheet("color: #F59E0B; font-size: 11px; margin-top: 12px;")
+            self._analysis_layout.addWidget(chart_info)
+        
+        # Analysis content preview (짧은 미리보기)
         content = analysis.get("content", "")
         if content:
-            content_label = QLabel("📝 분석 내용")
+            content_label = QLabel("📝 분석 요약")
             content_font = QFont()
             content_font.setPointSize(11)
             content_font.setBold(True)
@@ -603,36 +699,248 @@ class DashboardWidget(QWidget):
             content_label.setStyleSheet("color: #1a1a1a; margin-top: 12px;")
             self._analysis_layout.addWidget(content_label)
             
-            # Markdown 스타일 간단 처리 (**, ### 등 제거)
-            import re
-            clean_content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)  # ** 제거
-            clean_content = re.sub(r'###?\s*', '', clean_content)  # ### 제거
-            clean_content = re.sub(r'\n{3,}', '\n\n', clean_content)  # 연속 줄바꿈 정리
+            # 첫 200자만 미리보기
+            clean_content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)
+            clean_content = re.sub(r'###?\s*', '', clean_content)
+            preview = clean_content[:200] + "..." if len(clean_content) > 200 else clean_content
             
-            # 최대 800자 표시 (더 많은 내용이 있으면 잘라서 표시)
-            if len(clean_content) > 800:
-                clean_content = clean_content[:800] + "...\n\n(더 보려면 전체 분석을 확인하세요)"
-            
-            content_text = QLabel(clean_content)
+            content_text = QLabel(preview)
             content_text.setWordWrap(True)
-            content_text.setStyleSheet("color: #374151; font-size: 12px; line-height: 1.5;")
+            content_text.setStyleSheet("color: #374151; font-size: 12px;")
             self._analysis_layout.addWidget(content_text)
+    
+    def _create_chart_view(self, chart: dict) -> Optional[QWidget]:
+        """Plotly JSON을 matplotlib 차트로 변환하여 렌더링합니다."""
+        print(f"📊 [DEBUG] _create_chart_view 호출됨, HAS_MATPLOTLIB={HAS_MATPLOTLIB}")
+        print(f"📊 [DEBUG] chart 키: {list(chart.keys()) if chart else 'None'}")
         
-        # Chart info (차트 정보) - 차트가 있으면 알려주기
+        if not HAS_MATPLOTLIB:
+            print("📊 [DEBUG] matplotlib 없음!")
+            return None
+        
+        plotly_json = chart.get("plotly_json", "")
+        chart_type = chart.get("type", "bar")
+        chart_title = chart.get("title", "차트")
+        
+        print(f"📊 [DEBUG] plotly_json 길이: {len(plotly_json) if plotly_json else 0}")
+        if not plotly_json:
+            print("📊 [DEBUG] plotly_json이 비어있음!")
+            return None
+        
+        try:
+            # Plotly JSON 파싱
+            plotly_data = json.loads(plotly_json)
+            traces = plotly_data.get("data", [])
+            layout = plotly_data.get("layout", {})
+            
+            if not traces:
+                print("📊 [DEBUG] traces가 비어있음!")
+                return None
+            
+            # matplotlib Figure 생성
+            fig = Figure(figsize=(6, 3.5), dpi=100)
+            fig.patch.set_facecolor('#F9FAFB')
+            ax = fig.add_subplot(111)
+            ax.set_facecolor('#F9FAFB')
+            
+            # 차트 타입에 따라 렌더링
+            first_trace = traces[0]
+            trace_type = first_trace.get("type", "bar")
+            
+            if trace_type == "bar":
+                x_data = first_trace.get("x", [])
+                y_data = first_trace.get("y", [])
+                
+                if x_data and y_data:
+                    # 긴 레이블 줄임
+                    x_labels = [str(x)[:15] + "..." if len(str(x)) > 15 else str(x) for x in x_data]
+                    colors = ['#3B82F6', '#60A5FA', '#93C5FD', '#BFDBFE', '#DBEAFE']
+                    bar_colors = [colors[i % len(colors)] for i in range(len(y_data))]
+                    
+                    bars = ax.bar(range(len(y_data)), y_data, color=bar_colors, edgecolor='white')
+                    ax.set_xticks(range(len(x_labels)))
+                    ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
+                    
+            elif trace_type == "pie":
+                labels = first_trace.get("labels", [])
+                values = first_trace.get("values", [])
+                
+                if labels and values:
+                    colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6']
+                    ax.pie(values, labels=labels, autopct='%1.1f%%', 
+                           colors=[colors[i % len(colors)] for i in range(len(values))],
+                           textprops={'fontsize': 8})
+                    
+            elif trace_type == "scatter":
+                x_data = first_trace.get("x", [])
+                y_data = first_trace.get("y", [])
+                
+                if x_data and y_data:
+                    ax.scatter(x_data, y_data, color='#3B82F6', s=50, alpha=0.7)
+                    
+            else:
+                # 기본: bar 차트로 처리
+                x_data = first_trace.get("x", [])
+                y_data = first_trace.get("y", [])
+                
+                if x_data and y_data:
+                    ax.bar(range(len(y_data)), y_data, color='#3B82F6')
+                    ax.set_xticks(range(len(x_data)))
+                    ax.set_xticklabels([str(x)[:10] for x in x_data], rotation=45, ha='right', fontsize=8)
+            
+            # 제목 및 스타일
+            ax.set_title(chart_title, fontsize=10, fontweight='bold', pad=10)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.tick_params(axis='both', labelsize=8)
+            fig.tight_layout()
+            
+            # FigureCanvas 생성
+            canvas = FigureCanvas(fig)
+            canvas.setFixedHeight(280)
+            
+            print(f"📊 [DEBUG] 차트 렌더링 성공: {chart_title}")
+            return canvas
+            
+        except Exception as e:
+            print(f"차트 렌더링 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _show_full_analysis(self):
+        """전체 분석 내용을 다이얼로그로 표시합니다."""
+        if not hasattr(self, '_current_analysis') or not self._current_analysis:
+            QMessageBox.information(self, "알림", "표시할 분석 데이터가 없습니다.")
+            return
+        
+        analysis = self._current_analysis
+        
+        # 다이얼로그 생성
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"📊 {analysis.get('title', '분석 결과')}")
+        dialog.setMinimumSize(800, 600)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #FFFFFF;
+            }
+            QTabWidget::pane {
+                border: 1px solid #E5E7EB;
+                background: white;
+            }
+            QTabBar::tab {
+                background: #F3F4F6;
+                padding: 8px 16px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #3B82F6;
+                color: white;
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 탭 위젯 생성
+        tabs = QTabWidget()
+        
+        # === 분석 내용 탭 ===
+        content_tab = QWidget()
+        content_layout = QVBoxLayout(content_tab)
+        
+        content_scroll = QScrollArea()
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setStyleSheet("border: none;")
+        
+        content_widget = QWidget()
+        content_widget_layout = QVBoxLayout(content_widget)
+        
+        # 인사이트
+        insights = analysis.get("insights", [])
+        if insights:
+            insights_label = QLabel("💡 핵심 인사이트")
+            insights_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a1a1a;")
+            content_widget_layout.addWidget(insights_label)
+            
+            for insight in insights:
+                item = QLabel(f"  • {insight}")
+                item.setWordWrap(True)
+                item.setStyleSheet("font-size: 13px; color: #374151; margin-left: 10px;")
+                content_widget_layout.addWidget(item)
+            
+            content_widget_layout.addSpacing(16)
+        
+        # 전체 분석 내용
+        content = analysis.get("content", "")
+        if content:
+            content_label = QLabel("📝 분석 보고서")
+            content_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a1a1a;")
+            content_widget_layout.addWidget(content_label)
+            
+            content_text = QTextEdit()
+            content_text.setReadOnly(True)
+            content_text.setMarkdown(content)  # Markdown 지원
+            content_text.setStyleSheet("""
+                QTextEdit {
+                    font-size: 13px;
+                    color: #374151;
+                    border: 1px solid #E5E7EB;
+                    border-radius: 4px;
+                    padding: 12px;
+                    background: #F9FAFB;
+                }
+            """)
+            content_text.setMinimumHeight(300)
+            content_widget_layout.addWidget(content_text)
+        
+        content_widget_layout.addStretch()
+        content_scroll.setWidget(content_widget)
+        content_layout.addWidget(content_scroll)
+        tabs.addTab(content_tab, "📝 분석 내용")
+        
+        # === 차트 탭 ===
         chart_data = analysis.get("chart_data", {})
         charts = chart_data.get("charts", []) if chart_data else []
         if charts:
-            chart_info = QLabel(f"📈 {len(charts)}개의 차트가 생성되었습니다.")
-            chart_info.setStyleSheet("color: #3B82F6; font-size: 11px; margin-top: 12px;")
-            self._analysis_layout.addWidget(chart_info)
+            chart_tab = QWidget()
+            chart_layout = QVBoxLayout(chart_tab)
             
-            # 각 차트 제목 표시
-            for chart in charts:
-                chart_title = chart.get("title", "차트")
-                chart_type = chart.get("type", "unknown")
-                chart_item = QLabel(f"  📊 {chart_title} ({chart_type})")
-                chart_item.setStyleSheet("color: #6B7280; font-size: 11px; margin-left: 8px;")
-                self._analysis_layout.addWidget(chart_item)
+            chart_scroll = QScrollArea()
+            chart_scroll.setWidgetResizable(True)
+            chart_scroll.setStyleSheet("border: none;")
+            
+            chart_widget = QWidget()
+            chart_widget_layout = QVBoxLayout(chart_widget)
+            
+            if HAS_MATPLOTLIB:
+                for i, chart in enumerate(charts):
+                    chart_title = chart.get("title", f"차트 {i+1}")
+                    title_label = QLabel(f"📊 {chart_title}")
+                    title_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #1a1a1a; margin-top: 12px;")
+                    chart_widget_layout.addWidget(title_label)
+                    
+                    chart_view = self._create_chart_view(chart)
+                    if chart_view:
+                        chart_view.setFixedHeight(350)
+                        chart_widget_layout.addWidget(chart_view)
+            else:
+                no_lib_label = QLabel("⚠️ 차트를 표시하려면 matplotlib을 설치해주세요.\n\npip install matplotlib")
+                no_lib_label.setStyleSheet("font-size: 13px; color: #F59E0B;")
+                chart_widget_layout.addWidget(no_lib_label)
+            
+            chart_widget_layout.addStretch()
+            chart_scroll.setWidget(chart_widget)
+            chart_layout.addWidget(chart_scroll)
+            tabs.addTab(chart_tab, f"📈 차트 ({len(charts)})")
+        
+        layout.addWidget(tabs)
+        
+        # 닫기 버튼
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(dialog.close)
+        layout.addWidget(button_box)
+        
+        dialog.exec()
     
     def _on_error(self, error: str):
         """Handle data loading error."""

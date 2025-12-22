@@ -6,6 +6,8 @@ binaries = []
 hiddenimports = ['uuid', 'datetime', 'dataclasses', 'enum', 'typing', 'json', 'threading', 'queue', 'time', 'pathlib', 'logging', 'platform', 'webbrowser', 'http.server', 'socketserver', 'urllib.parse', 'subprocess', 'utils.theme_manager', 'utils.path_utils', 'views.main_window', 'views.floating_button', 'views.chat_widget', 'views.dashboard_widget', 'views.recommendations_widget', 'views.settings_widget', 'views.toast_notification', 'views.dialogs', 'views.dialogs.login_dialog', 'views.dialogs.survey_dialog', 'views.dialogs.folder_dialog', 'services.api_client', 'services.websocket_client', 'controllers.auth_controller', 'controllers.chat_controller', 'controllers.file_controller', 'models.message', 'models.recommendation', 'models.user']
 tmp_ret = collect_all('PyQt6')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('matplotlib')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(

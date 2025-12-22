@@ -233,6 +233,63 @@ class RecommendationResponseWorker(QThread):
 
 
 # =============================================================================
+# Toast Manager Wrapper - 토스트 표시 시 채팅창 자동 닫기
+# =============================================================================
+
+class ToastManagerWrapper:
+    """
+    ToastManager 래퍼 - 토스트 메시지 표시 시 메인 윈도우(채팅창)를 자동으로 닫습니다.
+    """
+    
+    def __init__(self, toast_manager: ToastManager, get_main_window_func):
+        self._toast_manager = toast_manager
+        self._get_main_window = get_main_window_func
+    
+    def _hide_main_window(self):
+        """메인 윈도우(채팅창)를 숨깁니다."""
+        main_window = self._get_main_window()
+        if main_window and main_window.isVisible():
+            main_window.hide()
+    
+    def show_toast(self, *args, **kwargs):
+        self._hide_main_window()
+        return self._toast_manager.show_toast(*args, **kwargs)
+    
+    def info(self, *args, **kwargs):
+        self._hide_main_window()
+        return self._toast_manager.info(*args, **kwargs)
+    
+    def success(self, *args, **kwargs):
+        self._hide_main_window()
+        return self._toast_manager.success(*args, **kwargs)
+    
+    def warning(self, *args, **kwargs):
+        self._hide_main_window()
+        return self._toast_manager.warning(*args, **kwargs)
+    
+    def error(self, *args, **kwargs):
+        self._hide_main_window()
+        return self._toast_manager.error(*args, **kwargs)
+    
+    def success_with_folder_action(self, *args, **kwargs):
+        self._hide_main_window()
+        return self._toast_manager.success_with_folder_action(*args, **kwargs)
+    
+    def success_with_dashboard_action(self, *args, **kwargs):
+        self._hide_main_window()
+        return self._toast_manager.success_with_dashboard_action(*args, **kwargs)
+    
+    def clear_all(self):
+        return self._toast_manager.clear_all()
+    
+    def hide(self):
+        return self._toast_manager.hide()
+    
+    def deleteLater(self):
+        return self._toast_manager.deleteLater()
+
+
+# =============================================================================
 # Application Class
 # =============================================================================
 
@@ -315,9 +372,13 @@ class JARVISApp:
         saved_theme = self._theme_manager.initialize(self._app, use_saved=True)
         print(f"✅ Theme initialized: {saved_theme}")
         
-        # Initialize toast manager
-        self._toast_manager = ToastManager()
-        print("✅ Toast manager initialized")
+        # Initialize toast manager with wrapper (채팅창 자동 닫기 기능)
+        self._raw_toast_manager = ToastManager()
+        self._toast_manager = ToastManagerWrapper(
+            self._raw_toast_manager,
+            lambda: self._main_window  # 메인 윈도우 getter
+        )
+        print("✅ Toast manager initialized (with auto-hide wrapper)")
         
         # Initialize auth controller
         self._auth_controller = AuthController()
@@ -1091,6 +1152,10 @@ class JARVISApp:
             if response.status_code == 200:
                 result = response.json()
                 if result.get("success"):
+                    # 보고서 작성 시작 시 메인 윈도우(채팅창) 닫기
+                    if self._main_window and self._main_window.isVisible():
+                        self._main_window.hide()
+                    
                     # 토스트로 보고서 작성 시작 알림
                     remaining_info = ""
                     if self._pending_continuation:
