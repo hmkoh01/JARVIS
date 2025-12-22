@@ -68,15 +68,17 @@ class APIClient(QObject):
     def send_message(
         self,
         message: str,
+        on_chunk: callable = None,
         on_completed: callable = None,
         on_error: callable = None
     ) -> Thread:
         """
-        Send a chat message and receive non-streaming response.
+        Send a chat message with optional streaming support.
         
         Args:
             message: The message to send
-            on_completed: Callback when response is received (receives dict with content, metadata)
+            on_chunk: Callback for each streaming chunk (if provided, enables streaming mode)
+            on_completed: Callback when response is complete (receives dict with content, metadata)
             on_error: Callback for errors (receives error string)
             
         Returns:
@@ -84,10 +86,13 @@ class APIClient(QObject):
         """
         url = f"{self.base_url}/api/v2/message"
         
+        # 스트리밍 모드 결정: on_chunk 콜백이 있으면 스트리밍
+        use_streaming = on_chunk is not None
+        
         payload = {
             "message": message,
             "user_id": self._user_id or 1,
-            "stream": False  # Non-streaming
+            "stream": use_streaming
         }
         
         def _run():
@@ -100,13 +105,29 @@ class APIClient(QObject):
                         url,
                         json=payload,
                         headers=self._get_headers(),
-                        timeout=120  # 긴 타임아웃 (LLM 응답 대기)
+                        timeout=300 if use_streaming else 120,
+                        stream=use_streaming
                     )
                     
                     if response.status_code == 200:
-                        data = response.json()
-                        if on_completed:
-                            on_completed(data)
+                        if use_streaming:
+                            # 스트리밍 모드: 청크 단위로 읽기
+                            full_content = []
+                            print("[APIClient] 스트리밍 시작")
+                            for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+                                if chunk:
+                                    full_content.append(chunk)
+                                    if on_chunk:
+                                        on_chunk(chunk)
+                            
+                            print(f"[APIClient] 스트리밍 완료, 총 길이: {len(''.join(full_content))}")
+                            if on_completed:
+                                on_completed({"content": ''.join(full_content), "streaming": True})
+                        else:
+                            # 비스트리밍 모드: 전체 응답 한 번에 받기
+                            data = response.json()
+                            if on_completed:
+                                on_completed(data)
                         return
                         
                     elif response.status_code == 401:

@@ -316,6 +316,7 @@ async def continue_agents(request_data: dict, request: Request):
         remaining_agents = request_data.get("remaining_agents", [])
         sub_tasks = request_data.get("sub_tasks", {})
         previous_results = request_data.get("previous_results", [])
+        confirm_code = request_data.get("confirm_code", False)  # 코드 생성 확인 플래그
         
         if not remaining_agents:
             return {
@@ -348,13 +349,14 @@ async def continue_agents(request_data: dict, request: Request):
             
             try:
                 async for event in supervisor_instance.process_remaining_agents_streaming(
-                    user_intent, remaining_agents, sub_tasks, previous_results
+                    user_intent, remaining_agents, sub_tasks, previous_results,
+                    extra_state={"confirm_code": confirm_code}
                 ):
                     event_type = event.get("type", "")
                     
                     if event_type == "plan":
-                        # 실행 계획 - 친근한 메시지
-                        yield "✨ 이어서 작업을 진행할게요!\n\n"
+                        # 실행 계획 - 프론트엔드에서 이미 메시지를 표시하므로 스킵
+                        pass
                     
                     elif event_type == "start":
                         # 에이전트 실행 시작 - 친근한 상태 메시지

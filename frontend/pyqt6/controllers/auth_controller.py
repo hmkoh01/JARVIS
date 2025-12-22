@@ -111,7 +111,7 @@ class AuthController(QObject):
             response = requests.get(
                 f"{API_BASE_URL}/api/v2/dashboard/summary",
                 headers={"Authorization": f"Bearer {token}"},
-                timeout=10
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -259,7 +259,7 @@ class AuthController(QObject):
             response = requests.get(
                 f"{API_BASE_URL}/api/v2/dashboard/summary",
                 headers={"Authorization": f"Bearer {self._token}"},
-                timeout=10
+                timeout=30
             )
             
             if response.status_code == 200:

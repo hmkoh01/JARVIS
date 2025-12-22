@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QSpacerItem,
     QApplication
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer, QSize, QPropertyAnimation, QEasingCurve
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 from PyQt6.QtGui import QFont, QKeyEvent, QTextCursor, QColor
 
@@ -231,6 +231,19 @@ class MessageBubble(QFrame):
         """Skip the typing animation and show full content immediately."""
         if self._is_typing and self._full_content:
             self._complete_typing()
+    
+    def update_content(self, content: str):
+        """
+        외부에서 콘텐츠를 업데이트합니다 (스트리밍용).
+        
+        Args:
+            content: 새로운 콘텐츠
+        """
+        self.message.content = content
+        formatted = self._format_content(content)
+        # 스트리밍 중이면 커서 표시
+        formatted += '<span style="color: #888;">▌</span>'
+        self._content_label.setText(formatted)
 
 
 class ChatInputWidget(QTextEdit):
@@ -394,6 +407,12 @@ class ChatWidget(QWidget):
         self._message_widgets: List[MessageBubble] = []
         self._is_sending = False
         self._pending_confirmation: Optional[dict] = None
+        self._streaming_bubble: Optional[MessageBubble] = None
+        
+        # 상태 점 애니메이션용 변수
+        self._status_dots_count = 0
+        self._status_base_text = ""
+        self._status_timer: Optional[QTimer] = None
         
         self._setup_ui()
     
@@ -645,14 +664,35 @@ class ChatWidget(QWidget):
         slide_animation.start()
     
     def set_status(self, status: str, connected: bool = True, sending: bool = False):
-        """Update the connection status indicator."""
+        """Update the connection status indicator with optional dots animation."""
+        # 기존 타이머 정리
+        if self._status_timer:
+            self._status_timer.stop()
+            self._status_timer = None
+        
         if sending:
             icon = "⏳"
-        elif connected:
-            icon = "🟢"
+            # 점 애니메이션 시작
+            self._status_base_text = f"{icon} {status}"
+            self._status_dots_count = 0
+            self._status_timer = QTimer(self)
+            self._status_timer.timeout.connect(self._update_status_dots)
+            self._status_timer.start(400)  # 400ms 간격
+            self._update_status_dots()  # 즉시 첫 업데이트
         else:
-            icon = "🔴"
-        self._status_label.setText(f"{icon} {status}")
+            if connected:
+                icon = "🟢"
+            else:
+                icon = "🔴"
+            self._status_label.setText(f"{icon} {status}")
+    
+    def _update_status_dots(self):
+        """상태 텍스트의 점 애니메이션을 업데이트합니다."""
+        self._status_dots_count = (self._status_dots_count + 1) % 4
+        dots = "." * self._status_dots_count
+        # 점 개수에 따라 공백으로 패딩하여 텍스트 길이 유지
+        padding = " " * (3 - self._status_dots_count)
+        self._status_label.setText(f"{self._status_base_text}{dots}{padding}")
     
     def set_input_enabled(self, enabled: bool):
         """Enable or disable the input field."""
@@ -676,6 +716,91 @@ class ChatWidget(QWidget):
     def is_sending(self) -> bool:
         """Check if currently sending/streaming."""
         return self._is_sending
+    
+    # =========================================================================
+    # Streaming Methods
+    # =========================================================================
+    
+    def start_streaming(self) -> Message:
+        """
+        스트리밍 시작 - 빈 assistant 버블을 생성합니다.
+        
+        Returns:
+            생성된 Message 객체
+        """
+        # 이전 타이머 정리
+        if hasattr(self, '_typing_timer') and self._typing_timer:
+            self._typing_timer.stop()
+            self._typing_timer = None
+        
+        # 버퍼 초기화
+        self._chunk_buffer = ""
+        
+        message = Message.assistant_message("")
+        bubble = self._add_message_bubble(message, animate=True)
+        self._streaming_bubble = bubble
+        return message
+    
+    @pyqtSlot(str)
+    def append_streaming_chunk(self, chunk: str):
+        """
+        스트리밍 청크를 현재 스트리밍 버블에 추가합니다.
+        타이핑 효과를 위해 청크를 작은 단위로 나눠서 표시합니다.
+        
+        Args:
+            chunk: 추가할 텍스트 청크
+        """
+        if self._streaming_bubble:
+            # 청크를 버퍼에 추가
+            if not hasattr(self, '_chunk_buffer'):
+                self._chunk_buffer = ""
+            self._chunk_buffer += chunk
+            
+            # 타이핑 타이머가 없으면 시작
+            if not hasattr(self, '_typing_timer') or self._typing_timer is None:
+                self._typing_timer = QTimer(self)
+                self._typing_timer.timeout.connect(self._type_buffered_chunk)
+                self._typing_timer.start(15)  # 15ms 간격
+    
+    def _type_buffered_chunk(self):
+        """버퍼에서 문자를 하나씩 꺼내서 표시합니다."""
+        if not hasattr(self, '_chunk_buffer') or not self._chunk_buffer:
+            return
+        
+        if self._streaming_bubble:
+            # 한 번에 여러 글자씩 표시 (속도 조절)
+            chars_per_tick = 3
+            chars_to_add = self._chunk_buffer[:chars_per_tick]
+            self._chunk_buffer = self._chunk_buffer[chars_per_tick:]
+            
+            current_content = self._streaming_bubble.message.content
+            new_content = current_content + chars_to_add
+            self._streaming_bubble.message.content = new_content
+            self._streaming_bubble.update_content(new_content)
+            self._scroll_to_bottom()
+    
+    def complete_streaming(self):
+        """
+        스트리밍을 완료하고 버블을 일반 메시지로 전환합니다.
+        """
+        # 타이핑 타이머 정리
+        if hasattr(self, '_typing_timer') and self._typing_timer:
+            self._typing_timer.stop()
+            self._typing_timer = None
+        
+        # 남은 버퍼 모두 표시
+        if hasattr(self, '_chunk_buffer') and self._chunk_buffer and self._streaming_bubble:
+            current_content = self._streaming_bubble.message.content
+            new_content = current_content + self._chunk_buffer
+            self._streaming_bubble.message.content = new_content
+            self._chunk_buffer = ""
+        
+        if self._streaming_bubble:
+            self._streaming_bubble.message.complete_streaming()
+            # 커서 제거를 위해 콘텐츠 다시 렌더링
+            self._streaming_bubble._update_content()
+            self._streaming_bubble = None
+            self._scroll_to_bottom()
     
     # =========================================================================
     # Confirmation UI

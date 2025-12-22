@@ -55,7 +55,7 @@ class DashboardDataWorker(QThread):
             response = requests.get(
                 f"{self._api_base}/dashboard/summary",
                 headers=headers,
-                timeout=10
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -78,7 +78,7 @@ class DashboardDataWorker(QThread):
                 notes_response = requests.get(
                     f"{self._api_base}/dashboard/notes",
                     headers=headers,
-                    timeout=10
+                    timeout=30
                 )
                 
                 if notes_response.status_code == 200:
@@ -93,7 +93,7 @@ class DashboardDataWorker(QThread):
                 analysis_response = requests.get(
                     f"{self._api_base}/dashboard/analyses/latest",
                     headers=headers,
-                    timeout=10
+                    timeout=30
                 )
                 
                 if analysis_response.status_code == 200:
@@ -145,7 +145,7 @@ class NoteSaveWorker(QThread):
                     f"{self._api_base}/dashboard/notes/{self.note_id}",
                     headers=headers,
                     json={"title": self.title, "content": self.content},
-                    timeout=10
+                    timeout=30
                 )
             else:
                 # Create new note
@@ -153,7 +153,7 @@ class NoteSaveWorker(QThread):
                     f"{self._api_base}/dashboard/notes",
                     headers=headers,
                     json={"title": self.title, "content": self.content},
-                    timeout=10
+                    timeout=30
                 )
             
             if response.status_code == 200:

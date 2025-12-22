@@ -141,7 +141,7 @@ class OAuthWorker(QThread):
             time.sleep(0.5)
             
             self.status_changed.emit("로그인 URL 요청 중...")
-            response = requests.get(f"{API_BASE_URL}/auth/google/login", timeout=10)
+            response = requests.get(f"{API_BASE_URL}/auth/google/login", timeout=30)
             
             if response.status_code != 200:
                 raise Exception(f"로그인 URL 요청 실패: {response.status_code}")

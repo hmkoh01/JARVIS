@@ -49,7 +49,7 @@ class RecommendationsWorker(QThread):
             response = requests.get(
                 f"{self._api_base}/recommendations",
                 headers=headers,
-                timeout=10
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -469,11 +469,19 @@ class RecommendationsWidget(QWidget):
     def _update_ui(self):
         """Update UI with recommendations."""
         try:
-            # Clear existing cards
-            while self._content_layout.count() > 1:
-                item = self._content_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
+            print(f"📋 추천 UI 업데이트: {len(self._recommendations)}개 추천")
+            
+            # Clear existing cards (status_label과 stretch 제외)
+            widgets_to_remove = []
+            for i in range(self._content_layout.count()):
+                item = self._content_layout.itemAt(i)
+                widget = item.widget() if item else None
+                if widget and widget != self._status_label:
+                    widgets_to_remove.append(widget)
+            
+            for widget in widgets_to_remove:
+                self._content_layout.removeWidget(widget)
+                widget.deleteLater()
             
             if not self._recommendations:
                 self._status_label.setText("📭 새로운 추천이 없습니다\n\n채팅을 통해 관심사를 알려주시면\n맞춤형 추천을 받으실 수 있습니다")
@@ -482,12 +490,19 @@ class RecommendationsWidget(QWidget):
             
             self._status_label.hide()
             
-            for rec in self._recommendations:
+            # 카드 추가 (status_label 다음, stretch 전에)
+            insert_index = 0
+            for i, rec in enumerate(self._recommendations):
+                print(f"  📌 추천 카드 추가: {rec.get('keyword', 'unknown')} (id: {rec.get('id', 'N/A')})")
                 card = RecommendationCard(rec)
                 card.accepted.connect(self._on_recommendation_accepted)
                 card.rejected.connect(self._on_recommendation_rejected)
-                self._content_layout.insertWidget(self._content_layout.count() - 1, card)
-        except RuntimeError:
+                self._content_layout.insertWidget(insert_index, card)
+                insert_index += 1
+            
+            print(f"✅ 추천 카드 {len(self._recommendations)}개 추가 완료")
+        except RuntimeError as e:
+            print(f"❌ 추천 UI 업데이트 오류: {e}")
             pass  # 위젯이 이미 삭제됨
     
     def _on_recommendation_accepted(self, rec_id: int):
@@ -519,7 +534,7 @@ class RecommendationsWidget(QWidget):
                     f"{API_BASE_URL}/api/v2/recommendations/{rec_id}/respond",
                     headers=headers,
                     json={"action": action},
-                    timeout=10
+                    timeout=30
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -577,4 +592,24 @@ class RecommendationsWidget(QWidget):
                     widget._fade_effect = effect
                     
                     break
+    
+    def add_recommendation(self, recommendation: Dict[str, Any]):
+        """WebSocket으로 받은 추천을 직접 위젯에 추가합니다."""
+        try:
+            rec_id = recommendation.get("id")
+            
+            # 이미 있는 추천인지 확인
+            for existing in self._recommendations:
+                if existing.get("id") == rec_id:
+                    print(f"⏭️ 이미 표시된 추천: {recommendation.get('keyword')} (id={rec_id})")
+                    return
+            
+            # 추천 추가
+            self._recommendations.insert(0, recommendation)
+            print(f"📌 추천 위젯에 추가: {recommendation.get('keyword')} (id={rec_id})")
+            
+            # UI 업데이트
+            self._update_ui()
+        except RuntimeError:
+            pass  # 위젯이 이미 삭제됨
 

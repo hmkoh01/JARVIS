@@ -982,7 +982,8 @@ JSON 응답만 제공해주세요:"""
         user_intent: UserIntent,
         remaining_agents: List[str],
         sub_tasks: Dict[str, Any],
-        previous_results: List[Dict[str, Any]] = None
+        previous_results: List[Dict[str, Any]] = None,
+        extra_state: Dict[str, Any] = None
     ):
         """
         남은 에이전트들을 순차적으로 실행합니다.
@@ -995,6 +996,7 @@ JSON 응답만 제공해주세요:"""
             remaining_agents: 실행할 에이전트 목록
             sub_tasks: 각 에이전트의 서브태스크 정보
             previous_results: 이전 에이전트들의 실행 결과
+            extra_state: 에이전트에 전달할 추가 상태 (예: confirm_code=True)
         
         Yields:
             dict: 이벤트 타입과 데이터
@@ -1070,6 +1072,10 @@ JSON 응답만 제공해주세요:"""
                         "context": user_intent.context,
                         "previous_results": prev_results
                     }
+                    
+                    # extra_state가 있으면 에이전트 상태에 추가 (예: confirm_code=True)
+                    if extra_state:
+                        agent_state.update(extra_state)
                     
                     agent_start = time.time()
                     result_state = agent.process(agent_state)

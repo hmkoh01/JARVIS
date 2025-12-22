@@ -1669,18 +1669,23 @@ class SQLite:
         try:
             conn = self.get_user_connection(user_id)
             
+            # 기준 시간 계산 (Python datetime으로 계산하여 SQLite 비교와 호환)
+            from datetime import datetime, timedelta
+            cutoff_time = datetime.now() - timedelta(days=days)
+            cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
+            
             # 채팅 메시지 수
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM chat_messages 
-                WHERE created_at >= datetime('now', ?)
-            """, (f'-{days} days',))
+                WHERE created_at >= ?
+            """, (cutoff_str,))
             chat_count = cursor.fetchone()[0]
             
             # 브라우저 로그 수
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM browser_logs 
-                WHERE visit_time >= datetime('now', ?)
-            """, (f'-{days} days',))
+                WHERE visit_time >= ?
+            """, (cutoff_str,))
             browser_count = cursor.fetchone()[0]
             
             # 추천 수
@@ -1689,8 +1694,8 @@ class SQLite:
                        SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) as accepted,
                        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
                 FROM recommendations 
-                WHERE created_at >= datetime('now', ?)
-            """, (f'-{days} days',))
+                WHERE created_at >= ?
+            """, (cutoff_str,))
             rec_row = cursor.fetchone()
             rec_total = rec_row[0] or 0
             rec_accepted = rec_row[1] or 0
@@ -1699,8 +1704,8 @@ class SQLite:
             # 파일 수
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM files 
-                WHERE processed_at >= datetime('now', ?)
-            """, (f'-{days} days',))
+                WHERE processed_at >= ?
+            """, (cutoff_str,))
             file_count = cursor.fetchone()[0]
             
             # 마지막 활동 시간

@@ -15,7 +15,12 @@ from PyQt6.QtWidgets import (
     QApplication, 
     QMenu, 
     QMessageBox,
-    QGraphicsDropShadowEffect
+    QGraphicsDropShadowEffect,
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton
 )
 from PyQt6.QtCore import (
     Qt, 
@@ -480,15 +485,109 @@ class FloatingButton(QWidget):
     
     def _confirm_exit(self):
         """Show exit confirmation dialog."""
-        reply = QMessageBox.question(
-            self,
-            "JARVIS 종료",
-            "JARVIS를 종료하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+        # 커스텀 다이얼로그 생성
+        dialog = QDialog(self)
+        dialog.setWindowTitle("JARVIS 종료")
+        dialog.setFixedSize(240, 120)
+        dialog.setWindowFlags(
+            Qt.WindowType.Dialog |
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint
         )
+        dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        if reply == QMessageBox.StandardButton.Yes:
+        # 메인 컨테이너
+        container = QWidget(dialog)
+        container.setGeometry(0, 0, 240, 120)
+        container.setStyleSheet("""
+            QWidget {
+                background-color: #1E1E1E;
+                border-radius: 12px;
+                border: 1px solid #3D3D4D;
+            }
+        """)
+        
+        # 레이아웃
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(16)
+        
+        # 메시지 라벨
+        label = QLabel("JARVIS를 종료하시겠습니까?")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("""
+            QLabel {
+                color: #E4E4E7;
+                font-size: 14px;
+                font-weight: 500;
+                background: transparent;
+                border: none;
+            }
+        """)
+        layout.addWidget(label)
+        
+        # 버튼 레이아웃
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+        
+        # 취소 버튼
+        cancel_btn = QPushButton("취소")
+        cancel_btn.setFixedSize(90, 36)
+        cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3D3D4D;
+                color: #E4E4E7;
+                border: none;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #4D4D5D;
+            }
+            QPushButton:pressed {
+                background-color: #2D2D3D;
+            }
+        """)
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        # 종료 버튼
+        exit_btn = QPushButton("종료")
+        exit_btn.setFixedSize(90, 36)
+        exit_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        exit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #DC2626;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #EF4444;
+            }
+            QPushButton:pressed {
+                background-color: #B91C1C;
+            }
+        """)
+        exit_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(exit_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # 다이얼로그를 화면 중앙에 위치
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geo = screen.availableGeometry()
+            x = screen_geo.center().x() - dialog.width() // 2
+            y = screen_geo.center().y() - dialog.height() // 2
+            dialog.move(x, y)
+        
+        # 다이얼로그 실행
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             self.exit_requested.emit()
             QApplication.quit()
     

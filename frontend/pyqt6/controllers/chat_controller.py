@@ -128,6 +128,10 @@ class ChatController(QObject):
         self._current_thread: Optional[Thread] = None
         self._message_history: List[Message] = []
         
+        # 스트리밍 관련 멤버 변수
+        self._stream_buffer = ""
+        self._current_metadata = None
+        
         self._setup_connections()
     
     def _setup_connections(self):
@@ -214,7 +218,7 @@ class ChatController(QObject):
     @pyqtSlot(str)
     def send_message(self, text: str):
         """
-        Send a message to the API (non-streaming).
+        Send a message to the API with streaming support.
         
         Args:
             text: The message text to send
@@ -243,12 +247,124 @@ class ChatController(QObject):
         # Show thinking indicator
         self._chat_widget.set_status("생각하고 있어요...", sending=True)
         
-        # Make non-streaming API request
+        # 스트리밍 상태 초기화
+        self._stream_buffer = ""
+        self._current_metadata = None
+        
+        # 스트리밍 버블 시작
+        self._chat_widget.start_streaming()
+        
+        # Make streaming API request
         self._current_thread = self._api_client.send_message(
             message=text,
-            on_completed=self._on_response_received,
+            on_chunk=self._on_stream_chunk,
+            on_completed=self._on_streaming_completed,
             on_error=self._on_response_error
         )
+    
+    def _on_stream_chunk(self, chunk: str):
+        """
+        스트리밍 청크를 처리합니다 (백그라운드 스레드에서 호출됨).
+        
+        Args:
+            chunk: 수신된 텍스트 청크
+        """
+        # 버퍼에 청크 추가
+        self._stream_buffer += chunk
+        
+        # 메타데이터 마커 확인 및 필터링
+        clean_chunk = chunk
+        
+        # 메타데이터 시작 마커가 있으면 저장하고 표시하지 않음
+        if '---METADATA_START---' in self._stream_buffer:
+            # 메타데이터 추출 시도
+            match = re.search(self.METADATA_PATTERN, self._stream_buffer, flags=re.DOTALL)
+            if match:
+                try:
+                    metadata_json = match.group(1)
+                    self._current_metadata = json.loads(metadata_json)
+                    print(f"[ChatController] 메타데이터 추출: {self._current_metadata.get('action', 'unknown')}")
+                except json.JSONDecodeError:
+                    pass
+                # 메타데이터 부분 제거
+                clean_chunk = re.sub(self.METADATA_PATTERN, '', chunk, flags=re.DOTALL)
+            elif '---METADATA_START---' in chunk:
+                # 메타데이터 시작했지만 아직 완료되지 않음 - 청크 표시 안함
+                clean_chunk = chunk.split('---METADATA_START---')[0]
+        
+        # 레거시 메타데이터 패턴도 처리
+        clean_chunk = re.sub(self.LEGACY_METADATA_PATTERN, '', clean_chunk, flags=re.DOTALL)
+        
+        # UI 스레드에서 버블 업데이트
+        if clean_chunk.strip():
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            # QMetaObject.invokeMethod로 UI 스레드에서 실행
+            QMetaObject.invokeMethod(
+                self._chat_widget, 
+                "append_streaming_chunk",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(str, clean_chunk)
+            )
+    
+    def _on_streaming_completed(self, data: dict):
+        """스트리밍 완료 처리 (백그라운드 스레드에서 호출됨)"""
+        print(f"[ChatController] Streaming completed")
+        
+        # 메타데이터를 인스턴스 변수에 저장 (UI 스레드에서 사용)
+        self._pending_metadata = self._current_metadata
+        print(f"[ChatController] 저장된 메타데이터: {self._pending_metadata}")
+        
+        # UI 스레드에서 완료 처리 호출
+        from PyQt6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(
+            self, 
+            "_complete_streaming_ui",
+            Qt.ConnectionType.QueuedConnection
+        )
+    
+    @pyqtSlot()
+    def _complete_streaming_ui(self):
+        """UI 스레드에서 스트리밍 완료 처리"""
+        print(f"[ChatController] _complete_streaming_ui 실행")
+        
+        # 버퍼 초기화
+        self._stream_buffer = ""
+        
+        # Get the streaming message and add to history
+        if self._chat_widget._streaming_bubble:
+            message = self._chat_widget._streaming_bubble.message
+            self._message_history.append(message)
+        
+        # 스트리밍 완료
+        self._chat_widget.complete_streaming()
+        self._current_thread = None
+        self._is_sending = False
+        self.sending_status_changed.emit(False)
+        self._chat_widget.set_status("Ready")
+        
+        # 확인이 필요한 메타데이터가 있으면 처리 (버튼 표시)
+        metadata_to_process = getattr(self, '_pending_metadata', None)
+        print(f"[ChatController] 메타데이터 처리 시작: {metadata_to_process is not None}")
+        if metadata_to_process:
+            action = metadata_to_process.get('action', '')
+            print(f"[ChatController] action: {action}")
+            if action in ('confirm_report', 'confirm_analysis', 'confirm_code', 'confirm_dashboard'):
+                print(f"[ChatController] Emitting confirm_action_requested for action: {action}")
+                self.confirm_action_requested.emit(metadata_to_process)
+            elif action == 'open_file':
+                # 코드 파일 생성 완료 - 다운로드 시그널 emit
+                file_path = metadata_to_process.get('file_path', '')
+                file_name = metadata_to_process.get('file_name', '')
+                if file_path and file_name:
+                    print(f"[ChatController] Code file ready: {file_name}")
+                    self.code_file_ready.emit({
+                        'file_path': file_path,
+                        'file_name': file_name
+                    })
+        
+        # 메타데이터 초기화
+        self._current_metadata = None
+        self._pending_metadata = None
     
     def _check_rule_based_response(self, text: str) -> Optional[str]:
         """
@@ -356,6 +472,7 @@ class ChatController(QObject):
         # 백그라운드 스레드에서 스트리밍 요청 실행
         def _run():
             import requests
+            import json
             
             try:
                 url = f"{self._api_client.base_url}/api/v2/continue-agents"
@@ -375,9 +492,28 @@ class ChatController(QObject):
                 
                 if response.status_code == 200:
                     full_content = []
+                    extracted_metadata = None
                     
                     for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
                         if chunk:
+                            # 메타데이터 추출
+                            metadata_match = re.search(self.METADATA_PATTERN, chunk)
+                            if metadata_match:
+                                try:
+                                    extracted_metadata = json.loads(metadata_match.group(1))
+                                    print(f"[ChatController] Continue-agents 메타데이터 추출: {extracted_metadata.get('action', 'unknown')}")
+                                except json.JSONDecodeError:
+                                    pass
+                            
+                            # 레거시 패턴도 확인
+                            legacy_match = re.search(self.LEGACY_METADATA_PATTERN, chunk)
+                            if legacy_match and not extracted_metadata:
+                                try:
+                                    extracted_metadata = json.loads(legacy_match.group(1))
+                                    print(f"[ChatController] Continue-agents 레거시 메타데이터 추출: {extracted_metadata.get('action', 'unknown')}")
+                                except json.JSONDecodeError:
+                                    pass
+                            
                             # 메타데이터 마커 필터링
                             clean_chunk = re.sub(self.METADATA_PATTERN, '', chunk, flags=re.DOTALL)
                             clean_chunk = re.sub(self.LEGACY_METADATA_PATTERN, '', clean_chunk, flags=re.DOTALL)
@@ -386,7 +522,7 @@ class ChatController(QObject):
                                 full_content.append(clean_chunk)
                     
                     content = ''.join(full_content)
-                    self._on_continue_agents_completed(content)
+                    self._on_continue_agents_completed(content, extracted_metadata)
                 else:
                     error_msg = f"API 오류: {response.status_code}"
                     try:
@@ -402,53 +538,98 @@ class ChatController(QObject):
         thread = Thread(target=_run, daemon=True)
         thread.start()
     
-    def _on_continue_agents_completed(self, content: str):
+    def _on_continue_agents_completed(self, content: str, metadata: Optional[Dict[str, Any]] = None):
         """Continue-agents 요청 완료 처리"""
         print(f"[ChatController] Continue-agents completed, content length: {len(content)}")
+        if metadata:
+            print(f"[ChatController] Continue-agents 메타데이터: {metadata.get('action', 'none')}")
         
-        # UI 스레드에서 실행
-        from PyQt6.QtCore import QTimer
+        # 컨텐츠와 메타데이터 저장
+        self._continue_agents_content = content
+        self._continue_agents_metadata = metadata
         
-        def update_ui():
-            if content.strip():
-                # 응답 내용을 채팅에 추가 (타이핑 애니메이션)
-                assistant_message = self._chat_widget.add_assistant_message(
-                    content.strip(),
-                    typing_animation=True,
-                    on_complete=None
-                )
-                self._message_history.append(assistant_message)
+        # UI 스레드에서 실행하기 위해 QMetaObject.invokeMethod 사용
+        from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+        QMetaObject.invokeMethod(
+            self, "_complete_continue_agents_ui",
+            Qt.ConnectionType.QueuedConnection
+        )
+    
+    @pyqtSlot()
+    def _complete_continue_agents_ui(self):
+        """Continue-agents UI 업데이트 (UI 스레드에서 실행)"""
+        print("[ChatController] _complete_continue_agents_ui 실행")
+        
+        content = getattr(self, '_continue_agents_content', '')
+        metadata = getattr(self, '_continue_agents_metadata', None)
+        
+        if content.strip():
+            # 응답 내용을 채팅에 추가 (타이핑 애니메이션)
+            assistant_message = self._chat_widget.add_assistant_message(
+                content.strip(),
+                typing_animation=True,
+                on_complete=None
+            )
+            self._message_history.append(assistant_message)
+            print(f"[ChatController] Continue-agents 응답 표시: {len(content)} chars")
+        
+        self._is_sending = False
+        self.sending_status_changed.emit(False)
+        self._chat_widget.set_status("Ready")
+        
+        # 메타데이터 처리 (파일 다운로드 등)
+        if metadata:
+            action = metadata.get('action', '')
+            print(f"[ChatController] Continue-agents action 처리: {action}")
             
-            self._is_sending = False
-            self.sending_status_changed.emit(False)
-            self._chat_widget.set_status("Ready")
-            
-            # 대기 중인 continue 요청이 있으면 처리
-            if hasattr(self, '_pending_continue_request') and self._pending_continue_request:
-                pending = self._pending_continue_request
-                self._pending_continue_request = None
-                self.send_continue_agents_request(pending)
+            if action == 'open_file':
+                # 코드 파일 다운로드 시그널 emit
+                file_path = metadata.get('file_path', '')
+                file_name = metadata.get('file_name', '')
+                if file_path and file_name:
+                    print(f"[ChatController] Code file ready from continue-agents: {file_name}")
+                    self.code_file_ready.emit({
+                        'file_path': file_path,
+                        'file_name': file_name
+                    })
+            elif action in ('confirm_report', 'confirm_analysis', 'confirm_code'):
+                # 확인 요청
+                self.confirm_action_requested.emit(metadata)
         
-        QTimer.singleShot(0, update_ui)
+        # 대기 중인 continue 요청이 있으면 처리
+        if hasattr(self, '_pending_continue_request') and self._pending_continue_request:
+            pending = self._pending_continue_request
+            self._pending_continue_request = None
+            self.send_continue_agents_request(pending)
     
     def _on_continue_agents_error(self, error_msg: str):
         """Continue-agents 요청 오류 처리"""
         print(f"[ChatController] Continue-agents error: {error_msg}")
         
-        from PyQt6.QtCore import QTimer
+        # 에러 메시지 저장
+        self._continue_agents_error = error_msg
         
-        def update_ui():
-            # 오류 메시지 표시
-            self._chat_widget.add_assistant_message(
-                f"❌ 추가 작업 중 오류가 발생했어요: {error_msg}",
-                typing_animation=True
-            )
-            
-            self._is_sending = False
-            self.sending_status_changed.emit(False)
-            self._chat_widget.set_status("Ready")
+        # UI 스레드에서 실행
+        from PyQt6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(
+            self, "_show_continue_agents_error",
+            Qt.ConnectionType.QueuedConnection
+        )
+    
+    @pyqtSlot()
+    def _show_continue_agents_error(self):
+        """Continue-agents 오류 UI 업데이트 (UI 스레드에서 실행)"""
+        error_msg = getattr(self, '_continue_agents_error', '알 수 없는 오류')
         
-        QTimer.singleShot(0, update_ui)
+        # 오류 메시지 표시
+        self._chat_widget.add_assistant_message(
+            f"❌ 추가 작업 중 오류가 발생했어요: {error_msg}",
+            typing_animation=True
+        )
+        
+        self._is_sending = False
+        self.sending_status_changed.emit(False)
+        self._chat_widget.set_status("Ready")
     
     # =========================================================================
     # Non-Streaming Response Callbacks
@@ -626,6 +807,16 @@ class ChatController(QObject):
         """Start the controller (connect WebSocket, etc.)."""
         if self._ws_manager:
             self._ws_manager.connect()
+            # WebSocket 연결 후 시그널 연결 (연결 완료 시점에 다시 시도)
+            self._connect_client_signals()
+            
+            # connected 시그널에도 연결 (비동기 연결 대응)
+            if self._ws_manager.client:
+                try:
+                    self._ws_manager.client.connected.disconnect(self._connect_client_signals)
+                except TypeError:
+                    pass
+                self._ws_manager.client.connected.connect(self._connect_client_signals)
     
     def stop(self):
         """Stop the controller (disconnect WebSocket, cancel requests)."""

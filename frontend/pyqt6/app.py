@@ -361,6 +361,11 @@ class JARVISApp:
         self._floating_button = FloatingButton(main_window=self._main_window)
         self._setup_floating_button()
         
+        # 초기 설정이 진행 중이면 로딩 애니메이션 시작
+        if self._is_initial_setup_in_progress:
+            self._floating_button.set_loading(True)
+            print("🔄 플로팅 버튼 생성 후 로딩 애니메이션 시작")
+        
         # Initialize chat controller
         self._init_chat_controller()
         
@@ -506,7 +511,7 @@ class JARVISApp:
                 f"{API_BASE_URL}/api/v2/settings/initial-setup",
                 headers={"Authorization": f"Bearer {token}"},
                 json={"folder_path": folder_path},
-                timeout=10
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -641,7 +646,7 @@ class JARVISApp:
                 f"{API_BASE_URL}/api/v2/data-collection/start/{user_id}",
                 headers={"Authorization": f"Bearer {token}"},
                 json={"selected_folders": folders},
-                timeout=10
+                timeout=30
             )
             
             if collection_response.status_code == 200:
@@ -683,7 +688,7 @@ class JARVISApp:
             response = requests.get(
                 f"{API_BASE_URL}/api/v2/data-collection/status/{user_id}",
                 headers={"Authorization": f"Bearer {token}"},
-                timeout=5
+                timeout=15
             )
             
             if response.status_code == 200:
@@ -857,7 +862,7 @@ class JARVISApp:
             response = requests.get(
                 f"{API_BASE_URL}/api/v2/dashboard/summary",
                 headers={"Authorization": f"Bearer {token}"},
-                timeout=10
+                timeout=30
             )
             if response.status_code == 200:
                 data = response.json()
@@ -954,9 +959,9 @@ class JARVISApp:
             action_name = "분석"
             action_icon = "📊"
         elif action == 'confirm_code':
-            self._chat_controller.send_message(f"네, '{keyword}' 코드를 작성해주세요.")
-            action_name = "코드 작성"
-            action_icon = "💻"
+            # 코드 생성 API 직접 호출 (confirm_code=True 플래그 포함)
+            self._execute_code_generation(keyword, metadata)
+            return  # 코드 생성은 자체적으로 토스트 표시
         elif action == 'confirm_dashboard':
             self._chat_controller.send_message("네, 대시보드 분석을 시작해주세요.")
             action_name = "대시보드 분석"
@@ -1025,7 +1030,7 @@ class JARVISApp:
                 f"{API_BASE_URL}/api/v2/reports/create",
                 headers={"Authorization": f"Bearer {token}"},
                 json=request_body,
-                timeout=10
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -1072,6 +1077,58 @@ class JARVISApp:
             f"'{keyword}' 작업이 취소되었습니다.",
             duration_ms=3000
         )
+    
+    def _execute_code_generation(self, keyword: str, metadata: dict):
+        """
+        코드 생성을 실행합니다.
+        사용자가 confirm_code 확인을 했을 때 호출됩니다.
+        
+        Args:
+            keyword: 코드 생성 주제
+            metadata: 메타데이터 (original_question 등 포함)
+        """
+        # 토스트 표시
+        self._toast_manager.info(
+            "💻 코드 작성 시작",
+            f"'{keyword}' 코드를 작성하고 있어요.\n완료되면 알려드릴게요.",
+            duration_ms=4000
+        )
+        
+        # 채팅에 상태 메시지 추가
+        if hasattr(self._main_window, 'chat_widget'):
+            self._main_window.chat_widget.add_assistant_message(
+                "💻 코드를 작성하고 있어요...",
+                typing_animation=True
+            )
+        
+        # 플로팅 버튼 로딩 상태
+        if self._floating_button:
+            self._floating_button.set_loading(True)
+        
+        # ChatController를 통해 코드 생성 요청
+        token, user_id = self._auth_controller.get_credentials()
+        if not token:
+            self._toast_manager.error("오류", "인증이 필요합니다.")
+            return
+        
+        # 스트리밍 요청 데이터 구성 (confirm_code=True 포함)
+        original_question = metadata.get('original_question', keyword)
+        request_data = {
+            "message": original_question,
+            "user_id": user_id,
+            "remaining_agents": ["coding"],
+            "sub_tasks": {
+                "coding": {
+                    "task": original_question,
+                    "focus": "실행 가능한 Python 코드"
+                }
+            },
+            "previous_results": [],
+            "confirm_code": True  # 코드 생성 확인 플래그
+        }
+        
+        # ChatController의 스트리밍 메서드 사용
+        self._chat_controller.send_continue_agents_request(request_data)
     
     def _execute_remaining_agents(self, pending_data: dict):
         """
@@ -1184,43 +1241,78 @@ class JARVISApp:
             actions=actions
         )
         print(f"📌 Recommendation toast shown: {keyword} (id={recommendation_id})")
+        
+        # 추천 위젯에 직접 추가 (API 재조회 대신)
+        if hasattr(self._main_window, 'recommendations_widget'):
+            self._main_window.recommendations_widget.add_recommendation(data)
+            print(f"📋 추천 위젯에 직접 추가 완료")
     
     def _show_recommendation_after_greeting(self):
         """인사 메시지 후 추천을 표시 (WebSocket에서 오지 않은 경우 API에서 가져옴)."""
-        import requests
+        from PyQt6.QtCore import QThread, pyqtSignal
         
         token, user_id = self._auth_controller.get_credentials()
         if not token:
             return
         
-        # 디버그: 실제 사용되는 URL 출력
-        request_url = f"{API_BASE_URL}/api/v2/recommendations"
-        print(f"🔍 대기 추천 조회 URL: {request_url}")
-        # URL 바이트 확인 (숨겨진 문자 체크)
-        from urllib.parse import urlparse
-        parsed = urlparse(request_url)
-        print(f"🔍 Host bytes: {[hex(ord(c)) for c in parsed.hostname]}")
-        
-        try:
-            response = requests.get(
-                request_url,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=5
-            )
+        # 백그라운드 스레드에서 API 호출 (UI 블로킹 방지)
+        class RecommendationFetchWorker(QThread):
+            finished = pyqtSignal(list)  # recommendations
+            error = pyqtSignal(str)
             
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("success"):
-                    recommendations = data.get("recommendations", [])
-                    if recommendations:
-                        # 가장 최근 추천 1개만 토스트로 표시
-                        latest_rec = recommendations[0]
-                        print(f"📌 대기 중인 추천 발견: {latest_rec.get('keyword')}")
-                        self._on_recommendation(latest_rec)
+            def __init__(self, api_url: str, token: str):
+                super().__init__()
+                self._api_url = api_url
+                self._token = token
+            
+            def run(self):
+                import requests
+                try:
+                    response = requests.get(
+                        self._api_url,
+                        headers={"Authorization": f"Bearer {self._token}"},
+                        timeout=15
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("success"):
+                            recommendations = data.get("recommendations", [])
+                            self.finished.emit(recommendations)
+                        else:
+                            self.finished.emit([])
                     else:
-                        print("ℹ️ 대기 중인 추천 없음")
-        except Exception as e:
-            print(f"⚠️ 대기 중인 추천 조회 실패: {e}")
+                        self.finished.emit([])
+                except Exception as e:
+                    self.error.emit(str(e))
+        
+        request_url = f"{API_BASE_URL}/api/v2/recommendations"
+        print(f"🔍 대기 추천 조회 (비동기): {request_url}")
+        
+        worker = RecommendationFetchWorker(request_url, token)
+        
+        def on_finished(recommendations):
+            if recommendations:
+                latest_rec = recommendations[0]
+                print(f"📌 대기 중인 추천 발견: {latest_rec.get('keyword')}")
+                self._on_recommendation(latest_rec)
+            else:
+                print("ℹ️ 대기 중인 추천 없음")
+            worker.deleteLater()
+        
+        def on_error(error_msg):
+            print(f"⚠️ 대기 중인 추천 조회 실패: {error_msg}")
+            worker.deleteLater()
+        
+        worker.finished.connect(on_finished)
+        worker.error.connect(on_error)
+        
+        # 워커 참조 유지
+        if not hasattr(self, '_recommendation_fetch_workers'):
+            self._recommendation_fetch_workers = []
+        self._recommendation_fetch_workers.append(worker)
+        
+        worker.start()
     
     def _handle_recommendation_response(self, recommendation_id: int, keyword: str, action: str):
         """Handle user response to recommendation (accept/reject) - async."""
@@ -1229,15 +1321,14 @@ class JARVISApp:
             self._toast_manager.error("오류", "추천 응답을 처리할 수 없습니다.")
             return
         
-        # 로딩 표시
-        self._floating_button.set_loading(True)
-        
-        # 진행 중 토스트 표시
-        self._toast_manager.info(
-            "⏳ 처리 중",
-            f"'{keyword}' 요청을 처리하고 있습니다...",
-            duration_ms=2000
-        )
+        # 수락 시에만 로딩 표시 및 토스트
+        if action == "accept":
+            self._floating_button.set_loading(True)
+            self._toast_manager.info(
+                "⏳ 처리 중",
+                f"'{keyword}' 요청을 처리하고 있습니다...",
+                duration_ms=2000
+            )
         
         # 비동기 워커 생성
         url = f"{API_BASE_URL}/api/v2/recommendations/{recommendation_id}/respond"
@@ -1321,12 +1412,7 @@ class JARVISApp:
             print(f"✅ Recommendation accepted: {keyword}")
             
         elif action == "reject" and result.get("success"):
-            # 거절 성공
-            self._toast_manager.info(
-                "🚫 추천 거절",
-                f"'{keyword}'는 더 이상 추천되지 않습니다.",
-                duration_ms=4000
-            )
+            # 거절 성공 - 토스트 없이 조용히 처리
             print(f"❌ Recommendation rejected: {keyword}")
         else:
             # 실패
@@ -1444,14 +1530,7 @@ class JARVISApp:
                 except Exception as e:
                     self.finished.emit("", str(e))
         
-        # 진행 중 토스트 표시
-        self._toast_manager.info(
-            "📥 다운로드 중",
-            f"{keyword} 리포트를 다운로드하고 있습니다...",
-            duration_ms=30000
-        )
-        
-        # 워커 생성 및 시작
+        # 워커 생성 및 시작 (다운로드 중 토스트 없이 백그라운드에서 조용히 처리)
         worker = ReportDownloadWorker(
             api_url=API_BASE_URL,
             token=token,
@@ -1659,15 +1738,8 @@ class JARVISApp:
             
             # Check if initial setup is in progress
             if self._is_initial_setup_in_progress:
-                # Start loading animation on floating button
+                # Start loading animation on floating button (토스트는 _start_client_data_collection에서 이미 표시됨)
                 self._floating_button.set_loading(True)
-                
-                # Show initial setup toast
-                self._toast_manager.info(
-                    "⏳ 초기 데이터 수집 시작",
-                    "데이터를 수집하고 있습니다. 완료되면 알려드릴게요!\n버튼을 클릭하면 진행 상황을 확인할 수 있습니다.",
-                    duration_ms=6000
-                )
                 print("🔄 Initial setup in progress - loading animation started")
             else:
                 # 먼저 인사 메시지 표시

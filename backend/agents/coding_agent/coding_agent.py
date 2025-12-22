@@ -118,6 +118,7 @@ class CodingAgent(BaseAgent):
                 - user_id: 사용자 ID
                 - attached_files: 첨부 파일 목록 (선택)
                 - chat_history: 대화 기록 (선택)
+                - confirm_code: 코드 생성 확인 플래그 (선택, True면 실제 코드 생성)
         
         Returns:
             처리된 상태 딕셔너리
@@ -126,6 +127,7 @@ class CodingAgent(BaseAgent):
         user_id = state.get("user_id")
         attached_files = state.get("attached_files", [])
         chat_history = state.get("chat_history", [])
+        confirm_code = state.get("confirm_code", False)
         
         if not question:
             return {
@@ -134,6 +136,10 @@ class CodingAgent(BaseAgent):
                 "success": False,
                 "agent_type": self.agent_type
             }
+        
+        # confirm_code가 False면 먼저 확인 메시지 반환
+        if not confirm_code:
+            return self._generate_confirmation_message(state, question)
         
         # 비동기 함수를 동기적으로 실행
         try:
@@ -165,6 +171,62 @@ class CodingAgent(BaseAgent):
             "agent_type": self.agent_type,
             "metadata": result.get("metadata", {})
         }
+    
+    def _generate_confirmation_message(self, state: Dict[str, Any], question: str) -> Dict[str, Any]:
+        """
+        코드 생성 전 사용자에게 확인 메시지를 반환합니다.
+        
+        Args:
+            state: 상태 딕셔너리
+            question: 사용자 요청
+        
+        Returns:
+            확인 메시지가 포함된 상태 딕셔너리
+        """
+        # 요청 요약 (최대 50자)
+        request_summary = question[:50] + "..." if len(question) > 50 else question
+        
+        # 코드 유형 추측
+        code_type = self._guess_code_type(question)
+        
+        confirm_message = f"💻 **'{request_summary}'**에 대한 코드를 작성해드릴게요!\n\n"
+        confirm_message += "코드에는 다음 내용이 포함됩니다:\n\n"
+        confirm_message += "- 실행 가능한 Python 코드\n"
+        confirm_message += "- 필요한 import 문\n"
+        confirm_message += "- 에러 처리 및 주석\n"
+        confirm_message += "- 사용 예시\n\n"
+        confirm_message += "코드를 작성해드릴까요?"
+        
+        return {
+            **state,
+            "answer": confirm_message,
+            "success": True,
+            "agent_type": self.agent_type,
+            "metadata": {
+                "action": "confirm_code",
+                "keyword": request_summary,
+                "code_type": code_type,
+                "original_question": question,
+                "requires_confirmation": True
+            }
+        }
+    
+    def _guess_code_type(self, question: str) -> str:
+        """질문에서 코드 유형을 추측합니다."""
+        question_lower = question.lower()
+        
+        if any(kw in question_lower for kw in ["웹", "flask", "django", "api", "서버"]):
+            return "web"
+        elif any(kw in question_lower for kw in ["데이터", "분석", "pandas", "시각화", "차트"]):
+            return "data_analysis"
+        elif any(kw in question_lower for kw in ["자동화", "스크립트", "파일", "폴더"]):
+            return "automation"
+        elif any(kw in question_lower for kw in ["게임", "pygame", "tkinter", "gui"]):
+            return "game_gui"
+        elif any(kw in question_lower for kw in ["ai", "머신러닝", "딥러닝", "모델"]):
+            return "ai_ml"
+        else:
+            return "general"
     
     # ============================================================
     # Main Code Generation Logic

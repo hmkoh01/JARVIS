@@ -474,7 +474,7 @@ class ClientDataCollector(QThread):
                     "message": message,
                     "is_done": is_done
                 },
-                timeout=10
+                timeout=30
             )
         except Exception:
             pass  # 상태 업데이트 실패는 무시

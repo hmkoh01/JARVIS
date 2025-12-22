@@ -320,7 +320,7 @@ class SettingsWidget(QWidget):
                     f"{API_BASE_URL}/api/v2/settings/initial-setup",
                     headers={"Authorization": f"Bearer {self._jwt_token}"},
                     json={"folder_path": folder_path},
-                    timeout=10
+                    timeout=30
                 )
                 if response.status_code == 200:
                     print("✅ 폴더 설정 저장 완료")
