@@ -18,6 +18,7 @@ import tempfile
 import hashlib
 from datetime import datetime
 import asyncio
+import aiohttp
 import threading # 백그라운드 작업을 위해 추가
 
 from config.settings import settings
@@ -184,10 +185,22 @@ async def unified_message(message_request: MessageRequest, request: Request):
                             break
                         
                         elif event_type == "waiting_confirmation":
-                            # 확인 대기 - 메타데이터만 저장
+                            # 확인 대기 - 메타데이터에 남은 에이전트 정보 추가
                             metadata = event.get("metadata", {})
+                            remaining_agents = event.get("remaining_agents", [])
+                            sub_tasks = event.get("sub_tasks", {})
+                            original_message = event.get("original_message", "")
+                            previous_results = event.get("previous_results", [])
+                            
                             if metadata:
-                                final_metadata = metadata
+                                final_metadata = metadata.copy()
+                                # 남은 에이전트 정보 추가 (프론트엔드에서 continue-agents 호출에 필요)
+                                if remaining_agents:
+                                    final_metadata["remaining_agents"] = remaining_agents
+                                    final_metadata["sub_tasks"] = sub_tasks
+                                    final_metadata["original_message"] = original_message
+                                    final_metadata["previous_results"] = previous_results
+                                    logger.info(f"[MAS] 남은 에이전트 정보 포함: {remaining_agents}")
                         
                         elif event_type == "complete":
                             # 완료 - 실패가 있으면 메시지 표시
@@ -1152,6 +1165,233 @@ async def update_client_collection_status(
     except Exception as e:
         logger.error(f"클라이언트 상태 업데이트 오류: {e}")
         return {"success": False, "error": str(e)}
+
+
+class ClientBrowserHistoryRequest(BaseModel):
+    """클라이언트에서 전송하는 브라우저 히스토리 데이터"""
+    history: List[Dict[str, Any]]
+
+
+@router.post("/data-collection/client-browser-history/{user_id}")
+async def client_browser_history_upload(
+    user_id: int,
+    payload: ClientBrowserHistoryRequest,
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+    """
+    클라이언트에서 수집한 브라우저 히스토리를 받아 처리합니다.
+    
+    히스토리 데이터를 SQLite에 저장하고, 백그라운드에서 웹 크롤링 및 인덱싱을 수행합니다.
+    """
+    try:
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+        
+        if repository is None or embedder is None:
+            raise HTTPException(
+                status_code=500,
+                detail="서버 리소스가 아직 초기화되지 않았습니다."
+            )
+        
+        db = SQLite()
+        saved_count = 0
+        skipped_count = 0
+        history_items_for_indexing = []
+        
+        for item in payload.history:
+            url = item.get('url', '')
+            title = item.get('title', '')
+            visit_time_str = item.get('visit_time', '')
+            browser_name = item.get('browser_name', 'unknown')
+            
+            if not url:
+                continue
+            
+            # visit_time 파싱
+            try:
+                visit_time = datetime.fromisoformat(visit_time_str)
+            except:
+                visit_time = datetime.utcnow()
+            
+            # 중복 체크
+            if db.is_browser_log_duplicate(user_id, url, visit_time):
+                skipped_count += 1
+                continue
+            
+            # SQLite에 저장
+            history_data = {
+                'user_id': user_id,
+                'browser_name': browser_name,
+                'url': url,
+                'title': title,
+                'visit_time': visit_time
+            }
+            
+            log_id = db.insert_collected_browser_history(history_data)
+            if log_id:
+                saved_count += 1
+                history_items_for_indexing.append({
+                    'log_id': log_id,
+                    'url': url,
+                    'title': title,
+                    'visit_time': visit_time
+                })
+        
+        logger.info(f"✅ 브라우저 히스토리 저장: {saved_count}개 저장, {skipped_count}개 스킵")
+        
+        # 백그라운드에서 웹 크롤링 및 인덱싱 수행
+        if history_items_for_indexing:
+            background_tasks.add_task(
+                _index_browser_history_background,
+                user_id,
+                history_items_for_indexing,
+                repository,
+                embedder
+            )
+        
+        return {
+            "success": True,
+            "saved_count": saved_count,
+            "skipped_count": skipped_count,
+            "message": f"{saved_count}개 히스토리 저장 완료"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"브라우저 히스토리 업로드 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"업로드 오류: {str(e)}")
+
+
+async def _index_browser_history_background(
+    user_id: int,
+    history_items: List[Dict[str, Any]],
+    repository: Repository,
+    embedder: BGEM3Embedder
+):
+    """백그라운드에서 브라우저 히스토리의 웹 콘텐츠를 크롤링하고 인덱싱합니다."""
+    import aiohttp
+    from database.document_parser import DocumentParser
+    
+    logger.info(f"🌐 브라우저 히스토리 인덱싱 시작: {len(history_items)}개 URL")
+    
+    parser = DocumentParser()
+    db = SQLite()
+    
+    all_texts = []
+    all_metas = []
+    
+    async with aiohttp.ClientSession() as session:
+        for item in history_items:
+            url = item['url']
+            title = item['title']
+            log_id = item['log_id']
+            visit_time = item['visit_time']
+            
+            try:
+                # 웹 콘텐츠 크롤링
+                content = await _crawl_url(session, url)
+                
+                if not content or len(content.strip()) < 100:
+                    continue
+                
+                # 청크 분할
+                chunks = parser.chunk_text(content)
+                doc_id = f"web_{hashlib.md5(url.encode()).hexdigest()}"
+                
+                for i, chunk in enumerate(chunks):
+                    all_texts.append(chunk)
+                    all_metas.append({
+                        'user_id': user_id,
+                        'source': 'web',
+                        'url': url,
+                        'title': title,
+                        'doc_id': doc_id,
+                        'chunk_id': i,
+                        'timestamp': int(visit_time.timestamp()),
+                        'snippet': chunk[:200],
+                        'content': chunk
+                    })
+                
+            except Exception as e:
+                logger.debug(f"URL 크롤링 실패 ({url}): {e}")
+                continue
+    
+    # 임베딩 및 Qdrant 인덱싱
+    if all_texts:
+        logger.info(f"🧠 {len(all_texts)}개 웹 청크 임베딩 생성 중...")
+        
+        batch_size = 64
+        for i in range(0, len(all_texts), batch_size):
+            batch_texts = all_texts[i:i + batch_size]
+            batch_metas = all_metas[i:i + batch_size]
+            
+            try:
+                embeddings = embedder.encode_documents(batch_texts)
+                dense_vectors = embeddings['dense_vecs'].tolist()
+                sparse_vectors = [
+                    embedder.convert_sparse_to_qdrant_format(lw)
+                    for lw in embeddings['lexical_weights']
+                ]
+                repository.qdrant.upsert_vectors(batch_metas, dense_vectors, sparse_vectors)
+            except Exception as e:
+                logger.error(f"웹 청크 임베딩 오류: {e}")
+        
+        logger.info(f"✅ 웹 콘텐츠 인덱싱 완료: {len(all_texts)}개 청크")
+
+
+async def _crawl_url(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    """URL에서 텍스트 콘텐츠를 추출합니다."""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), headers=headers) as response:
+            if response.status != 200:
+                return None
+            
+            content_type = response.headers.get('Content-Type', '')
+            if 'text/html' not in content_type:
+                return None
+            
+            html = await response.text()
+            
+            if len(html) < 500:
+                return None
+            
+            # trafilatura로 본문 추출 시도
+            try:
+                import trafilatura
+                extracted = trafilatura.extract(
+                    html,
+                    include_comments=False,
+                    include_tables=False,
+                    include_links=False,
+                    favor_recall=False
+                )
+                if extracted and len(extracted.strip()) >= 100:
+                    return extracted
+            except ImportError:
+                pass
+            
+            # BeautifulSoup 폴백
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'lxml')
+            
+            for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'header', 'noscript']):
+                tag.decompose()
+            
+            text = soup.get_text(separator='\n', strip=True)
+            
+            if len(text.strip()) >= 100:
+                return text
+            
+    except Exception:
+        pass
+    
+    return None
 
 
 @router.post("/data-collection/client-complete/{user_id}")

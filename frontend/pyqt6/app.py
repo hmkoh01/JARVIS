@@ -941,36 +941,56 @@ class JARVISApp:
         action = metadata.get('action', '')
         keyword = metadata.get('keyword', '')
         recommendation_id = metadata.get('recommendation_id')
+        remaining_agents = metadata.get('remaining_agents', [])
         
         # 액션 유형에 따라 처리
         if action == 'confirm_report':
-            # 추천에서 온 경우 직접 API 호출, 아니면 채팅으로 처리
-            if recommendation_id:
-                self._create_report_from_recommendation(keyword, recommendation_id)
-            else:
-                self._chat_controller.send_message(f"네, '{keyword}' 보고서를 작성해주세요.")
-            action_name = "보고서 작성"
+            # 보고서 생성 API 직접 호출 (루프 방지)
+            # 토스트는 _create_report_direct에서 표시됨
+            self._create_report_direct(keyword, recommendation_id, metadata)
+            return  # 보고서는 자체적으로 토스트 표시
         elif action == 'confirm_analysis':
             self._chat_controller.send_message(f"네, '{keyword}' 분석을 시작해주세요.")
             action_name = "분석"
+            action_icon = "📊"
         elif action == 'confirm_code':
             self._chat_controller.send_message(f"네, '{keyword}' 코드를 작성해주세요.")
             action_name = "코드 작성"
+            action_icon = "💻"
         elif action == 'confirm_dashboard':
             self._chat_controller.send_message("네, 대시보드 분석을 시작해주세요.")
             action_name = "대시보드 분석"
+            action_icon = "📈"
+            keyword = "대시보드"  # 대시보드는 키워드가 없을 수 있음
         else:
             self._chat_controller.send_message(f"네, '{keyword}' 작업을 진행해주세요.")
             action_name = "작업"
+            action_icon = "⚡"
         
-        self._toast_manager.success(
-            f"{action_name} 시작",
-            f"'{keyword}' {action_name}을(를) 시작합니다.",
-            duration_ms=4000
-        )
+        # 시작 토스트 알림 표시
+        if remaining_agents:
+            self._toast_manager.info(
+                f"{action_icon} {action_name} 시작",
+                f"'{keyword}' {action_name}을(를) 시작합니다.\n완료 후 {', '.join(remaining_agents)} 작업이 이어질 예정이에요.",
+                duration_ms=5000
+            )
+        else:
+            self._toast_manager.info(
+                f"{action_icon} {action_name} 시작",
+                f"'{keyword}' {action_name}을(를) 시작합니다.\n완료되면 알려드릴게요.",
+                duration_ms=4000
+            )
     
-    def _create_report_from_recommendation(self, keyword: str, recommendation_id: int):
-        """Create a deep-dive report from a recommendation."""
+    def _create_report_direct(self, keyword: str, recommendation_id: int = None, metadata: dict = None):
+        """
+        보고서 생성 API를 직접 호출합니다.
+        채팅 루프를 방지하기 위해 send_message 대신 직접 API 호출.
+        
+        Args:
+            keyword: 보고서 주제
+            recommendation_id: 연관된 추천 ID (선택적)
+            metadata: 남은 에이전트 정보 등 메타데이터 (선택적)
+        """
         import requests
         
         token, user_id = self._auth_controller.get_credentials()
@@ -978,45 +998,123 @@ class JARVISApp:
             self._toast_manager.error("오류", "인증이 필요합니다.")
             return
         
+        # 보고서 생성 중 플로팅 버튼 로딩 애니메이션 시작
+        if self._floating_button:
+            self._floating_button.set_loading(True)
+        
+        # 남은 에이전트 정보 저장 (보고서 완료 후 처리용)
+        if metadata and metadata.get('remaining_agents'):
+            self._pending_continuation = {
+                'remaining_agents': metadata.get('remaining_agents', []),
+                'sub_tasks': metadata.get('sub_tasks', {}),
+                'original_message': metadata.get('original_message', ''),
+                'previous_results': metadata.get('previous_results', []),
+                'keyword': keyword
+            }
+            print(f"📋 남은 에이전트 저장: {self._pending_continuation['remaining_agents']}")
+        else:
+            self._pending_continuation = None
+        
         try:
             # 보고서 생성 API 호출 (백그라운드 처리됨)
+            request_body = {"keyword": keyword}
+            if recommendation_id:
+                request_body["recommendation_id"] = recommendation_id
+            
             response = requests.post(
                 f"{API_BASE_URL}/api/v2/reports/create",
                 headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "keyword": keyword,
-                    "recommendation_id": recommendation_id
-                },
+                json=request_body,
                 timeout=10
             )
             
             if response.status_code == 200:
                 result = response.json()
                 if result.get("success"):
-                    # 채팅에 안내 메시지 추가
-                    if hasattr(self._main_window, 'chat_widget'):
-                        self._main_window.chat_widget.add_system_message(
-                            f"📝 '{keyword}' 보고서 작성이 시작되었습니다. 완료되면 알려드릴게요!"
-                        )
+                    # 토스트로 보고서 작성 시작 알림
+                    remaining_info = ""
+                    if self._pending_continuation:
+                        remaining = self._pending_continuation.get('remaining_agents', [])
+                        if remaining:
+                            remaining_info = f"\n완료 후 {', '.join(remaining)} 작업이 이어질 예정이에요."
+                    
+                    self._toast_manager.info(
+                        "📝 보고서 작성 시작",
+                        f"'{keyword}' 보고서 작성을 시작했어요!{remaining_info}\n완료되면 알려드릴게요.",
+                        duration_ms=4000
+                    )
                     print(f"📝 Report creation started: {keyword}")
                 else:
                     error_msg = result.get("message", "보고서 생성 요청 실패")
                     self._toast_manager.error("오류", error_msg)
+                    self._pending_continuation = None
             else:
                 self._toast_manager.error("오류", f"서버 오류: {response.status_code}")
+                self._pending_continuation = None
                 
         except Exception as e:
             print(f"Error creating report: {e}")
             self._toast_manager.error("오류", f"보고서 생성 요청 중 오류: {str(e)}")
+            self._pending_continuation = None
+    
+    def _create_report_from_recommendation(self, keyword: str, recommendation_id: int):
+        """Create a deep-dive report from a recommendation (legacy wrapper)."""
+        self._create_report_direct(keyword, recommendation_id)
     
     def _on_confirmation_rejected(self, metadata: dict):
         """Handle confirmation rejected."""
         keyword = metadata.get('keyword', '')
+        # pending continuation 클리어
+        if hasattr(self, '_pending_continuation'):
+            self._pending_continuation = None
         self._toast_manager.info(
             "작업 취소",
             f"'{keyword}' 작업이 취소되었습니다.",
             duration_ms=3000
         )
+    
+    def _execute_remaining_agents(self, pending_data: dict):
+        """
+        보고서 완료 후 남은 에이전트들을 실행합니다.
+        /continue-agents API를 호출하여 스트리밍 응답을 처리합니다.
+        
+        Args:
+            pending_data: {
+                'remaining_agents': ['coding', ...],
+                'sub_tasks': {...},
+                'original_message': '원본 메시지',
+                'previous_results': [...]
+            }
+        """
+        remaining_agents = pending_data.get('remaining_agents', [])
+        if not remaining_agents:
+            return
+        
+        # 채팅에 안내 메시지 추가
+        agent_names = ', '.join(remaining_agents)
+        if hasattr(self._main_window, 'chat_widget'):
+            self._main_window.chat_widget.add_assistant_message(
+                f"🔄 보고서가 완료되었어요! 이어서 {agent_names} 작업을 진행할게요.",
+                typing_animation=True
+            )
+        
+        # ChatController를 통해 continue-agents 요청
+        token, user_id = self._auth_controller.get_credentials()
+        if not token:
+            self._toast_manager.error("오류", "인증이 필요합니다.")
+            return
+        
+        # 스트리밍 요청 데이터 구성
+        request_data = {
+            "message": pending_data.get('original_message', ''),
+            "user_id": user_id,
+            "remaining_agents": remaining_agents,
+            "sub_tasks": pending_data.get('sub_tasks', {}),
+            "previous_results": pending_data.get('previous_results', [])
+        }
+        
+        # ChatController의 스트리밍 메서드 사용
+        self._chat_controller.send_continue_agents_request(request_data)
     
     # =========================================================================
     # Event Handlers
@@ -1242,6 +1340,10 @@ class JARVISApp:
     
     def _on_report_notification(self, data: dict):
         """Handle report notification - Download report and save locally."""
+        # 보고서 완료 시 플로팅 버튼 로딩 애니메이션 중지
+        if self._floating_button:
+            self._floating_button.set_loading(False)
+        
         success = data.get("success", False)
         keyword = data.get("keyword", "Report")
         message = data.get("message", "")
@@ -1366,6 +1468,13 @@ class JARVISApp:
                     str(local_folder)
                 )
                 print(f"📄 Report downloaded and saved: {local_path}")
+                
+                # 남은 에이전트 처리 (멀티에이전트 continuation)
+                if hasattr(self, '_pending_continuation') and self._pending_continuation:
+                    pending = self._pending_continuation
+                    self._pending_continuation = None  # 중복 방지
+                    print(f"🔄 보고서 완료 후 남은 에이전트 실행: {pending.get('remaining_agents', [])}")
+                    self._execute_remaining_agents(pending)
             else:
                 self._toast_manager.error(
                     "📥 다운로드 실패",
@@ -1373,6 +1482,9 @@ class JARVISApp:
                     duration_ms=8000
                 )
                 print(f"❌ Report download failed: {error_msg}")
+                # 실패해도 pending 클리어
+                if hasattr(self, '_pending_continuation'):
+                    self._pending_continuation = None
             
             # 워커 정리
             worker.deleteLater()

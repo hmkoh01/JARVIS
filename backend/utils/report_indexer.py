@@ -67,15 +67,28 @@ def index_report_file(
         # 3. Repository와 Embedder 가져오기
         if repository is None or embedder is None:
             try:
-                from main import global_repository, global_embedder
-                repository = repository or global_repository
-                embedder = embedder or global_embedder
-            except ImportError:
-                logger.warning("전역 Repository/Embedder를 가져올 수 없습니다. 새로 초기화합니다.")
-                from database.repository import Repository
-                from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
-                repository = Repository()
-                embedder = BGEM3Embedder()
+                # 방법 1: main 모듈에서 전역 인스턴스 가져오기
+                import main
+                repository = repository or getattr(main, 'global_repository', None)
+                embedder = embedder or getattr(main, 'global_embedder', None)
+            except Exception as e:
+                logger.warning(f"main 모듈에서 전역 인스턴스를 가져올 수 없습니다: {e}")
+            
+            # 방법 2: 전역 인스턴스가 None이면 새로 초기화
+            if repository is None or embedder is None:
+                logger.info("전역 Repository/Embedder가 없습니다. 새로 초기화합니다.")
+                try:
+                    from database.repository import Repository as RepoClass
+                    from agents.chatbot_agent.rag.models.bge_m3_embedder import BGEM3Embedder
+                    
+                    if repository is None:
+                        repository = RepoClass()
+                        logger.info("✅ Repository 새로 초기화 완료")
+                    if embedder is None:
+                        embedder = BGEM3Embedder()
+                        logger.info("✅ BGEM3Embedder 새로 초기화 완료")
+                except Exception as init_error:
+                    logger.error(f"Repository/Embedder 초기화 실패: {init_error}")
         
         if repository is None or embedder is None:
             logger.error("Repository 또는 Embedder가 초기화되지 않았습니다.")

@@ -407,17 +407,17 @@ class FloatingButton(QWidget):
         """)
         
         # Add menu items
-        show_action = menu.addAction("📱 Show/Hide Window")
+        show_action = menu.addAction("📱 창 열기/닫기")
         show_action.triggered.connect(self._toggle_main_window)
         
         menu.addSeparator()
         
-        settings_action = menu.addAction("⚙️ Settings")
+        settings_action = menu.addAction("⚙️ 설정")
         settings_action.triggered.connect(self._on_settings)
         
         menu.addSeparator()
         
-        exit_action = menu.addAction("❌ Exit")
+        exit_action = menu.addAction("❌ 종료")
         exit_action.triggered.connect(self._confirm_exit)
         
         menu.exec(event.globalPos())
@@ -482,8 +482,8 @@ class FloatingButton(QWidget):
         """Show exit confirmation dialog."""
         reply = QMessageBox.question(
             self,
-            "Exit JARVIS",
-            "Are you sure you want to exit JARVIS?",
+            "JARVIS 종료",
+            "JARVIS를 종료하시겠습니까?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )

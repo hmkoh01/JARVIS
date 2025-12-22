@@ -766,7 +766,10 @@ JSON 응답만 제공해주세요:"""
                                 "type": "waiting_confirmation",
                                 "agent": agent_type,
                                 "remaining_agents": remaining_agents,
-                                "metadata": metadata
+                                "sub_tasks": sub_tasks,
+                                "original_message": user_intent.message,
+                                "metadata": metadata,
+                                "previous_results": previous_results
                             }
                         # 여기서 스트리밍 종료 (남은 에이전트는 사용자 확인 후 별도 처리)
                         total_time = time.time() - start_time

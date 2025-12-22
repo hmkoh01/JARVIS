@@ -61,6 +61,7 @@ class MessageBubble(QFrame):
         self._typing_index = 0
         self._full_content = ""
         self._is_typing = False
+        
         self._setup_ui()
     
     def _setup_ui(self):
@@ -138,8 +139,8 @@ class MessageBubble(QFrame):
         """Update the displayed content."""
         content = self.message.content
         
-        if self.message.is_streaming and not content:
-            content = "⏳ ..."
+        if not content:
+            content = ""
         
         # Apply basic markdown formatting
         formatted = self._format_content(content)
@@ -177,16 +178,6 @@ class MessageBubble(QFrame):
         content = content.replace('\n', '<br>')
         
         return content
-    
-    def append_content(self, chunk: str):
-        """Append content to the message (for streaming)."""
-        self.message.append_content(chunk)
-        self._update_content()
-    
-    def complete_streaming(self):
-        """Mark streaming as complete."""
-        self.message.complete_streaming()
-        self._update_content()
     
     def start_typing_animation(self, content: str):
         """
@@ -385,7 +376,7 @@ class ChatWidget(QWidget):
     
     Features:
     - Message display with bubbles
-    - Streaming response support
+    - Typing animation for assistant responses
     - Input with Enter to send / Shift+Enter for newline
     - Auto-scroll to latest message
     - Confirmation buttons for report/action requests
@@ -401,7 +392,6 @@ class ChatWidget(QWidget):
         
         self._messages: List[Message] = []
         self._message_widgets: List[MessageBubble] = []
-        self._streaming_bubble: Optional[MessageBubble] = None
         self._is_sending = False
         self._pending_confirmation: Optional[dict] = None
         
@@ -582,40 +572,6 @@ class ChatWidget(QWidget):
         self._add_message_bubble(message)
         return message
     
-    def start_streaming_response(self) -> Message:
-        """Start a streaming assistant response."""
-        message = Message.streaming_message()
-        bubble = self._add_message_bubble(message)
-        self._streaming_bubble = bubble
-        self._is_sending = True
-        self.set_status("Thinking...", sending=True)
-        return message
-    
-    def append_streaming_chunk(self, chunk: str):
-        """Append a chunk to the streaming message."""
-        if self._streaming_bubble:
-            self._streaming_bubble.append_content(chunk)
-            self._scroll_to_bottom()
-    
-    def complete_streaming(self):
-        """Complete the streaming response."""
-        if self._streaming_bubble:
-            self._streaming_bubble.complete_streaming()
-            self._streaming_bubble = None
-        
-        self._is_sending = False
-        self.set_status("Ready")
-    
-    def handle_streaming_error(self, error: str):
-        """Handle an error during streaming."""
-        if self._streaming_bubble:
-            self._streaming_bubble.message.content = f"❌ Error: {error}"
-            self._streaming_bubble.complete_streaming()
-            self._streaming_bubble = None
-        
-        self._is_sending = False
-        self.set_status("Error", connected=False)
-    
     def _add_message_bubble(self, message: Message, animate: bool = True) -> MessageBubble:
         """Add a message bubble to the display with slide-in and fade-in animation."""
         self._messages.append(message)
@@ -629,8 +585,8 @@ class ChatWidget(QWidget):
             bubble
         )
         
-        # Apply fade-in + slide-in animation for non-streaming messages
-        if animate and not message.is_streaming:
+        # Apply fade-in + slide-in animation
+        if animate:
             # Set up opacity effect for fade
             opacity_effect = QGraphicsOpacityEffect(bubble)
             bubble.setGraphicsEffect(opacity_effect)

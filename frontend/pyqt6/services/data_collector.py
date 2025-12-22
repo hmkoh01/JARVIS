@@ -1,6 +1,6 @@
 """
 JARVIS Client-Side Data Collector
-로컬에서 파일을 스캔하고 백엔드로 업로드합니다.
+로컬에서 파일과 브라우저 히스토리를 수집하고 백엔드로 업로드합니다.
 
 백엔드에서 DocumentParser(Docling)를 사용하여 파싱합니다.
 """
@@ -8,9 +8,13 @@ JARVIS Client-Side Data Collector
 import os
 import hashlib
 import logging
+import sqlite3
+import shutil
+import platform
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from threading import Event
+from datetime import datetime, timedelta
 
 import requests
 from PyQt6.QtCore import pyqtSignal, QThread
@@ -32,7 +36,7 @@ class ClientDataCollector(QThread):
     """
     클라이언트 측 데이터 수집 워커.
     
-    로컬에서 파일을 스캔하고 백엔드로 업로드합니다.
+    로컬에서 파일과 브라우저 히스토리를 수집하고 백엔드로 업로드합니다.
     백엔드에서 DocumentParser(Docling)를 사용하여 파싱합니다.
     
     Signals:
@@ -93,14 +97,14 @@ class ClientDataCollector(QThread):
         self._stop_event.set()
     
     def run(self):
-        """데이터 수집 실행"""
+        """데이터 수집 실행 (파일 + 브라우저 히스토리)"""
         print(f"🔄 ClientDataCollector.run() 시작 - folders: {self.selected_folders}")
         print(f"   user_id: {self.user_id}, token: {self.token[:20]}...")
         
         try:
+            # ========== 1단계: 파일 수집 (0% ~ 60%) ==========
             self.progress_updated.emit(0.0, "📁 파일 스캔 시작...")
             
-            # 1. 파일 스캔
             print("📁 파일 스캔 중...")
             files_to_process = self._scan_files()
             print(f"📁 스캔 완료: {len(files_to_process)}개 파일 발견")
@@ -109,46 +113,68 @@ class ClientDataCollector(QThread):
                 print("⏹️ 수집 중지됨")
                 return
             
-            if not files_to_process:
-                print("⚠️ 수집할 파일이 없음")
-                self.progress_updated.emit(100.0, "⚠️ 수집할 파일이 없습니다.")
-                self._notify_completion()
-                self.collection_completed.emit()
+            total_files = len(files_to_process)
+            file_success_count = 0
+            file_skipped_count = 0
+            
+            if total_files > 0:
+                self.progress_updated.emit(5.0, f"📄 {total_files}개 파일 발견")
+                
+                for i, file_path in enumerate(files_to_process):
+                    if self._stop_event.is_set():
+                        return
+                    
+                    result = self._upload_file(file_path)
+                    
+                    if result:
+                        if result.get('skipped'):
+                            file_skipped_count += 1
+                        else:
+                            file_success_count += 1
+                            self.file_processed.emit(Path(file_path).name)
+                    
+                    progress = 5.0 + ((i + 1) / total_files) * 55.0
+                    self.progress_updated.emit(
+                        progress, 
+                        f"📤 파일 업로드 중... ({i + 1}/{total_files})"
+                    )
+            else:
+                self.progress_updated.emit(60.0, "⚠️ 수집할 파일이 없습니다.")
+            
+            print(f"📁 파일 수집 완료: {file_success_count}개 처리, {file_skipped_count}개 스킵")
+            
+            # ========== 2단계: 브라우저 히스토리 수집 (60% ~ 90%) ==========
+            if self._stop_event.is_set():
                 return
             
-            total_files = len(files_to_process)
-            self.progress_updated.emit(5.0, f"📄 {total_files}개 파일 발견")
+            self.progress_updated.emit(60.0, "🌐 브라우저 히스토리 수집 중...")
+            print("🌐 브라우저 히스토리 수집 시작...")
             
-            # 2. 파일 업로드 (하나씩 업로드)
-            processed_count = 0
-            success_count = 0
-            skipped_count = 0
+            browser_history = self._collect_browser_history()
+            history_count = len(browser_history)
+            print(f"🌐 브라우저 히스토리 수집 완료: {history_count}개 항목")
             
-            for file_path in files_to_process:
-                if self._stop_event.is_set():
-                    return
+            if history_count > 0:
+                self.progress_updated.emit(70.0, f"🌐 {history_count}개 히스토리 업로드 중...")
                 
-                result = self._upload_file(file_path)
-                processed_count += 1
+                # 브라우저 히스토리 업로드
+                upload_success = self._upload_browser_history(browser_history)
                 
-                if result:
-                    if result.get('skipped'):
-                        skipped_count += 1
-                    else:
-                        success_count += 1
-                        self.file_processed.emit(Path(file_path).name)
-                
-                progress = 5.0 + (processed_count / total_files) * 85.0
-                self.progress_updated.emit(
-                    progress, 
-                    f"📤 업로드 중... ({processed_count}/{total_files})"
-                )
+                if upload_success:
+                    self.progress_updated.emit(90.0, f"✅ 브라우저 히스토리 {history_count}개 업로드 완료")
+                else:
+                    self.progress_updated.emit(90.0, "⚠️ 브라우저 히스토리 업로드 실패")
+            else:
+                self.progress_updated.emit(90.0, "ℹ️ 수집할 브라우저 히스토리가 없습니다.")
             
-            # 3. 완료 알림
+            # ========== 3단계: 완료 알림 (90% ~ 100%) ==========
+            if self._stop_event.is_set():
+                return
+            
             self.progress_updated.emit(95.0, "📤 서버에 완료 알림...")
             self._notify_completion()
             
-            message = f"✅ 완료! {success_count}개 처리, {skipped_count}개 스킵"
+            message = f"✅ 완료! 파일 {file_success_count}개, 히스토리 {history_count}개"
             self.progress_updated.emit(100.0, message)
             print(message)
             self.collection_completed.emit()
@@ -156,6 +182,10 @@ class ClientDataCollector(QThread):
         except Exception as e:
             logger.error(f"데이터 수집 오류: {e}", exc_info=True)
             self.collection_error.emit(f"수집 오류: {str(e)}")
+    
+    # =========================================================================
+    # 파일 수집 관련 메서드
+    # =========================================================================
     
     def _scan_files(self) -> List[str]:
         """선택된 폴더에서 파일 목록 스캔"""
@@ -268,6 +298,167 @@ class ClientDataCollector(QThread):
         except Exception as e:
             logger.debug(f"파일 업로드 오류 ({file_path}): {e}")
             return None
+    
+    # =========================================================================
+    # 브라우저 히스토리 수집 관련 메서드
+    # =========================================================================
+    
+    def _get_browser_paths(self) -> Dict[str, str]:
+        """현재 운영체제에 맞는 브라우저 히스토리 DB 경로를 반환"""
+        system = platform.system()
+        
+        if system == 'Windows':
+            return {
+                'chrome': os.path.expanduser(r'~\AppData\Local\Google\Chrome\User Data\Default\History'),
+                'edge': os.path.expanduser(r'~\AppData\Local\Microsoft\Edge\User Data\Default\History')
+            }
+        elif system == 'Darwin':  # macOS
+            return {
+                'chrome': os.path.expanduser('~/Library/Application Support/Google/Chrome/Default/History'),
+                'edge': os.path.expanduser('~/Library/Application Support/Microsoft Edge/Default/History')
+            }
+        elif system == 'Linux':
+            return {
+                'chrome': os.path.expanduser('~/.config/google-chrome/Default/History'),
+                'edge': os.path.expanduser('~/.config/microsoft-edge/Default/History')
+            }
+        
+        return {}
+    
+    def _collect_browser_history(self) -> List[Dict[str, Any]]:
+        """브라우저 히스토리를 수집"""
+        all_history = []
+        browser_paths = self._get_browser_paths()
+        
+        for browser_name, db_path in browser_paths.items():
+            if not os.path.exists(db_path):
+                print(f"   ⚠️ {browser_name} 히스토리 없음: {db_path}")
+                continue
+            
+            history = self._get_browser_history(browser_name, db_path)
+            if history:
+                all_history.extend(history)
+                print(f"   ✅ {browser_name}: {len(history)}개 항목 수집")
+        
+        return all_history
+    
+    def _get_browser_history(self, browser_name: str, db_path: str) -> List[Dict[str, Any]]:
+        """특정 브라우저의 히스토리를 읽어옴"""
+        history_data = []
+        temp_path = f"{db_path}_jarvis_temp"
+        
+        try:
+            # 브라우저가 DB를 잠그고 있을 수 있으므로 복사본 사용
+            shutil.copy2(db_path, temp_path)
+            
+            conn = sqlite3.connect(temp_path)
+            cursor = conn.cursor()
+            
+            # 최근 7일간의 히스토리만 가져옴
+            seven_days_ago = datetime.now() - timedelta(days=7)
+            # Chrome의 시간은 1601년 1월 1일 기준 마이크로초
+            webkit_timestamp = int((seven_days_ago - datetime(1601, 1, 1)).total_seconds() * 1_000_000)
+            
+            query = """
+                SELECT url, title, last_visit_time 
+                FROM urls 
+                WHERE last_visit_time > ? 
+                ORDER BY last_visit_time DESC 
+                LIMIT 200
+            """
+            
+            cursor.execute(query, (webkit_timestamp,))
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                url, title, visit_time = row
+                
+                # URL 필터링 (스킵할 패턴)
+                if self._should_skip_url(url):
+                    continue
+                
+                # WebKit 타임스탬프를 datetime으로 변환
+                visit_datetime = datetime(1601, 1, 1) + timedelta(microseconds=visit_time)
+                
+                history_data.append({
+                    'browser_name': browser_name,
+                    'url': url,
+                    'title': title or '',
+                    'visit_time': visit_datetime.isoformat()
+                })
+            
+            conn.close()
+            
+        except Exception as e:
+            logger.warning(f"{browser_name} 히스토리 수집 오류: {e}")
+        finally:
+            # 임시 파일 삭제
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+        
+        return history_data
+    
+    def _should_skip_url(self, url: str) -> bool:
+        """스킵해야 할 URL인지 확인"""
+        if not url:
+            return True
+        
+        url_lower = url.lower()
+        
+        # 스킵할 URL 패턴
+        skip_patterns = [
+            # 로컬/내부 URL
+            'localhost', '127.0.0.1', 'file://', 'chrome://', 'edge://', 'about:',
+            # 소셜미디어 (대부분 SPA)
+            'youtube.com', 'youtu.be', 'facebook.com', 'instagram.com',
+            'twitter.com', 'x.com', 'tiktok.com', 'linkedin.com/feed',
+            'reddit.com', 'discord.com', 'slack.com', 'telegram.org',
+            # 검색 엔진 (검색 결과 페이지)
+            'google.com/search', 'bing.com/search', 'naver.com/search',
+            'duckduckgo.com', 'yahoo.com/search',
+            # 인증/로그인 페이지
+            'login', 'signin', 'signup', 'auth', 'oauth', 'sso',
+            # 파일/스트리밍
+            'drive.google.com', 'dropbox.com', 'onedrive.live',
+            # 이메일
+            'mail.google.com', 'outlook.live', 'mail.naver',
+            # 기타
+            'notion.so', 'figma.com', 'canva.com'
+        ]
+        
+        return any(pattern in url_lower for pattern in skip_patterns)
+    
+    def _upload_browser_history(self, history: List[Dict[str, Any]]) -> bool:
+        """브라우저 히스토리를 서버에 업로드"""
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/api/v2/data-collection/client-browser-history/{self.user_id}",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json"
+                },
+                json={"history": history},
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"브라우저 히스토리 업로드 성공: {result.get('saved_count', 0)}개 저장")
+                return True
+            else:
+                logger.warning(f"브라우저 히스토리 업로드 실패: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"브라우저 히스토리 업로드 오류: {e}")
+            return False
+    
+    # =========================================================================
+    # 서버 통신 관련 메서드
+    # =========================================================================
     
     def _update_server_status(self, progress: float, message: str, is_done: bool = False):
         """서버에 진행 상태 업데이트"""

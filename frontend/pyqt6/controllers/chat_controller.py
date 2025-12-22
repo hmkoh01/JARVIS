@@ -12,8 +12,10 @@ from datetime import datetime
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
+from threading import Thread
+
 from models.message import Message
-from services.api_client import APIClient, StreamingWorker
+from services.api_client import APIClient
 from services.websocket_client import (
     NotificationWebSocket, 
     WebSocketManager, 
@@ -30,7 +32,7 @@ class ChatController(QObject):
     Manages:
     - Message history
     - Sending state (prevents duplicate sends)
-    - API streaming communication
+    - API communication (non-streaming with typing animation)
     - WebSocket notification handling
     - UI updates through ChatWidget
     
@@ -123,12 +125,8 @@ class ChatController(QObject):
         self._ws_manager = ws_manager
         
         self._is_sending = False
-        self._current_worker: Optional[StreamingWorker] = None
+        self._current_thread: Optional[Thread] = None
         self._message_history: List[Message] = []
-        
-        # 스트리밍 파서 상태
-        self._stream_buffer = ""
-        self._current_metadata: Optional[Dict[str, Any]] = None
         
         self._setup_connections()
     
@@ -216,7 +214,7 @@ class ChatController(QObject):
     @pyqtSlot(str)
     def send_message(self, text: str):
         """
-        Send a message to the API.
+        Send a message to the API (non-streaming).
         
         Args:
             text: The message text to send
@@ -242,16 +240,14 @@ class ChatController(QObject):
         user_message = self._chat_widget.add_user_message(text)
         self._message_history.append(user_message)
         
-        # Start streaming response
-        self._chat_widget.start_streaming_response()
+        # Show thinking indicator
+        self._chat_widget.set_status("생각하고 있어요...", sending=True)
         
-        # Make API request
-        self._current_worker = self._api_client.send_message_streaming(
+        # Make non-streaming API request
+        self._current_thread = self._api_client.send_message(
             message=text,
-            on_started=self._on_stream_started,
-            on_chunk=self._on_stream_chunk,
-            on_completed=self._on_stream_completed,
-            on_error=self._on_stream_error
+            on_completed=self._on_response_received,
+            on_error=self._on_response_error
         )
     
     def _check_rule_based_response(self, text: str) -> Optional[str]:
@@ -303,13 +299,11 @@ class ChatController(QObject):
     
     def cancel_sending(self):
         """Cancel the current message send operation."""
-        if self._current_worker:
-            self._current_worker.stop()
-            self._current_worker = None
-        
+        # Note: Thread cannot be easily cancelled, but we mark as not sending
+        self._current_thread = None
         self._is_sending = False
         self.sending_status_changed.emit(False)
-        self._chat_widget.complete_streaming()
+        self._chat_widget.set_status("Ready")
     
     def clear_history(self):
         """Clear message history."""
@@ -326,103 +320,202 @@ class ChatController(QObject):
         return self._is_sending
     
     # =========================================================================
-    # Streaming Callbacks
+    # Continue Agents (Multi-Agent Continuation)
     # =========================================================================
     
-    @pyqtSlot()
-    def _on_stream_started(self):
-        """Called when streaming begins."""
-        print("[ChatController] Streaming started")
-        self._stream_buffer = ""
-        self._current_metadata = None
-        self._chat_widget.set_status("Receiving...", sending=True)
-    
-    @pyqtSlot(str)
-    def _on_stream_chunk(self, chunk: str):
-        """Called for each chunk received. Filters metadata and displays content."""
-        # 버퍼에 청크 추가
-        self._stream_buffer += chunk
-        
-        # 메타데이터 마커 처리 및 필터링
-        filtered_content = self._parse_and_filter_stream()
-        
-        if filtered_content:
-            self._chat_widget.append_streaming_chunk(filtered_content)
-    
-    def _parse_and_filter_stream(self) -> str:
+    def send_continue_agents_request(self, request_data: dict):
         """
-        스트리밍 버퍼를 파싱하여 메타데이터를 처리하고 표시할 텍스트만 반환.
+        남은 에이전트들을 실행하기 위해 /continue-agents API를 호출합니다.
         
-        백엔드에서 친근한 상태 메시지를 보내므로 복잡한 필터링 불필요.
-        ---METADATA_START---{json}---METADATA_END--- 마커만 처리하면 됨.
-        
-        Returns:
-            사용자에게 표시할 텍스트
+        Args:
+            request_data: {
+                'message': '원본 메시지',
+                'user_id': 1,
+                'remaining_agents': ['coding', ...],
+                'sub_tasks': {...},
+                'previous_results': [...]
+            }
         """
-        result = ""
+        if self._is_sending:
+            print("[ChatController] Already sending, queuing continue-agents request")
+            # 현재 작업 완료 후 재시도하기 위해 저장
+            if not hasattr(self, '_pending_continue_request'):
+                self._pending_continue_request = request_data
+            return
         
-        # 새로운 형식: ---METADATA_START---{json}---METADATA_END---
-        while True:
-            match = re.search(self.METADATA_PATTERN, self._stream_buffer, re.DOTALL)
+        self._is_sending = True
+        self.sending_status_changed.emit(True)
+        
+        remaining_agents = request_data.get('remaining_agents', [])
+        print(f"[ChatController] Starting continue-agents for: {remaining_agents}")
+        
+        # 상태 표시
+        agent_names = ', '.join(remaining_agents)
+        self._chat_widget.set_status(f"{agent_names} 작업 중...", sending=True)
+        
+        # 백그라운드 스레드에서 스트리밍 요청 실행
+        def _run():
+            import requests
             
-            if match:
-                # 메타데이터 앞의 텍스트를 결과에 추가
-                before_metadata = self._stream_buffer[:match.start()]
-                if before_metadata:
-                    result += before_metadata
+            try:
+                url = f"{self._api_client.base_url}/api/v2/continue-agents"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._api_client.token}"
+                }
                 
-                # 메타데이터 파싱 (emit은 _on_stream_completed에서 한 번만)
-                try:
-                    metadata_json = match.group(1).strip()
-                    metadata = json.loads(metadata_json)
-                    self._current_metadata = metadata
-                    print(f"[ChatController] Metadata parsed: {metadata.get('action', 'unknown')}")
-                except json.JSONDecodeError as e:
-                    print(f"[ChatController] Metadata parse error: {e}, json: {match.group(1)[:100]}")
+                # 스트리밍 요청
+                response = requests.post(
+                    url,
+                    json=request_data,
+                    headers=headers,
+                    stream=True,
+                    timeout=300
+                )
                 
-                # 버퍼에서 메타데이터 제거
-                self._stream_buffer = self._stream_buffer[match.end():]
-            else:
-                # 레거시 형식도 확인 (호환성)
-                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, self._stream_buffer, re.DOTALL)
-                if legacy_match:
-                    before_metadata = self._stream_buffer[:legacy_match.start()]
-                    if before_metadata:
-                        result += before_metadata
+                if response.status_code == 200:
+                    full_content = []
                     
-                    try:
-                        metadata_json = legacy_match.group(1).strip()
-                        metadata = json.loads(metadata_json)
-                        self._current_metadata = metadata
-                        print(f"[ChatController] Legacy metadata parsed: {metadata.get('action', 'unknown')}")
-                    except json.JSONDecodeError as e:
-                        print(f"[ChatController] Legacy metadata parse error: {e}")
+                    for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+                        if chunk:
+                            # 메타데이터 마커 필터링
+                            clean_chunk = re.sub(self.METADATA_PATTERN, '', chunk, flags=re.DOTALL)
+                            clean_chunk = re.sub(self.LEGACY_METADATA_PATTERN, '', clean_chunk, flags=re.DOTALL)
+                            
+                            if clean_chunk.strip():
+                                full_content.append(clean_chunk)
                     
-                    self._stream_buffer = self._stream_buffer[legacy_match.end():]
+                    content = ''.join(full_content)
+                    self._on_continue_agents_completed(content)
                 else:
-                    # 메타데이터 시작 마커가 있는지 확인
-                    start_marker = "---METADATA_START---"
-                    end_marker = "---METADATA_END---"
-                    start_idx = self._stream_buffer.find(start_marker)
+                    error_msg = f"API 오류: {response.status_code}"
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get("detail", error_msg)
+                    except:
+                        pass
+                    self._on_continue_agents_error(error_msg)
                     
-                    if start_idx != -1:
-                        # 시작 마커는 있는데 끝 마커가 없으면 버퍼에 보관 (메타데이터 완성 대기)
-                        # 시작 마커 앞의 텍스트만 출력
-                        if start_idx > 0:
-                            result += self._stream_buffer[:start_idx]
-                            self._stream_buffer = self._stream_buffer[start_idx:]
-                        # 끝 마커가 올 때까지 대기
-                        break
-                    else:
-                        # 시작 마커가 없으면 불완전한 마커 대비 끝부분만 남김
-                        # ---METADATA_START--- 길이가 19자이므로 안전하게 20자 남김
-                        marker_buffer_size = 20
-                        if len(self._stream_buffer) > marker_buffer_size:
-                            result += self._stream_buffer[:-marker_buffer_size]
-                            self._stream_buffer = self._stream_buffer[-marker_buffer_size:]
-                        break
+            except Exception as e:
+                self._on_continue_agents_error(str(e))
         
-        return result
+        thread = Thread(target=_run, daemon=True)
+        thread.start()
+    
+    def _on_continue_agents_completed(self, content: str):
+        """Continue-agents 요청 완료 처리"""
+        print(f"[ChatController] Continue-agents completed, content length: {len(content)}")
+        
+        # UI 스레드에서 실행
+        from PyQt6.QtCore import QTimer
+        
+        def update_ui():
+            if content.strip():
+                # 응답 내용을 채팅에 추가 (타이핑 애니메이션)
+                assistant_message = self._chat_widget.add_assistant_message(
+                    content.strip(),
+                    typing_animation=True,
+                    on_complete=None
+                )
+                self._message_history.append(assistant_message)
+            
+            self._is_sending = False
+            self.sending_status_changed.emit(False)
+            self._chat_widget.set_status("Ready")
+            
+            # 대기 중인 continue 요청이 있으면 처리
+            if hasattr(self, '_pending_continue_request') and self._pending_continue_request:
+                pending = self._pending_continue_request
+                self._pending_continue_request = None
+                self.send_continue_agents_request(pending)
+        
+        QTimer.singleShot(0, update_ui)
+    
+    def _on_continue_agents_error(self, error_msg: str):
+        """Continue-agents 요청 오류 처리"""
+        print(f"[ChatController] Continue-agents error: {error_msg}")
+        
+        from PyQt6.QtCore import QTimer
+        
+        def update_ui():
+            # 오류 메시지 표시
+            self._chat_widget.add_assistant_message(
+                f"❌ 추가 작업 중 오류가 발생했어요: {error_msg}",
+                typing_animation=True
+            )
+            
+            self._is_sending = False
+            self.sending_status_changed.emit(False)
+            self._chat_widget.set_status("Ready")
+        
+        QTimer.singleShot(0, update_ui)
+    
+    # =========================================================================
+    # Non-Streaming Response Callbacks
+    # =========================================================================
+    
+    def _on_response_received(self, data: dict):
+        """Called when non-streaming response is received."""
+        print(f"[ChatController] Response received")
+        
+        # Extract content and metadata from response
+        content = data.get("content", data.get("response", ""))
+        metadata = data.get("metadata", {})
+        
+        # Clean content - remove metadata markers if present
+        content = re.sub(self.METADATA_PATTERN, '', content, flags=re.DOTALL)
+        content = re.sub(self.LEGACY_METADATA_PATTERN, '', content, flags=re.DOTALL)
+        content = content.strip()
+        
+        if not content:
+            content = "응답을 처리할 수 없습니다."
+        
+        # Add assistant message with typing animation
+        def show_response():
+            assistant_message = self._chat_widget.add_assistant_message(
+                content,
+                typing_animation=True,
+                on_complete=lambda: self._handle_response_metadata(metadata, content)
+            )
+            self._message_history.append(assistant_message)
+        
+        # 짧은 딜레이 후 응답 표시 (자연스러운 느낌)
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, show_response)
+        
+        self._current_thread = None
+        self._is_sending = False
+        self.sending_status_changed.emit(False)
+        self._chat_widget.set_status("Ready")
+    
+    def _handle_response_metadata(self, metadata: dict, content: str):
+        """Handle metadata after typing animation completes."""
+        if metadata:
+            action = metadata.get('action', '')
+            # request_topic은 버튼 없이 메시지만 표시
+            if action in ('confirm_report', 'confirm_analysis', 'confirm_code', 'confirm_dashboard'):
+                print(f"[ChatController] Emitting confirm_action_requested for action: {action}")
+                self.confirm_action_requested.emit(metadata)
+                return
+            elif action == 'open_file':
+                # 코드 파일 생성 완료 - 다운로드 시그널 emit
+                file_path = metadata.get('file_path', '')
+                file_name = metadata.get('file_name', '')
+                if file_path and file_name:
+                    print(f"[ChatController] Code file ready: {file_name}")
+                    self.code_file_ready.emit({
+                        'file_path': file_path,
+                        'file_name': file_name
+                    })
+            elif action == 'request_topic':
+                print(f"[ChatController] Request topic - no confirmation button needed")
+        
+        # 메타데이터가 없으면 텍스트에서 확인 요청 감지
+        if content:
+            detected_metadata = self._detect_confirmation_in_text(content)
+            if detected_metadata:
+                print(f"[ChatController] Confirmation detected from text: {detected_metadata}")
+                self.confirm_action_requested.emit(detected_metadata)
     
     def _detect_confirmation_in_text(self, text: str) -> Optional[Dict[str, Any]]:
         """
@@ -456,100 +549,20 @@ class ChatController(QObject):
                 }
         return None
     
-    @pyqtSlot()
-    def _on_stream_completed(self):
-        """Called when streaming completes."""
-        print("[ChatController] Streaming completed")
+    def _on_response_error(self, error: str):
+        """Called when a response error occurs."""
+        print(f"[ChatController] Response error: {error}")
         
-        # 남은 버퍼에서 메타데이터 추출 및 처리
-        if self._stream_buffer.strip():
-            remaining = self._stream_buffer
-            
-            # 새로운 형식의 메타데이터 추출 및 처리
-            metadata_match = re.search(self.METADATA_PATTERN, remaining, re.DOTALL)
-            if metadata_match:
-                try:
-                    metadata_json = metadata_match.group(1).strip()
-                    metadata = json.loads(metadata_json)
-                    self._current_metadata = metadata
-                    print(f"[ChatController] Final metadata extracted: {metadata.get('action', 'unknown')}")
-                except json.JSONDecodeError as e:
-                    print(f"[ChatController] Final metadata parse error: {e}")
-            
-            # 레거시 형식도 확인
-            if not metadata_match:
-                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, remaining, re.DOTALL)
-                if legacy_match:
-                    try:
-                        metadata_json = legacy_match.group(1).strip()
-                        metadata = json.loads(metadata_json)
-                        self._current_metadata = metadata
-                        print(f"[ChatController] Final legacy metadata extracted: {metadata.get('action', 'unknown')}")
-                    except json.JSONDecodeError as e:
-                        print(f"[ChatController] Final legacy metadata parse error: {e}")
-            
-            # 메타데이터 마커 제거하고 남은 텍스트만 표시
-            remaining = re.sub(self.METADATA_PATTERN, '', remaining, flags=re.DOTALL)
-            remaining = re.sub(self.LEGACY_METADATA_PATTERN, '', remaining, flags=re.DOTALL)
-            remaining = remaining.strip()
-            if remaining:
-                self._chat_widget.append_streaming_chunk(remaining)
+        # Add error message to chat
+        self._chat_widget.add_assistant_message(
+            f"❌ 오류가 발생했어요: {error}",
+            typing_animation=False
+        )
         
-        # 버퍼 초기화
-        self._stream_buffer = ""
-        
-        # Get the streaming message and add to history
-        full_response_text = ""
-        if self._chat_widget._streaming_bubble:
-            message = self._chat_widget._streaming_bubble.message
-            self._message_history.append(message)
-            full_response_text = message.content
-        
-        self._chat_widget.complete_streaming()
-        self._current_worker = None
+        self._current_thread = None
         self._is_sending = False
         self.sending_status_changed.emit(False)
-        
-        # 확인이 필요한 메타데이터가 있으면 처리 (버튼 표시)
-        if self._current_metadata:
-            action = self._current_metadata.get('action', '')
-            # request_topic은 버튼 없이 메시지만 표시
-            if action in ('confirm_report', 'confirm_analysis', 'confirm_code', 'confirm_dashboard'):
-                print(f"[ChatController] Emitting confirm_action_requested for action: {action}")
-                self.confirm_action_requested.emit(self._current_metadata)
-                self._current_metadata = None  # 중복 emit 방지
-                return
-            elif action == 'open_file':
-                # 코드 파일 생성 완료 - 다운로드 시그널 emit
-                file_path = self._current_metadata.get('file_path', '')
-                file_name = self._current_metadata.get('file_name', '')
-                if file_path and file_name:
-                    print(f"[ChatController] Code file ready: {file_name}")
-                    self.code_file_ready.emit({
-                        'file_path': file_path,
-                        'file_name': file_name
-                    })
-            elif action == 'request_topic':
-                print(f"[ChatController] Request topic - no confirmation button needed")
-            self._current_metadata = None  # 메타데이터 처리 완료
-        
-        # 메타데이터가 없으면 텍스트에서 확인 요청 감지
-        if full_response_text:
-            detected_metadata = self._detect_confirmation_in_text(full_response_text)
-            if detected_metadata:
-                print(f"[ChatController] Confirmation detected from text: {detected_metadata}")
-                self.confirm_action_requested.emit(detected_metadata)
-    
-    @pyqtSlot(str)
-    def _on_stream_error(self, error: str):
-        """Called when a streaming error occurs."""
-        print(f"[ChatController] Streaming error: {error}")
-        self._stream_buffer = ""
-        self._current_metadata = None
-        self._chat_widget.handle_streaming_error(error)
-        self._current_worker = None
-        self._is_sending = False
-        self.sending_status_changed.emit(False)
+        self._chat_widget.set_status("Error", connected=False)
     
     # =========================================================================
     # WebSocket Callbacks
@@ -595,37 +608,15 @@ class ChatController(QObject):
         """Called for report completed/failed notifications."""
         notification_data = {"success": success, **data}
         print(f"[ChatController] Report notification: {notification_data}")
+        # app.py의 _on_report_notification에서 토스트로 표시하므로 시그널만 emit
         self.report_notification.emit(notification_data)
-        
-        # Add system message
-        keyword = data.get("keyword", "Report")
-        if success:
-            self._chat_widget.add_system_message(
-                f"📄 Report completed: {keyword}"
-            )
-        else:
-            reason = data.get("reason", "Unknown error")
-            self._chat_widget.add_system_message(
-                f"❌ Report failed: {keyword} - {reason}"
-            )
     
     def _on_analysis_notification(self, success: bool, data: dict):
         """Called for analysis completed/failed notifications."""
         notification_data = {"success": success, **data}
         print(f"[ChatController] Analysis notification: {notification_data}")
+        # app.py의 _on_analysis_notification에서 토스트로 표시하므로 시그널만 emit
         self.analysis_notification.emit(notification_data)
-        
-        # Add system message
-        title = data.get("title", "Analysis")
-        if success:
-            self._chat_widget.add_system_message(
-                f"📊 Analysis completed: {title}"
-            )
-        else:
-            reason = data.get("reason", "Unknown error")
-            self._chat_widget.add_system_message(
-                f"❌ Analysis failed: {title} - {reason}"
-            )
     
     # =========================================================================
     # Lifecycle
