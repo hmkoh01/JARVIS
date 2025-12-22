@@ -929,6 +929,52 @@ Markdown 형식의 보고서만 출력하세요. 추가 설명이나 메타 코�
             logger.error(f"ReportAgent: Markdown 저장도 실패: {e}")
             return "", "", False
     
+    def _find_korean_font(self) -> tuple[str, str]:
+        """
+        시스템에서 한글 폰트를 찾아 경로와 이름을 반환합니다.
+        
+        Returns:
+            (font_path, font_name) 튜플. 찾지 못하면 ("", "")
+        """
+        import os
+        import sys
+        
+        possible_fonts = []
+        
+        # Windows 폰트 경로
+        if sys.platform == 'win32':
+            fonts_dir = os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'Fonts')
+            possible_fonts.extend([
+                (os.path.join(fonts_dir, "malgun.ttf"), "MalgunGothic"),
+                (os.path.join(fonts_dir, "malgunbd.ttf"), "MalgunGothicBold"),
+                (os.path.join(fonts_dir, "NanumGothic.ttf"), "NanumGothic"),
+                (os.path.join(fonts_dir, "NanumBarunGothic.ttf"), "NanumBarunGothic"),
+                (os.path.join(fonts_dir, "gulim.ttc"), "Gulim"),
+                (os.path.join(fonts_dir, "batang.ttc"), "Batang"),
+            ])
+        
+        # Linux 폰트 경로
+        possible_fonts.extend([
+            ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "NanumGothic"),
+            ("/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf", "NanumBarunGothic"),
+            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
+            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "NotoSansCJK"),
+        ])
+        
+        # macOS 폰트 경로
+        possible_fonts.extend([
+            ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", "AppleGothic"),
+            ("/Library/Fonts/NanumGothic.ttf", "NanumGothic"),
+        ])
+        
+        for font_path, font_name in possible_fonts:
+            if Path(font_path).exists():
+                logger.debug(f"ReportAgent: 한글 폰트 발견: {font_path}")
+                return font_path, font_name
+        
+        logger.warning("ReportAgent: 시스템에서 한글 폰트를 찾을 수 없습니다.")
+        return "", ""
+    
     def _convert_markdown_to_pdf_reportlab(
         self,
         markdown_content: str,
@@ -949,23 +995,26 @@ Markdown 형식의 보고서만 출력하세요. 추가 설명이나 메타 코�
             font_registered = False
             font_name = "Helvetica"  # 기본 폰트
             
-            # Windows에서 맑은 고딕 폰트 찾기
-            possible_fonts = [
-                ("C:/Windows/Fonts/malgun.ttf", "MalgunGothic"),
-                ("C:/Windows/Fonts/NanumGothic.ttf", "NanumGothic"),
-                ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "NanumGothic"),
-                ("/System/Library/Fonts/AppleSDGothicNeo.ttc", "AppleGothic"),
-            ]
+            font_path, korean_font_name = self._find_korean_font()
             
-            for font_path, name in possible_fonts:
-                if Path(font_path).exists():
-                    try:
-                        pdfmetrics.registerFont(TTFont(name, font_path))
-                        font_name = name
-                        font_registered = True
-                        break
-                    except Exception:
-                        continue
+            if font_path:
+                try:
+                    # TTC 파일은 subfontIndex가 필요할 수 있음
+                    if font_path.lower().endswith('.ttc'):
+                        from reportlab.pdfbase.ttfonts import TTFont
+                        pdfmetrics.registerFont(TTFont(korean_font_name, font_path, subfontIndex=0))
+                    else:
+                        pdfmetrics.registerFont(TTFont(korean_font_name, font_path))
+                    font_name = korean_font_name
+                    font_registered = True
+                    logger.info(f"ReportAgent: 한글 폰트 등록 성공: {korean_font_name}")
+                except Exception as e:
+                    logger.warning(f"ReportAgent: 폰트 등록 실패 ({font_path}): {e}")
+            
+            # 한글 폰트가 없으면 reportlab 방법 포기 (xhtml2pdf로 폴백)
+            if not font_registered:
+                logger.warning("ReportAgent: 한글 폰트를 등록할 수 없어 reportlab 방법을 건너뜁니다.")
+                return False
             
             # 스타일 설정
             styles = getSampleStyleSheet()
@@ -1094,6 +1143,54 @@ Markdown 형식의 보고서만 출력하세요. 추가 설명이나 메타 코�
             import markdown2
             from xhtml2pdf import pisa
             
+            # 한글 폰트 경로 찾기
+            font_path, font_name = self._find_korean_font()
+            
+            # @font-face CSS 생성
+            font_face_css = ""
+            font_family = "sans-serif"
+            
+            if font_path:
+                # pisa에 폰트 직접 등록 시도
+                try:
+                    from reportlab.pdfbase import pdfmetrics
+                    from reportlab.pdfbase.ttfonts import TTFont
+                    
+                    # 이미 등록되어 있는지 확인
+                    try:
+                        pdfmetrics.getFont(font_name)
+                        logger.debug(f"ReportAgent: 폰트 '{font_name}'가 이미 등록되어 있습니다.")
+                    except KeyError:
+                        # TTC 파일은 subfontIndex가 필요할 수 있음
+                        if font_path.lower().endswith('.ttc'):
+                            pdfmetrics.registerFont(TTFont(font_name, font_path, subfontIndex=0))
+                        else:
+                            pdfmetrics.registerFont(TTFont(font_name, font_path))
+                        logger.info(f"ReportAgent: xhtml2pdf용 폰트 등록 완료: {font_name}")
+                    
+                    font_family = f"'{font_name}'"
+                    
+                except Exception as e:
+                    logger.warning(f"ReportAgent: xhtml2pdf 폰트 등록 실패: {e}")
+                    # CSS @font-face로 폴백
+                    font_url = font_path.replace("\\", "/")
+                    if not font_url.startswith("/"):
+                        font_url = "/" + font_url
+                    
+                    font_face_css = f"""
+        @font-face {{
+            font-family: '{font_name}';
+            src: url('file://{font_url}');
+        }}
+"""
+                    font_family = f"'{font_name}', sans-serif"
+                
+                logger.info(f"ReportAgent: xhtml2pdf 한글 폰트 설정: {font_name}")
+            else:
+                logger.warning("ReportAgent: xhtml2pdf에서 한글 폰트를 찾을 수 없어 기본 폰트 사용")
+                # 한글 폰트가 없으면 실패 반환
+                return False
+            
             # Markdown을 HTML로 변환
             html_content = markdown2.markdown(
                 markdown_content,
@@ -1107,17 +1204,19 @@ Markdown 형식의 보고서만 출력하세요. 추가 설명이나 메타 코�
 <head>
     <meta charset="UTF-8">
     <style>
+        {font_face_css}
         @page {{
             size: A4;
             margin: 2cm;
         }}
         body {{
-            font-family: 'Malgun Gothic', 'NanumGothic', 'Apple SD Gothic Neo', sans-serif;
+            font-family: {font_family};
             font-size: 11pt;
             line-height: 1.6;
             color: #333;
         }}
         h1 {{
+            font-family: {font_family};
             font-size: 20pt;
             color: #1a1a1a;
             border-bottom: 2px solid #333;
@@ -1125,23 +1224,28 @@ Markdown 형식의 보고서만 출력하세요. 추가 설명이나 메타 코�
             margin-top: 20px;
         }}
         h2 {{
+            font-family: {font_family};
             font-size: 16pt;
             color: #2c2c2c;
             margin-top: 18px;
         }}
         h3 {{
+            font-family: {font_family};
             font-size: 13pt;
             color: #3c3c3c;
             margin-top: 15px;
         }}
         p {{
+            font-family: {font_family};
             text-align: justify;
             margin: 10px 0;
         }}
         ul, ol {{
+            font-family: {font_family};
             margin-left: 20px;
         }}
         li {{
+            font-family: {font_family};
             margin: 5px 0;
         }}
         code {{
@@ -1156,7 +1260,24 @@ Markdown 형식의 보고서만 출력하세요. 추가 설명이나 메타 코�
             margin: 20px 0;
         }}
         em {{
+            font-family: {font_family};
             color: #666;
+        }}
+        a {{
+            font-family: {font_family};
+            color: #0066cc;
+        }}
+        table {{
+            font-family: {font_family};
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }}
+        th, td {{
+            font-family: {font_family};
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
         }}
     </style>
 </head>
@@ -1169,12 +1290,16 @@ Markdown 형식의 보고서만 출력하세요. 추가 설명이나 메타 코�
             # PDF 생성
             with open(output_path, 'wb') as pdf_file:
                 pisa_status = pisa.CreatePDF(
-                    html_template.encode('utf-8'),
+                    html_template,
                     dest=pdf_file,
                     encoding='utf-8'
                 )
             
-            return not pisa_status.err
+            if pisa_status.err:
+                logger.warning(f"ReportAgent: xhtml2pdf 변환 중 오류 발생: {pisa_status.err}")
+                return False
+                
+            return True
             
         except ImportError as e:
             logger.warning(f"ReportAgent: xhtml2pdf 또는 markdown2가 설치되지 않았습니다: {e}")

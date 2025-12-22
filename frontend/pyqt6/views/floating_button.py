@@ -194,13 +194,6 @@ class FloatingButton(QWidget):
     def _update_rotation(self):
         """Smoothly update rotation angle for loading animation."""
         self._rotation_angle = (self._rotation_angle + 4) % 360
-        
-        # 디버그용: 일정 주기마다만 로그 출력 (약 0.5초에 1번)
-        if not hasattr(self, "_rot_tick"):
-            self._rot_tick = 0
-        self._rot_tick += 1
-        if self._rot_tick % 30 == 0:
-            print(f"🔄 tick={self._rot_tick}, angle={self._rotation_angle:.1f}")
         self.update()
     
     def set_loading(self, loading: bool):
@@ -210,19 +203,15 @@ class FloatingButton(QWidget):
         Args:
             loading: True to start loading animation, False to stop
         """
-        print(f"🔄 FloatingButton.set_loading({loading}), current={self._is_loading}")
         if self._is_loading == loading:
-            print(f"  ↳ 이미 같은 상태, 무시")
             return
             
         self._is_loading = loading
         if loading:
             self._rotation_timer.start()
-            print(f"  ↳ 타이머 시작됨, isActive={self._rotation_timer.isActive()}")
         else:
             self._rotation_timer.stop()
             self._rotation_angle = 225.0  # Reset to default position
-            print(f"  ↳ 타이머 중지됨")
         self.update()
     
     def is_loading(self) -> bool:
@@ -264,6 +253,9 @@ class FloatingButton(QWidget):
         ring_width = radius * 0.11  # Outer ring thickness
         inner_circle_radius = radius * 0.20  # Inner filled circle
         line_width = radius * 0.09  # Line thickness
+
+        # Loading spinner color
+        spinner_color = self.COLOR_TEXT
         
         # 1. Outer ring (circular outline)
         pen = QPen(icon_color, ring_width)
@@ -271,20 +263,6 @@ class FloatingButton(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(center, outer_radius, outer_radius)
-
-        # 1-1. Loading spinner arc (more visible motion cue)
-        if self._is_loading:
-            arc_pen = QPen(icon_color, max(2.0, ring_width * 0.45))
-            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(arc_pen)
-            arc_rect = button_rect.adjusted(
-                ring_width * 0.55, ring_width * 0.55, -ring_width * 0.55, -ring_width * 0.55
-            )
-            # Qt uses 1/16 degree units, and the angle direction differs from math radians.
-            # We negate to match the visual rotation direction.
-            start_angle = int(-self._rotation_angle * 16)
-            span_angle = int(70 * 16)
-            painter.drawArc(arc_rect, start_angle, span_angle)
         
         # 2. Calculate line endpoint based on rotation angle
         angle_rad = math.radians(self._rotation_angle)
@@ -293,13 +271,6 @@ class FloatingButton(QWidget):
         end_x = center.x() + line_length * math.cos(angle_rad)
         end_y = center.y() + line_length * math.sin(angle_rad)
         end_point = QPointF(end_x, end_y)
-        
-        # Debug: confirm paint is actually happening (about once per ~0.5s)
-        if hasattr(self, "_rot_tick") and self._rot_tick % 30 == 0:
-            print(
-                f"🎨 paint tick={self._rot_tick}, loading={self._is_loading}, "
-                f"angle={self._rotation_angle:.1f}, end=({end_point.x():.1f},{end_point.y():.1f})"
-            )
 
         # 3. Line from center to inner circle (with round cap)
         line_pen = QPen(icon_color, line_width)

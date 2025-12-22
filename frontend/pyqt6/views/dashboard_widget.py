@@ -563,14 +563,6 @@ class DashboardWidget(QWidget):
         title_label.setStyleSheet("color: #1a1a1a;")
         self._analysis_layout.addWidget(title_label)
         
-        # Analysis summary
-        summary = analysis.get("summary", "")
-        if summary:
-            summary_label = QLabel(summary[:300] + "..." if len(summary) > 300 else summary)
-            summary_label.setWordWrap(True)
-            summary_label.setStyleSheet("color: #374151; font-size: 12px; margin-top: 8px;")
-            self._analysis_layout.addWidget(summary_label)
-        
         # Analysis date
         created_at = analysis.get("created_at", "")
         if created_at:
@@ -580,8 +572,67 @@ class DashboardWidget(QWidget):
             except:
                 date_str = created_at
             date_label = QLabel(f"⏰ {date_str}")
-            date_label.setStyleSheet("color: #6B7280; font-size: 11px; margin-top: 8px;")
+            date_label.setStyleSheet("color: #6B7280; font-size: 11px; margin-top: 4px;")
             self._analysis_layout.addWidget(date_label)
+        
+        # Insights (핵심 인사이트)
+        insights = analysis.get("insights", [])
+        if insights:
+            insights_label = QLabel("💡 핵심 인사이트")
+            insights_font = QFont()
+            insights_font.setPointSize(11)
+            insights_font.setBold(True)
+            insights_label.setFont(insights_font)
+            insights_label.setStyleSheet("color: #1a1a1a; margin-top: 12px;")
+            self._analysis_layout.addWidget(insights_label)
+            
+            for insight in insights[:5]:  # 최대 5개
+                insight_item = QLabel(f"  • {insight}")
+                insight_item.setWordWrap(True)
+                insight_item.setStyleSheet("color: #374151; font-size: 12px; margin-left: 8px;")
+                self._analysis_layout.addWidget(insight_item)
+        
+        # Analysis content (분석 내용) - content 필드 사용
+        content = analysis.get("content", "")
+        if content:
+            content_label = QLabel("📝 분석 내용")
+            content_font = QFont()
+            content_font.setPointSize(11)
+            content_font.setBold(True)
+            content_label.setFont(content_font)
+            content_label.setStyleSheet("color: #1a1a1a; margin-top: 12px;")
+            self._analysis_layout.addWidget(content_label)
+            
+            # Markdown 스타일 간단 처리 (**, ### 등 제거)
+            import re
+            clean_content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)  # ** 제거
+            clean_content = re.sub(r'###?\s*', '', clean_content)  # ### 제거
+            clean_content = re.sub(r'\n{3,}', '\n\n', clean_content)  # 연속 줄바꿈 정리
+            
+            # 최대 800자 표시 (더 많은 내용이 있으면 잘라서 표시)
+            if len(clean_content) > 800:
+                clean_content = clean_content[:800] + "...\n\n(더 보려면 전체 분석을 확인하세요)"
+            
+            content_text = QLabel(clean_content)
+            content_text.setWordWrap(True)
+            content_text.setStyleSheet("color: #374151; font-size: 12px; line-height: 1.5;")
+            self._analysis_layout.addWidget(content_text)
+        
+        # Chart info (차트 정보) - 차트가 있으면 알려주기
+        chart_data = analysis.get("chart_data", {})
+        charts = chart_data.get("charts", []) if chart_data else []
+        if charts:
+            chart_info = QLabel(f"📈 {len(charts)}개의 차트가 생성되었습니다.")
+            chart_info.setStyleSheet("color: #3B82F6; font-size: 11px; margin-top: 12px;")
+            self._analysis_layout.addWidget(chart_info)
+            
+            # 각 차트 제목 표시
+            for chart in charts:
+                chart_title = chart.get("title", "차트")
+                chart_type = chart.get("type", "unknown")
+                chart_item = QLabel(f"  📊 {chart_title} ({chart_type})")
+                chart_item.setStyleSheet("color: #6B7280; font-size: 11px; margin-left: 8px;")
+                self._analysis_layout.addWidget(chart_item)
     
     def _on_error(self, error: str):
         """Handle data loading error."""

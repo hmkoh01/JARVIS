@@ -1004,6 +1004,11 @@ class JARVISApp:
     
     def _on_confirm_action_requested(self, metadata: dict):
         """Handle confirmation action request - show confirmation UI (buttons only)."""
+        # 디버그: 수신된 메타데이터 출력
+        print(f"[_on_confirm_action_requested] action: {metadata.get('action')}")
+        print(f"[_on_confirm_action_requested] remaining_agents: {metadata.get('remaining_agents', 'NOT FOUND')}")
+        print(f"[_on_confirm_action_requested] sub_tasks keys: {list(metadata.get('sub_tasks', {}).keys())}")
+        
         # 버튼만 표시 - 메시지는 이미 스트리밍으로 표시됨
         self._main_window.chat_widget.show_confirmation("", metadata)
     
@@ -1014,43 +1019,27 @@ class JARVISApp:
         recommendation_id = metadata.get('recommendation_id')
         remaining_agents = metadata.get('remaining_agents', [])
         
-        # 액션 유형에 따라 처리
+        # 액션 유형에 따라 처리 (모두 직접 API 호출로 루프 방지)
         if action == 'confirm_report':
-            # 보고서 생성 API 직접 호출 (루프 방지)
-            # 토스트는 _create_report_direct에서 표시됨
+            # 보고서 생성 API 직접 호출
             self._create_report_direct(keyword, recommendation_id, metadata)
-            return  # 보고서는 자체적으로 토스트 표시
+            return
         elif action == 'confirm_analysis':
-            self._chat_controller.send_message(f"네, '{keyword}' 분석을 시작해주세요.")
-            action_name = "분석"
-            action_icon = "📊"
+            # 분석(대시보드) API 직접 호출
+            self._execute_analysis(keyword, metadata)
+            return
         elif action == 'confirm_code':
-            # 코드 생성 API 직접 호출 (confirm_code=True 플래그 포함)
+            # 코드 생성 API 직접 호출
             self._execute_code_generation(keyword, metadata)
-            return  # 코드 생성은 자체적으로 토스트 표시
+            return
         elif action == 'confirm_dashboard':
-            self._chat_controller.send_message("네, 대시보드 분석을 시작해주세요.")
-            action_name = "대시보드 분석"
-            action_icon = "📈"
-            keyword = "대시보드"  # 대시보드는 키워드가 없을 수 있음
+            # 대시보드 분석 API 직접 호출
+            self._execute_dashboard_analysis(keyword if keyword else "대시보드", metadata)
+            return
         else:
-            self._chat_controller.send_message(f"네, '{keyword}' 작업을 진행해주세요.")
-            action_name = "작업"
-            action_icon = "⚡"
-        
-        # 시작 토스트 알림 표시
-        if remaining_agents:
-            self._toast_manager.info(
-                f"{action_icon} {action_name} 시작",
-                f"'{keyword}' {action_name}을(를) 시작합니다.\n완료 후 {', '.join(remaining_agents)} 작업이 이어질 예정이에요.",
-                duration_ms=5000
-            )
-        else:
-            self._toast_manager.info(
-                f"{action_icon} {action_name} 시작",
-                f"'{keyword}' {action_name}을(를) 시작합니다.\n완료되면 알려드릴게요.",
-                duration_ms=4000
-            )
+            # 기타 작업은 일반 실행
+            self._execute_general_action(keyword, metadata)
+            return
     
     def _create_report_direct(self, keyword: str, recommendation_id: int = None, metadata: dict = None):
         """
@@ -1169,11 +1158,11 @@ class JARVISApp:
             if hasattr(self, '_pending_continuation'):
                 self._pending_continuation = None
             
-            # 채팅에 취소 메시지 추가
+            # 채팅에 취소 메시지 추가 (짧은 메시지는 애니메이션 없이 즉시 표시)
             if hasattr(self._main_window, 'chat_widget'):
                 self._main_window.chat_widget.add_assistant_message(
                     f"⏭️ {skipped_task_name}을(를) 건너뛰었어요. 모든 작업이 완료되었습니다.",
-                    typing_animation=True
+                    typing_animation=False
                 )
     
     def _execute_code_generation(self, keyword: str, metadata: dict):
@@ -1185,11 +1174,15 @@ class JARVISApp:
             keyword: 코드 생성 주제
             metadata: 메타데이터 (original_question 등 포함)
         """
-        # 토스트 표시 (진행 중 표현은 '작성 중' 대신 '생성 진행'으로)
+        # 채팅창 닫기
+        if self._main_window and self._main_window.isVisible():
+            self._main_window.hide()
+        
+        # 토스트 표시
         self._toast_manager.info(
-            "💻 코드 생성",
-            f"'{keyword}' 코드 생성을 진행할게요.\n완료되면 알려드릴게요.",
-            duration_ms=4000
+            "💻 코드 생성 시작",
+            f"'{keyword}' 코드를 생성하고 있어요.\n완료되면 알려드릴게요!",
+            duration_ms=5000
         )
         
         # 플로팅 버튼 로딩 상태
@@ -1221,6 +1214,154 @@ class JARVISApp:
         # ChatController의 스트리밍 메서드 사용
         self._chat_controller.send_continue_agents_request(request_data)
     
+    def _execute_analysis(self, keyword: str, metadata: dict):
+        """
+        대시보드 분석을 실행합니다.
+        사용자가 confirm_analysis 확인을 했을 때 호출됩니다.
+        
+        1. /dashboard/analyses/create API를 호출하여 분석 실행
+        2. 분석 완료 시 WebSocket으로 알림 수신 → 토스트로 대시보드 확인 제안
+        3. 남은 에이전트가 있으면 분석 완료 후 계속 진행
+        """
+        import requests
+        
+        # 디버그: 전달받은 메타데이터 출력
+        print(f"[_execute_analysis] keyword: {keyword}")
+        print(f"[_execute_analysis] metadata keys: {list(metadata.keys())}")
+        print(f"[_execute_analysis] remaining_agents: {metadata.get('remaining_agents', 'NOT FOUND')}")
+        print(f"[_execute_analysis] analysis_type: {metadata.get('analysis_type', 'NOT FOUND')}")
+        
+        # 채팅창 닫기
+        if self._main_window and self._main_window.isVisible():
+            self._main_window.hide()
+        
+        # 플로팅 버튼 로딩 상태
+        if self._floating_button:
+            self._floating_button.set_loading(True)
+        
+        # 인증 확인
+        token, user_id = self._auth_controller.get_credentials()
+        if not token:
+            self._toast_manager.error("오류", "인증이 필요합니다.")
+            return
+        
+        # 분석 정보 추출
+        analysis_type = metadata.get('analysis_type', 'custom')
+        title = metadata.get('title', keyword)
+        query = metadata.get('query', metadata.get('original_message', keyword))
+        
+        if not query or not query.strip():
+            query = keyword if keyword else "데이터 분석"
+        
+        # 토스트 표시
+        self._toast_manager.info(
+            "📊 분석 시작",
+            f"'{title}' 분석을 진행하고 있어요.\n완료되면 알려드릴게요!",
+            duration_ms=5000
+        )
+        
+        # 남은 에이전트 정보 저장 (분석 완료 후 처리용)
+        remaining_agents = metadata.get('remaining_agents', [])
+        if remaining_agents:
+            self._pending_continuation = {
+                'remaining_agents': remaining_agents,
+                'sub_tasks': metadata.get('sub_tasks', {}),
+                'original_message': query,
+                'previous_results': metadata.get('previous_results', []),
+                'keyword': keyword
+            }
+            print(f"📋 분석 완료 후 실행할 에이전트 저장: {remaining_agents}")
+        
+        # /dashboard/analyses/create API 호출
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/api/v2/dashboard/analyses/create",
+                json={
+                    "analysis_type": analysis_type,
+                    "query": query,
+                    "title": title
+                },
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"[_execute_analysis] Analysis started: {result}")
+                # 분석은 백그라운드에서 실행되며, 완료 시 WebSocket으로 알림이 옴
+                # _on_analysis_completed 핸들러에서 토스트 표시 및 남은 에이전트 처리
+            else:
+                self._toast_manager.error("오류", f"분석 시작 실패: {response.status_code}")
+                if self._floating_button:
+                    self._floating_button.set_loading(False)
+        except Exception as e:
+            print(f"[_execute_analysis] Error: {e}")
+            self._toast_manager.error("오류", f"분석 요청 중 오류: {str(e)}")
+            if self._floating_button:
+                self._floating_button.set_loading(False)
+    
+    def _execute_dashboard_analysis(self, keyword: str, metadata: dict):
+        """
+        대시보드 분석을 실행합니다.
+        사용자가 confirm_dashboard 확인을 했을 때 호출됩니다.
+        (confirm_analysis와 동일한 로직 - API 호출)
+        """
+        # confirm_analysis와 동일하게 처리
+        self._execute_analysis(keyword, metadata)
+    
+    def _execute_general_action(self, keyword: str, metadata: dict):
+        """
+        일반 작업을 실행합니다.
+        특정 에이전트 유형이 아닌 기타 작업일 때 호출됩니다.
+        """
+        # 채팅창 닫기
+        if self._main_window and self._main_window.isVisible():
+            self._main_window.hide()
+        
+        # 토스트 표시
+        self._toast_manager.info(
+            "⚡ 작업 시작",
+            f"'{keyword}' 작업을 진행하고 있어요.\n완료되면 알려드릴게요!",
+            duration_ms=5000
+        )
+        
+        # 플로팅 버튼 로딩 상태
+        if self._floating_button:
+            self._floating_button.set_loading(True)
+        
+        # 인증 확인
+        token, user_id = self._auth_controller.get_credentials()
+        if not token:
+            self._toast_manager.error("오류", "인증이 필요합니다.")
+            return
+        
+        # 스트리밍 요청 데이터 구성
+        original_question = metadata.get('original_message', metadata.get('original_question', keyword))
+        remaining_agents = metadata.get('remaining_agents', ['chatbot'])
+        
+        # original_question이 비어있으면 keyword 사용
+        if not original_question or not original_question.strip():
+            original_question = keyword if keyword else "사용자 요청"
+        
+        # sub_tasks가 비어있거나 남은 에이전트의 task가 없으면 생성
+        sub_tasks = metadata.get('sub_tasks', {})
+        for agent in remaining_agents:
+            if agent not in sub_tasks or not sub_tasks.get(agent, {}).get('task'):
+                sub_tasks[agent] = {
+                    "task": original_question,
+                    "focus": f"{agent} 작업 수행"
+                }
+        
+        request_data = {
+            "message": original_question,
+            "user_id": user_id,
+            "remaining_agents": remaining_agents,
+            "sub_tasks": sub_tasks,
+            "previous_results": metadata.get('previous_results', [])
+        }
+        
+        self._chat_controller.send_continue_agents_request(request_data)
+    
     def _execute_remaining_agents(self, pending_data: dict, intro_message: str = None):
         """
         남은 에이전트들을 실행합니다.
@@ -1239,14 +1380,14 @@ class JARVISApp:
         if not remaining_agents:
             return
         
-        # 채팅에 안내 메시지 추가 (커스텀 메시지 또는 기본 메시지)
+        # 채팅에 안내 메시지 추가 (짧은 상태 메시지는 애니메이션 없이 즉시 표시)
         agent_names = ', '.join(remaining_agents)
         if hasattr(self._main_window, 'chat_widget'):
             if intro_message:
                 message = intro_message
             else:
                 message = f"🔄 이어서 {agent_names} 작업을 진행할게요."
-            self._main_window.chat_widget.add_assistant_message(message, typing_animation=True)
+            self._main_window.chat_widget.add_assistant_message(message, typing_animation=False)
         
         # ChatController를 통해 continue-agents 요청
         token, user_id = self._auth_controller.get_credentials()
@@ -1797,6 +1938,10 @@ class JARVISApp:
         title = data.get("title", "Analysis")
         message = data.get("message", "")
         
+        # 플로팅 버튼 로딩 중지
+        if self._floating_button:
+            self._floating_button.set_loading(False)
+        
         if success:
             # Refresh dashboard
             if hasattr(self._main_window, 'dashboard_widget'):
@@ -1805,22 +1950,33 @@ class JARVISApp:
             # 초기 설정 완료 직후 5초 이내면 토스트 억제 (이미 통합 메시지로 표시됨)
             if self._initial_setup_completed_time and (time.time() - self._initial_setup_completed_time) < 5:
                 print(f"📊 Analysis completed (toast suppressed - initial setup just completed): {title}")
-                return
+                # 남은 에이전트 처리는 계속 진행
+            else:
+                # 대시보드 열기 액션과 함께 토스트 표시
+                def open_dashboard():
+                    if self._main_window:
+                        self._main_window.show()
+                        self._main_window.raise_()
+                        self._main_window.activateWindow()
+                        self._main_window.switch_to_dashboard()
+                
+                self._toast_manager.success_with_dashboard_action(
+                    "📊 분석 완료",
+                    f"'{title}' 분석이 완료되었습니다.\n대시보드에서 결과를 확인하시겠습니까?",
+                    open_dashboard
+                )
+                print(f"📊 Analysis completed toast: {title}")
             
-            # 대시보드 열기 액션과 함께 토스트 표시
-            def open_dashboard():
-                if self._main_window:
-                    self._main_window.show()
-                    self._main_window.raise_()
-                    self._main_window.activateWindow()
-                    self._main_window.switch_to_dashboard()
-            
-            self._toast_manager.success_with_dashboard_action(
-                "📊 분석 완료",
-                f"'{title}' 분석이 완료되었습니다.\n대시보드에서 결과를 확인하시겠습니까?",
-                open_dashboard
-            )
-            print(f"📊 Analysis completed toast: {title}")
+            # 남은 에이전트가 있으면 계속 실행
+            if hasattr(self, '_pending_continuation') and self._pending_continuation:
+                pending = self._pending_continuation
+                self._pending_continuation = None
+                remaining = pending.get('remaining_agents', [])
+                if remaining:
+                    print(f"🔄 분석 완료 후 남은 에이전트 실행: {remaining}")
+                    # 잠시 후 실행 (토스트 표시 후)
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(1000, lambda: self._execute_remaining_agents(pending))
         else:
             self._toast_manager.error(
                 "📊 분석 실패",
@@ -1828,6 +1984,10 @@ class JARVISApp:
                 duration_ms=8000
             )
             print(f"❌ Analysis failed toast: {title}")
+            
+            # 실패해도 남은 에이전트가 있으면 사용자에게 물어보기
+            if hasattr(self, '_pending_continuation') and self._pending_continuation:
+                self._pending_continuation = None  # 실패 시 취소
     
     # =========================================================================
     # Lifecycle
