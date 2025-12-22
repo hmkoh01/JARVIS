@@ -41,8 +41,11 @@ from PyQt6.QtGui import (
     QCursor,
     QMouseEvent,
     QPaintEvent,
-    QEnterEvent
+    QEnterEvent,
+    QPixmap
 )
+
+import os
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
@@ -109,9 +112,39 @@ class FloatingButton(QWidget):
         # Custom click handler (can be overridden)
         self._custom_click_handler = None
         
+        # Load icon image
+        self._icon_pixmap: Optional[QPixmap] = None
+        self._load_icon()
+        
         self._setup_window()
         self._setup_ui()
         self._position_default()
+    
+    def _load_icon(self):
+        """Load the JARVIS icon image."""
+        # Try to find the icon in resources folder
+        possible_paths = [
+            os.path.join(os.path.dirname(__file__), "..", "resources", "icons", "jarvis_logo.png"),
+            os.path.join(os.path.dirname(__file__), "resources", "icons", "jarvis_logo.png"),
+            "resources/icons/jarvis_logo.png",
+        ]
+        
+        for path in possible_paths:
+            abs_path = os.path.abspath(path)
+            if os.path.exists(abs_path):
+                self._icon_pixmap = QPixmap(abs_path)
+                if not self._icon_pixmap.isNull():
+                    # Scale to fit button size (larger icon)
+                    icon_size = int(self.BUTTON_SIZE * 1.33)  # ~85px for 64px button
+                    self._icon_pixmap = self._icon_pixmap.scaled(
+                        icon_size, icon_size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    print(f"✅ Loaded icon from: {abs_path}")
+                    return
+        
+        print("⚠️ Could not load jarvis_logo.png, will use fallback icon")
     
     def _setup_window(self):
         """Configure window properties for floating button behavior."""
@@ -134,12 +167,12 @@ class FloatingButton(QWidget):
     
     def _setup_ui(self):
         """Set up the visual appearance."""
-        # Add drop shadow effect
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(15)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        shadow.setOffset(0, 4)
-        self.setGraphicsEffect(shadow)
+        # Drop shadow disabled - interferes with animation rendering
+        # shadow = QGraphicsDropShadowEffect(self)
+        # shadow.setBlurRadius(15)
+        # shadow.setColor(QColor(0, 0, 0, 80))
+        # shadow.setOffset(0, 4)
+        # self.setGraphicsEffect(shadow)
         
         # Set cursor
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -203,15 +236,19 @@ class FloatingButton(QWidget):
         Args:
             loading: True to start loading animation, False to stop
         """
+        print(f"[FloatingButton] set_loading({loading}), current: {self._is_loading}")
         if self._is_loading == loading:
+            print(f"[FloatingButton] 이미 같은 상태, 무시")
             return
             
         self._is_loading = loading
         if loading:
             self._rotation_timer.start()
+            print(f"[FloatingButton] 로딩 애니메이션 시작")
         else:
             self._rotation_timer.stop()
             self._rotation_angle = 225.0  # Reset to default position
+            print(f"[FloatingButton] 로딩 애니메이션 중지")
         self.update()
     
     def is_loading(self) -> bool:
@@ -223,7 +260,7 @@ class FloatingButton(QWidget):
     # =========================================================================
     
     def paintEvent(self, event: QPaintEvent):
-        """Draw the JARVIS icon with optional loading animation."""
+        """Draw the JARVIS icon or loading animation."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
@@ -245,45 +282,77 @@ class FloatingButton(QWidget):
         painter.setBrush(QBrush(bg_color))
         painter.drawEllipse(button_rect)
         
-        # === JARVIS Icon ===
-        icon_color = self.COLOR_TEXT
+        if self._is_loading:
+            # === Loading Animation: Rotating dot inside circle ===
+            self._draw_loading_animation(painter, center, radius)
+        else:
+            # === Normal State: Show icon image or fallback ===
+            self._draw_icon(painter, button_rect, center, radius)
         
-        # Proportions matching the original icon
-        outer_radius = radius * 0.72
-        ring_width = radius * 0.11  # Outer ring thickness
-        inner_circle_radius = radius * 0.20  # Inner filled circle
-        line_width = radius * 0.09  # Line thickness
-
-        # Loading spinner color
-        spinner_color = self.COLOR_TEXT
+        painter.end()
+    
+    def _draw_icon(self, painter: QPainter, button_rect, center: QPointF, radius: float):
+        """Draw the JARVIS icon image or fallback icon - clipped to circle."""
+        if self._icon_pixmap and not self._icon_pixmap.isNull():
+            # Icon should fill most of the button
+            from PyQt6.QtGui import QPainterPath
+            
+            # Fixed clip radius to show full icon with outer ring (slightly smaller than button radius 32)
+            clip_radius = 30  # Fixed value for 64px button (matches test_button.py style)
+            
+            # Create circular clipping path
+            path = QPainterPath()
+            path.addEllipse(center, clip_radius, clip_radius)
+            
+            # Save painter state, apply clip, draw, restore
+            painter.save()
+            painter.setClipPath(path)
+            
+            # Draw the loaded image centered
+            icon_size = self._icon_pixmap.size()
+            x = int(center.x() - icon_size.width() / 2)
+            y = int(center.y() - icon_size.height() / 2)
+            painter.drawPixmap(x, y, self._icon_pixmap)
+            
+            painter.restore()
+        else:
+            # Fallback: Draw simple "J" text
+            icon_color = self.COLOR_TEXT
+            painter.setPen(QPen(icon_color))
+            font = QFont("Arial", int(radius * 0.8), QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(button_rect, Qt.AlignmentFlag.AlignCenter, "J")
+    
+    def _draw_loading_animation(self, painter: QPainter, center: QPointF, radius: float):
+        """Draw the rotating loading animation - matching test_button.py exactly."""
+        # Disable antialiasing for rougher/lower resolution look
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         
-        # 1. Outer ring (circular outline)
-        pen = QPen(icon_color, ring_width)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
+        # Use off-white for loading animation (matches test_button.py)
+        icon_color = QColor("#e8e8e8")
+        
+        # Fixed values matching test_button.py (works well visually)
+        outer_radius = 22  # Outer ring radius
+        ring_width = 5     # Pen width for outer ring
+        dot_distance = 14  # Distance from center to rotating dot
+        dot_radius = 6     # Rotating dot radius
+        
+        # 1. Outer ring (static circle outline)
+        painter.setPen(QPen(icon_color, ring_width))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(center, outer_radius, outer_radius)
         
-        # 2. Calculate line endpoint based on rotation angle
+        # 2. Calculate rotating dot position
         angle_rad = math.radians(self._rotation_angle)
-        line_length = outer_radius * 0.55  # From center to inner circle center
         
-        end_x = center.x() + line_length * math.cos(angle_rad)
-        end_y = center.y() + line_length * math.sin(angle_rad)
-        end_point = QPointF(end_x, end_y)
-
-        # 3. Line from center to inner circle (with round cap)
-        line_pen = QPen(icon_color, line_width)
-        line_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(line_pen)
-        painter.drawLine(center, end_point)
+        dot_x = center.x() + dot_distance * math.cos(angle_rad)
+        dot_y = center.y() + dot_distance * math.sin(angle_rad)
+        dot_point = QPointF(dot_x, dot_y)
         
-        # 4. Inner filled circle
+        # 3. Rotating filled circle (dot)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(icon_color))
-        painter.drawEllipse(end_point, inner_circle_radius, inner_circle_radius)
-        
-        painter.end()
+        painter.drawEllipse(dot_point, dot_radius, dot_radius)
     
     # =========================================================================
     # Mouse Events

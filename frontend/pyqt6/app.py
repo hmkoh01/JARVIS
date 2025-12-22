@@ -2079,9 +2079,9 @@ class JARVISApp:
                     duration_ms=4000
                 )
                 
-                # 인사 메시지가 사라진 후 추천 메시지 표시 (4.5초 후)
+                # 인사 메시지가 사라진 후 추천 메시지 표시 (1초 후)
                 from PyQt6.QtCore import QTimer
-                QTimer.singleShot(4500, self._show_recommendation_after_greeting)
+                QTimer.singleShot(1000, self._show_recommendation_after_greeting)
         else:
             self._toast_manager.warning(
                 "로그인 필요",
