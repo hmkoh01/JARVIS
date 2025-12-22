@@ -875,6 +875,46 @@ class JARVISApp:
         )
         print(f"📌 Recommendation toast shown: {keyword} (id={recommendation_id})")
     
+    def _show_pending_recommendations(self):
+        """앱 시작 시 대기 중인 추천을 API에서 가져와 토스트로 표시."""
+        import requests
+        
+        token, user_id = self._auth_controller.get_credentials()
+        if not token:
+            return
+        
+        try:
+            response = requests.get(
+                f"{API_BASE_URL}/api/v2/recommendations",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    recommendations = data.get("recommendations", [])
+                    if recommendations:
+                        # 가장 최근 추천 1개만 토스트로 표시 (여러 개면 UI가 복잡해짐)
+                        latest_rec = recommendations[0]
+                        print(f"📌 대기 중인 추천 발견: {latest_rec.get('keyword')}")
+                        self._on_recommendation(latest_rec)
+                    else:
+                        # 추천이 없으면 환영 메시지 표시
+                        self._toast_manager.info(
+                            "JARVIS 시작됨",
+                            "안녕하세요! 무엇을 도와드릴까요?",
+                            duration_ms=4000
+                        )
+        except Exception as e:
+            print(f"⚠️ 대기 중인 추천 조회 실패: {e}")
+            # 실패해도 환영 메시지 표시
+            self._toast_manager.info(
+                "JARVIS 시작됨",
+                "안녕하세요! 무엇을 도와드릴까요?",
+                duration_ms=4000
+            )
+    
     def _handle_recommendation_response(self, recommendation_id: int, keyword: str, action: str):
         """Handle user response to recommendation (accept/reject)."""
         import requests
@@ -1052,12 +1092,9 @@ class JARVISApp:
                 )
                 print("🔄 Initial setup in progress - loading animation started")
             else:
-                # Show welcome toast
-                self._toast_manager.info(
-                    "JARVIS 시작됨",
-                    "안녕하세요! 무엇을 도와드릴까요?",
-                    duration_ms=4000
-                )
+                # 앱 시작 시 대기 중인 추천 확인 및 표시
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(2000, self._show_pending_recommendations)
         else:
             self._toast_manager.warning(
                 "로그인 필요",

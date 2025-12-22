@@ -147,6 +147,36 @@ class FloatingButton(QWidget):
             y = geometry.bottom() - self.height() - 30
             self.move(x, y)
     
+    def showEvent(self, event):
+        """Ensure button is within screen bounds when shown."""
+        super().showEvent(event)
+        self._ensure_on_screen()
+    
+    def _ensure_on_screen(self):
+        """Check if button is on screen, reset to default if not."""
+        current_pos = self.pos()
+        
+        # Check if current position is on any available screen
+        screen = QApplication.screenAt(current_pos)
+        if screen is None:
+            # Button is off-screen, reset to default position
+            print(f"⚠️ 플로팅 버튼이 화면 밖에 있어 기본 위치로 이동합니다")
+            self._position_default()
+            return
+        
+        # Ensure button is fully visible within screen bounds
+        geometry = screen.availableGeometry()
+        x, y = current_pos.x(), current_pos.y()
+        
+        # Check if button is fully visible
+        if (x < geometry.left() or x + self.width() > geometry.right() or
+            y < geometry.top() or y + self.height() > geometry.bottom()):
+            # Constrain to screen
+            new_pos = self._constrain_to_screen(current_pos)
+            if new_pos != current_pos:
+                print(f"⚠️ 플로팅 버튼 위치 조정: ({x}, {y}) → ({new_pos.x()}, {new_pos.y()})")
+                self.move(new_pos)
+    
     def set_main_window(self, main_window: "MainWindow"):
         """Set the main window reference for toggling."""
         self._main_window = main_window

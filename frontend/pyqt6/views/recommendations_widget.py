@@ -421,6 +421,14 @@ class RecommendationsWidget(QWidget):
     
     def load_data(self):
         """Load recommendations from API."""
+        # 위젯이 삭제되었는지 확인
+        try:
+            if not self._status_label or not self._status_label.isVisible:
+                return
+        except RuntimeError:
+            # C++ 객체가 이미 삭제됨
+            return
+        
         if not self._jwt_token:
             self._status_label.setText("로그인이 필요합니다")
             return
@@ -444,28 +452,34 @@ class RecommendationsWidget(QWidget):
     
     def _on_error(self, error: str):
         """Handle loading error."""
-        self._status_label.setText(f"❌ 로드 실패: {error}")
+        try:
+            self._status_label.setText(f"❌ 로드 실패: {error}")
+        except RuntimeError:
+            pass  # 위젯이 이미 삭제됨
     
     def _update_ui(self):
         """Update UI with recommendations."""
-        # Clear existing cards
-        while self._content_layout.count() > 1:
-            item = self._content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        if not self._recommendations:
-            self._status_label.setText("📭 새로운 추천이 없습니다\n\n채팅을 통해 관심사를 알려주시면\n맞춤형 추천을 받으실 수 있습니다")
-            self._status_label.show()
-            return
-        
-        self._status_label.hide()
-        
-        for rec in self._recommendations:
-            card = RecommendationCard(rec)
-            card.accepted.connect(self._on_recommendation_accepted)
-            card.rejected.connect(self._on_recommendation_rejected)
-            self._content_layout.insertWidget(self._content_layout.count() - 1, card)
+        try:
+            # Clear existing cards
+            while self._content_layout.count() > 1:
+                item = self._content_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            
+            if not self._recommendations:
+                self._status_label.setText("📭 새로운 추천이 없습니다\n\n채팅을 통해 관심사를 알려주시면\n맞춤형 추천을 받으실 수 있습니다")
+                self._status_label.show()
+                return
+            
+            self._status_label.hide()
+            
+            for rec in self._recommendations:
+                card = RecommendationCard(rec)
+                card.accepted.connect(self._on_recommendation_accepted)
+                card.rejected.connect(self._on_recommendation_rejected)
+                self._content_layout.insertWidget(self._content_layout.count() - 1, card)
+        except RuntimeError:
+            pass  # 위젯이 이미 삭제됨
     
     def _on_recommendation_accepted(self, rec_id: int):
         """Handle recommendation accepted."""
@@ -522,6 +536,9 @@ class RecommendationsWidget(QWidget):
             if item and item.widget():
                 widget = item.widget()
                 if isinstance(widget, RecommendationCard) and widget.rec_id == rec_id:
+                    # 리스트에서 먼저 제거
+                    self._recommendations = [r for r in self._recommendations if r.get("id") != rec_id]
+                    
                     # 페이드 아웃 효과 적용
                     effect = QGraphicsOpacityEffect(widget)
                     widget.setGraphicsEffect(effect)
@@ -531,17 +548,21 @@ class RecommendationsWidget(QWidget):
                     animation.setStartValue(1.0)
                     animation.setEndValue(0.0)
                     animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-                    animation.finished.connect(widget.deleteLater)
+                    
+                    # 애니메이션 완료 시 위젯 삭제 및 빈 상태 표시
+                    def on_animation_finished(w=widget):
+                        w.deleteLater()
+                        # 모든 추천이 처리되었으면 빈 상태 표시
+                        if not self._recommendations:
+                            self._status_label.setText("📭 모든 추천을 확인했습니다!")
+                            self._status_label.show()
+                    
+                    animation.finished.connect(on_animation_finished)
                     animation.start()
                     
-                    # 참조 저장 (가비지 컬렉션 방지)
+                    # 참조 저장 (가비지 컬렉션 방지) - effect도 저장
                     widget._fade_animation = animation
+                    widget._fade_effect = effect
                     
-                    self._recommendations = [r for r in self._recommendations if r.get("id") != rec_id]
                     break
-        
-        # Show empty state if no more cards
-        if not self._recommendations:
-            self._status_label.setText("📭 모든 추천을 확인했습니다!")
-            self._status_label.show()
 

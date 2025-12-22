@@ -275,19 +275,12 @@ class ChatController(QObject):
                 if before_metadata:
                     result += before_metadata
                 
-                # 메타데이터 파싱
+                # 메타데이터 파싱 (emit은 _on_stream_completed에서 한 번만)
                 try:
                     metadata_json = match.group(1).strip()
                     metadata = json.loads(metadata_json)
                     self._current_metadata = metadata
-                    
-                    action = metadata.get('action', '')
-                    # request_topic은 버튼 표시 없이 메시지만 표시 (주제를 물어보는 것)
-                    if action in ('confirm_report', 'confirm_analysis', 'open_file', 'confirm_code', 'confirm_dashboard'):
-                        self.confirm_action_requested.emit(metadata)
-                        print(f"[ChatController] Metadata action: {action}")
-                    elif action == 'request_topic':
-                        print(f"[ChatController] Request topic - no confirmation needed")
+                    print(f"[ChatController] Metadata parsed: {metadata.get('action', 'unknown')}")
                 except json.JSONDecodeError as e:
                     print(f"[ChatController] Metadata parse error: {e}, json: {match.group(1)[:100]}")
                 
@@ -305,14 +298,7 @@ class ChatController(QObject):
                         metadata_json = legacy_match.group(1).strip()
                         metadata = json.loads(metadata_json)
                         self._current_metadata = metadata
-                        
-                        action = metadata.get('action', '')
-                        # request_topic은 버튼 표시 없이 메시지만 표시 (주제를 물어보는 것)
-                        if action in ('confirm_report', 'confirm_analysis', 'open_file', 'confirm_code', 'confirm_dashboard'):
-                            self.confirm_action_requested.emit(metadata)
-                            print(f"[ChatController] Legacy metadata action: {action}")
-                        elif action == 'request_topic':
-                            print(f"[ChatController] Legacy request topic - no confirmation needed")
+                        print(f"[ChatController] Legacy metadata parsed: {metadata.get('action', 'unknown')}")
                     except json.JSONDecodeError as e:
                         print(f"[ChatController] Legacy metadata parse error: {e}")
                     
@@ -435,9 +421,11 @@ class ChatController(QObject):
             if action in ('confirm_report', 'confirm_analysis', 'confirm_code', 'confirm_dashboard'):
                 print(f"[ChatController] Emitting confirm_action_requested for action: {action}")
                 self.confirm_action_requested.emit(self._current_metadata)
+                self._current_metadata = None  # 중복 emit 방지
                 return
             elif action == 'request_topic':
                 print(f"[ChatController] Request topic - no confirmation button needed")
+            self._current_metadata = None  # 메타데이터 처리 완료
         
         # 메타데이터가 없으면 텍스트에서 확인 요청 감지
         if full_response_text:
@@ -487,6 +475,10 @@ class ChatController(QObject):
     def _on_notification(self, notification: Notification):
         """Called for any WebSocket notification."""
         self.notification_received.emit(notification)
+        
+        # Handle specific notification types directly to avoid timing issues
+        if notification.type == NotificationType.NEW_RECOMMENDATION:
+            self._on_recommendation(notification.data)
     
     @pyqtSlot(dict)
     def _on_recommendation(self, data: dict):

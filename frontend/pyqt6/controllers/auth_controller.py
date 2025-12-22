@@ -214,6 +214,18 @@ class AuthController(QObject):
                     self._has_completed_setup = survey_data.get("completed", False)
                     print(f"✅ 설문 완료 상태 조회: completed={self._has_completed_setup}")
                     return not self._has_completed_setup
+        
+        except requests.exceptions.Timeout:
+            # 타임아웃 시 기존 사용자는 설정 완료로 간주
+            print(f"⚠️ 설정 상태 조회 타임아웃 - 기존 사용자로 간주하여 초기 설정 건너뜀")
+            self._has_completed_setup = True
+            return False
+        
+        except requests.exceptions.ConnectionError:
+            # 연결 오류 시 기존 사용자는 설정 완료로 간주
+            print(f"⚠️ 설정 상태 조회 연결 오류 - 기존 사용자로 간주하여 초기 설정 건너뜀")
+            self._has_completed_setup = True
+            return False
                     
         except Exception as e:
             print(f"⚠️ 설정 상태 조회 실패: {e}")
@@ -222,7 +234,9 @@ class AuthController(QObject):
         if self._user_info:
             return self._user_info.get("has_completed_setup", 0) == 0
         
-        return True
+        # 토큰이 있는 기존 사용자는 설정 완료로 간주
+        print(f"⚠️ 설정 상태 확인 불가 - 기존 사용자로 간주하여 초기 설정 건너뜀")
+        return False
     
     def get_token(self) -> Optional[str]:
         """Get current authentication token."""
