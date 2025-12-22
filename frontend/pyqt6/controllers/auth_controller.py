@@ -67,9 +67,10 @@ class AuthController(QObject):
     def initialize(self) -> bool:
         """
         Initialize authentication state from stored token.
+        Validates token against backend before accepting.
         
         Returns:
-            True if valid token found, False otherwise
+            True if valid token found and verified, False otherwise
         """
         if not self._token_store_available:
             return False
@@ -78,6 +79,13 @@ class AuthController(QObject):
             token, user_id = self._get_valid_token_and_user()
             
             if token and user_id:
+                # 백엔드에서 토큰 유효성 검증
+                if not self._validate_token_with_backend(token):
+                    print("⚠️ 저장된 토큰이 백엔드에서 유효하지 않음 - 재로그인 필요")
+                    self._delete_token()  # 무효한 토큰 삭제
+                    self._clear_state()
+                    return False
+                
                 self._token = token
                 self._user_id = user_id
                 self._user_info = self._decode_claims(token)
@@ -90,6 +98,53 @@ class AuthController(QObject):
         except Exception as e:
             print(f"Auth initialization error: {e}")
             self._clear_state()
+            return False
+    
+    def _validate_token_with_backend(self, token: str) -> bool:
+        """
+        Validate token against backend API.
+        
+        Returns:
+            True if token is valid and user exists, False otherwise
+        """
+        try:
+            response = requests.get(
+                f"{API_BASE_URL}/api/v2/dashboard/summary",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success"):
+                    # 토큰 유효, 사용자 정보도 확인
+                    user_data = data.get("data", {}).get("user", {})
+                    if user_data.get("user_id"):
+                        self._has_completed_setup = bool(user_data.get("has_completed_setup", False))
+                        print(f"✅ 토큰 백엔드 검증 성공 (user_id={user_data.get('user_id')}, setup={self._has_completed_setup})")
+                        return True
+            
+            if response.status_code == 401:
+                print(f"⚠️ 토큰 만료 또는 무효 (HTTP 401)")
+                return False
+            
+            if response.status_code == 404:
+                print(f"⚠️ 사용자를 찾을 수 없음 (HTTP 404)")
+                return False
+            
+            print(f"⚠️ 토큰 검증 실패: HTTP {response.status_code}")
+            return False
+            
+        except requests.exceptions.Timeout:
+            # 타임아웃 시에도 일단 유효한 것으로 간주 (오프라인 모드 지원)
+            print(f"⚠️ 토큰 검증 타임아웃 - 기존 토큰 사용")
+            return True
+        except requests.exceptions.ConnectionError:
+            # 연결 오류 시에도 일단 유효한 것으로 간주
+            print(f"⚠️ 서버 연결 불가 - 기존 토큰 사용")
+            return True
+        except Exception as e:
+            print(f"⚠️ 토큰 검증 오류: {e}")
             return False
     
     def save_token(self, token: str) -> bool:
@@ -176,21 +231,30 @@ class AuthController(QObject):
         """
         Check if user needs to complete initial setup.
         
-        백엔드 API를 호출해서 설정 완료 여부를 확인합니다.
-        JWT 토큰에는 이 정보가 포함되지 않을 수 있으므로 API 조회가 필요합니다.
+        _validate_token_with_backend에서 이미 조회된 값을 사용합니다.
         
         Returns:
             True if setup is required
         """
-        # 이미 백엔드에서 조회한 값이 있으면 사용
+        # 이미 백엔드에서 조회한 값이 있으면 사용 (initialize에서 설정됨)
         if self._has_completed_setup is not None:
+            print(f"📋 초기 설정 필요 여부: {not self._has_completed_setup} (캐시된 값)")
             return not self._has_completed_setup
         
         # 토큰과 user_id가 없으면 설정 필요
         if not self._token or not self._user_id:
+            print(f"📋 토큰/사용자 정보 없음 - 초기 설정 필요")
             return True
         
-        # 백엔드 API로 설정 완료 여부 조회
+        # OAuth 응답에서 온 정보 확인
+        if self._user_info:
+            has_setup = self._user_info.get("has_completed_setup")
+            if has_setup is not None:
+                self._has_completed_setup = bool(has_setup)
+                print(f"📋 초기 설정 필요 여부: {not self._has_completed_setup} (user_info)")
+                return not self._has_completed_setup
+        
+        # 백엔드 API로 설정 완료 여부 조회 (폴백)
         try:
             response = requests.get(
                 f"{API_BASE_URL}/api/v2/dashboard/summary",
@@ -205,42 +269,23 @@ class AuthController(QObject):
                     self._has_completed_setup = bool(user_data.get("has_completed_setup", False))
                     print(f"✅ 설정 완료 상태 조회: has_completed_setup={self._has_completed_setup}")
                     return not self._has_completed_setup
-            
-            # API 호출 실패 시, 설문 완료 여부 조회 시도
-            survey_response = requests.get(
-                f"{API_BASE_URL}/api/v2/user-survey/{self._user_id}/completed",
-                headers={"Authorization": f"Bearer {self._token}"},
-                timeout=10
-            )
-            
-            if survey_response.status_code == 200:
-                survey_data = survey_response.json()
-                if survey_data.get("success"):
-                    self._has_completed_setup = survey_data.get("completed", False)
-                    print(f"✅ 설문 완료 상태 조회: completed={self._has_completed_setup}")
-                    return not self._has_completed_setup
         
         except requests.exceptions.Timeout:
-            # 타임아웃 시 기존 사용자는 설정 완료로 간주
-            print(f"⚠️ 설정 상태 조회 타임아웃 - 기존 사용자로 간주하여 초기 설정 건너뜀")
+            print(f"⚠️ 설정 상태 조회 타임아웃 - 초기 설정 건너뜀")
             self._has_completed_setup = True
             return False
         
         except requests.exceptions.ConnectionError:
-            # 연결 오류 시 기존 사용자는 설정 완료로 간주
-            print(f"⚠️ 설정 상태 조회 연결 오류 - 기존 사용자로 간주하여 초기 설정 건너뜀")
+            print(f"⚠️ 설정 상태 조회 연결 오류 - 초기 설정 건너뜀")
             self._has_completed_setup = True
             return False
                     
         except Exception as e:
             print(f"⚠️ 설정 상태 조회 실패: {e}")
         
-        # 조회 실패 시 user_info에서 확인 (폴백)
-        if self._user_info:
-            return self._user_info.get("has_completed_setup", 0) == 0
-        
         # 토큰이 있는 기존 사용자는 설정 완료로 간주
-        print(f"⚠️ 설정 상태 확인 불가 - 기존 사용자로 간주하여 초기 설정 건너뜀")
+        print(f"⚠️ 설정 상태 확인 불가 - 초기 설정 건너뜀")
+        self._has_completed_setup = True
         return False
     
     def get_token(self) -> Optional[str]:

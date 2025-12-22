@@ -860,6 +860,214 @@ async def get_data_collection_status(user_id: int, request: Request):
         logger.error("데이터 수집 상태 조회 오류: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"데이터 수집 상태 조회 오류: {str(e)}")
 
+# =============================================================================
+# 클라이언트 측 데이터 수집 API (원격 서버용)
+# =============================================================================
+
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+
+class ClientFileData(BaseModel):
+    """클라이언트에서 파싱된 파일 데이터"""
+    file_path: str
+    file_name: str
+    file_category: str
+    chunks: List[Dict[str, Any]]  # [{"text": "...", "snippet": "..."}, ...]
+    file_hash: str
+    
+class ClientCollectionRequest(BaseModel):
+    """클라이언트 수집 요청"""
+    files: List[ClientFileData]
+    
+class ClientCollectionProgress(BaseModel):
+    """클라이언트 수집 진행 상태 업데이트"""
+    progress: float
+    message: str
+    is_done: bool = False
+
+
+@router.post("/data-collection/client-upload/{user_id}")
+async def client_upload_data(
+    user_id: int,
+    payload: ClientCollectionRequest,
+    request: Request
+):
+    """
+    클라이언트에서 파싱된 데이터를 받아 인덱싱합니다.
+    
+    클라이언트(PyQt6 앱)가 로컬에서 파일을 스캔하고 파싱한 후,
+    텍스트 청크를 이 엔드포인트로 전송합니다.
+    
+    서버는 임베딩 생성 및 Qdrant 인덱싱만 수행합니다.
+    """
+    try:
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+        
+        if repository is None or embedder is None:
+            raise HTTPException(
+                status_code=500,
+                detail="서버 리소스가 아직 초기화되지 않았습니다."
+            )
+        
+        db = SQLite()
+        processed_count = 0
+        skipped_count = 0
+        total_chunks = 0
+        
+        all_texts = []
+        all_metas = []
+        
+        for file_data in payload.files:
+            doc_id = f"file_{file_data.file_hash}"
+            
+            # 중복 체크
+            if db.is_file_exists(user_id, doc_id):
+                skipped_count += 1
+                continue
+            
+            # 파일 메타데이터 저장
+            file_info = {
+                'user_id': user_id,
+                'file_path': file_data.file_path,
+                'file_category': file_data.file_category,
+                'modified_date': datetime.utcnow()
+            }
+            db.insert_collected_file(file_info)
+            
+            # 청크 수집
+            for i, chunk in enumerate(file_data.chunks):
+                text = chunk.get('text', '')
+                snippet = chunk.get('snippet', text[:200] if text else '')
+                
+                if not text.strip():
+                    continue
+                
+                all_texts.append(text)
+                all_metas.append({
+                    'user_id': user_id,
+                    'source': 'file',
+                    'path': file_data.file_path,
+                    'doc_id': doc_id,
+                    'chunk_id': i,
+                    'snippet': snippet,
+                    'content': text
+                })
+                total_chunks += 1
+            
+            processed_count += 1
+        
+        # 임베딩 및 Qdrant 인덱싱 (배치 처리)
+        if all_texts:
+            logger.info(f"클라이언트 업로드: {len(all_texts)}개 청크 임베딩 중...")
+            
+            # 배치 처리 (메모리 최적화)
+            batch_size = 64
+            for i in range(0, len(all_texts), batch_size):
+                batch_texts = all_texts[i:i + batch_size]
+                batch_metas = all_metas[i:i + batch_size]
+                
+                embeddings = embedder.encode_documents(batch_texts)
+                dense_vectors = embeddings['dense_vecs'].tolist()
+                sparse_vectors = [
+                    embedder.convert_sparse_to_qdrant_format(lw)
+                    for lw in embeddings['lexical_weights']
+                ]
+                repository.qdrant.upsert_vectors(batch_metas, dense_vectors, sparse_vectors)
+            
+            logger.info(f"✅ 클라이언트 업로드 완료: {processed_count}개 파일, {total_chunks}개 청크")
+        
+        return {
+            "success": True,
+            "processed_files": processed_count,
+            "skipped_files": skipped_count,
+            "total_chunks": total_chunks,
+            "message": f"{processed_count}개 파일 처리 완료 ({skipped_count}개 스킵)"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"클라이언트 데이터 업로드 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"업로드 오류: {str(e)}")
+
+
+@router.post("/data-collection/client-status/{user_id}")
+async def update_client_collection_status(
+    user_id: int,
+    payload: ClientCollectionProgress,
+    request: Request
+):
+    """클라이언트 측 수집 진행 상태를 업데이트합니다."""
+    try:
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+        
+        if repository is None or embedder is None:
+            return {"success": True}  # 아직 초기화 안됨 - 무시
+        
+        # 매니저가 있으면 상태 업데이트
+        if user_id in data_collection_managers:
+            manager = data_collection_managers[user_id]
+            manager.progress = payload.progress
+            manager.progress_message = payload.message
+            if payload.is_done:
+                manager.initial_collection_done = True
+        else:
+            # 매니저 생성 및 상태 설정
+            manager = get_manager(user_id, repository=repository, embedder=embedder)
+            manager.progress = payload.progress
+            manager.progress_message = payload.message
+            if payload.is_done:
+                manager.initial_collection_done = True
+        
+        return {"success": True}
+        
+    except Exception as e:
+        logger.error(f"클라이언트 상태 업데이트 오류: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/data-collection/client-complete/{user_id}")
+async def complete_client_collection(user_id: int, request: Request):
+    """클라이언트 측 데이터 수집 완료를 알립니다."""
+    try:
+        repository: Repository = getattr(request.app.state, "repository", None)
+        embedder: BGEM3Embedder = getattr(request.app.state, "embedder", None)
+        
+        if repository is None or embedder is None:
+            raise HTTPException(status_code=500, detail="서버 리소스 미초기화")
+        
+        # 매니저 상태 업데이트
+        if user_id in data_collection_managers:
+            manager = data_collection_managers[user_id]
+        else:
+            manager = get_manager(user_id, repository=repository, embedder=embedder)
+        
+        manager.progress = 100.0
+        manager.progress_message = "✅ 데이터 수집 완료"
+        manager.initial_collection_done = True
+        
+        # 추천 분석 트리거
+        try:
+            from main import trigger_recommendation_analysis
+            asyncio.create_task(trigger_recommendation_analysis(force_recommend=True))
+            logger.info(f"🎯 사용자 {user_id} 초기 추천 분석 트리거됨")
+        except Exception as e:
+            logger.warning(f"추천 분석 트리거 실패: {e}")
+        
+        return {
+            "success": True,
+            "message": "데이터 수집이 완료되었습니다."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"수집 완료 처리 오류: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/data-collection/stats")
 async def get_data_collection_stats():
     """데이터 수집 통계를 확인합니다."""

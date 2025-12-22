@@ -10,6 +10,7 @@ from .websocket_client import (
     Notification,
     NotificationType
 )
+from .data_collector import ClientDataCollector
 
 __all__ = [
     "APIClient",
@@ -18,4 +19,5 @@ __all__ = [
     "WebSocketManager",
     "Notification",
     "NotificationType",
+    "ClientDataCollector",
 ]

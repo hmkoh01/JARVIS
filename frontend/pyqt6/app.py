@@ -270,6 +270,8 @@ class JARVISApp:
         self._initial_setup_progress = 0
         self._initial_setup_message = ""
         self._progress_poll_timer: Optional[QTimer] = None
+        self._last_progress_milestone = 0  # 진행률 마일스톤 추적
+        self._data_collector = None  # 클라이언트 측 데이터 수집기
         
         # 중복 추천 표시 방지를 위한 ID 추적
         self._shown_recommendation_ids: set = set()
@@ -488,7 +490,7 @@ class JARVISApp:
         return True
     
     def _submit_folder_setup(self, folders: list):
-        """Submit folder selection to backend and start data collection."""
+        """Submit folder selection to backend and start client-side data collection."""
         import requests
         
         token = self._auth_controller.get_token()
@@ -513,25 +515,110 @@ class JARVISApp:
                 print(f"⚠️ Folder setup submission failed: {response.status_code}")
                 return
             
-            # 2. Start data collection
-            collection_response = requests.post(
-                f"{API_BASE_URL}/api/v2/data-collection/start/{user_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"selected_folders": folders},
-                timeout=10
-            )
-            
-            if collection_response.status_code == 200:
-                print("✅ Data collection started")
-                self._start_initial_setup_tracking()
-            else:
-                print(f"⚠️ Data collection start failed: {collection_response.status_code}")
+            # 2. Start CLIENT-SIDE data collection (원격 서버 환경 지원)
+            self._start_client_data_collection(folders)
                 
         except Exception as e:
             print(f"⚠️ Folder setup submission error: {e}")
     
+    def _start_client_data_collection(self, folders: list):
+        """Start client-side data collection (로컬에서 파싱 후 서버로 업로드)."""
+        from services.data_collector import ClientDataCollector
+        
+        token = self._auth_controller.get_token()
+        user_id = self._auth_controller.get_user_id()
+        
+        if not token or not user_id:
+            print("⚠️ No auth credentials for data collection")
+            return
+        
+        # 기존 수집기가 있으면 중지
+        if hasattr(self, '_data_collector') and self._data_collector:
+            self._data_collector.stop()
+            self._data_collector.wait()
+        
+        # 새 수집기 생성
+        self._data_collector = ClientDataCollector(
+            user_id=user_id,
+            token=token,
+            selected_folders=folders,
+            parent=self._app
+        )
+        
+        # 시그널 연결
+        self._data_collector.progress_updated.connect(self._on_collection_progress)
+        self._data_collector.file_processed.connect(self._on_file_processed)
+        self._data_collector.collection_completed.connect(self._on_collection_completed)
+        self._data_collector.collection_error.connect(self._on_collection_error)
+        
+        # 수집 시작
+        self._is_initial_setup_in_progress = True
+        self._initial_setup_progress = 0
+        self._initial_setup_message = "📁 클라이언트 데이터 수집 시작..."
+        self._last_progress_milestone = 0  # 진행률 마일스톤 추적
+        
+        # 플로팅 버튼에 로딩 표시
+        if self._floating_button:
+            self._floating_button.set_loading(True)
+        
+        # 시작 알림
+        if self._toast_manager:
+            self._toast_manager.info(
+                "📁 데이터 수집 시작",
+                "로컬 파일을 스캔하고 있습니다...",
+                duration_ms=4000
+            )
+        
+        self._data_collector.start()
+        print("✅ Client-side data collection started")
+    
+    def _on_collection_progress(self, progress: float, message: str):
+        """Handle collection progress update."""
+        self._initial_setup_progress = progress
+        self._initial_setup_message = message
+        print(f"📊 Collection progress: {progress:.1f}% - {message}")
+        
+        # 25%, 50%, 75% 마일스톤에서 알림 표시
+        milestone = int(progress // 25) * 25
+        if milestone > 0 and milestone > self._last_progress_milestone and milestone < 100:
+            self._last_progress_milestone = milestone
+            if self._toast_manager:
+                self._toast_manager.info(
+                    f"📊 데이터 수집 {milestone}%",
+                    message,
+                    duration_ms=3000
+                )
+    
+    def _on_file_processed(self, file_name: str):
+        """Handle individual file processed."""
+        # 파일 처리 완료 시 로깅 (UI 업데이트는 오버헤드가 클 수 있음)
+        pass
+    
+    def _on_collection_completed(self):
+        """Handle collection completion."""
+        print("✅ Client-side data collection completed!")
+        self._on_initial_setup_complete()
+    
+    def _on_collection_error(self, error_msg: str):
+        """Handle collection error."""
+        print(f"❌ Collection error: {error_msg}")
+        
+        self._is_initial_setup_in_progress = False
+        
+        if self._floating_button:
+            self._floating_button.set_loading(False)
+        
+        if self._toast_manager:
+            self._toast_manager.error(
+                "데이터 수집 오류",
+                error_msg,
+                duration_ms=5000
+            )
+    
     def _start_initial_setup_tracking(self):
-        """Start tracking initial setup progress."""
+        """Start tracking initial setup progress (legacy - 백엔드 폴링 방식)."""
+        # NOTE: 클라이언트 측 수집을 사용할 때는 이 메서드가 호출되지 않습니다.
+        # 레거시 호환성을 위해 유지합니다.
         self._is_initial_setup_in_progress = True
         self._initial_setup_progress = 0
         self._initial_setup_message = "초기 데이터 수집 시작 중..."
@@ -542,10 +629,10 @@ class JARVISApp:
             self._progress_poll_timer.timeout.connect(self._poll_initial_setup_progress)
         
         self._progress_poll_timer.start(3000)  # Poll every 3 seconds
-        print("✅ Initial setup tracking started")
+        print("✅ Initial setup tracking started (backend polling mode)")
     
     def _poll_initial_setup_progress(self):
-        """Poll backend for initial setup progress."""
+        """Poll backend for initial setup progress (legacy)."""
         import requests
         
         token = self._auth_controller.get_token()

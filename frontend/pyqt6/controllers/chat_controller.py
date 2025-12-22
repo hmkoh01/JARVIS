@@ -68,6 +68,47 @@ class ChatController(QObject):
         (r'대시보드\s*분석을?\s*(?:시작|진행|업데이트)(?:할까요|하시겠습니까|해 드릴까요)\??', 'confirm_dashboard'),
     ]
     
+    # 룰베이스 응답 패턴 (LLM 없이 직접 응답)
+    RULE_BASED_RESPONSES = [
+        # 인사말
+        (r'^(안녕|하이|헬로|hi|hello|hey)[\s!?\.]*$', [
+            "안녕하세요! 😊 무엇을 도와드릴까요?",
+            "반갑습니다! 오늘 무엇을 도와드릴까요?",
+            "안녕하세요! JARVIS입니다. 어떤 도움이 필요하신가요?"
+        ]),
+        (r'^(안녕하세요|반갑습니다|반가워)[\s!?\.]*$', [
+            "안녕하세요! 😊 오늘 하루도 좋은 하루 되세요! 무엇을 도와드릴까요?",
+            "반갑습니다! 무엇이든 물어보세요.",
+            "안녕하세요! 어떤 작업을 도와드릴까요?"
+        ]),
+        # 감사
+        (r'^(고마워|감사합니다|감사해요|땡큐|thank|thanks)[\s!?\.]*$', [
+            "천만에요! 😊 더 필요한 게 있으시면 말씀해주세요.",
+            "도움이 되었다니 기쁘네요! 또 언제든 불러주세요.",
+            "별말씀을요! 더 도와드릴 일이 있으면 말씀해주세요."
+        ]),
+        # 작별
+        (r'^(바이|잘\s*가|안녕히|bye|goodbye)[\s!?\.]*$', [
+            "안녕히 가세요! 👋 좋은 하루 되세요!",
+            "다음에 또 뵙겠습니다! 좋은 하루 보내세요.",
+            "네, 안녕히 가세요! 언제든 다시 찾아주세요."
+        ]),
+        # 자기소개 요청
+        (r'^(넌\s*뭐야|너\s*누구|자기\s*소개|뭐\s*할\s*수\s*있어|뭘\s*할\s*수\s*있어|뭐\s*해줄\s*수\s*있어)[\s?]*$', [
+            "저는 JARVIS입니다! 🤖\n\n다음과 같은 일을 도와드릴 수 있어요:\n• 📄 **보고서 작성**: 관심 주제에 대한 상세 리포트\n• 💻 **코드 생성**: Python 코드 작성\n• 📊 **데이터 분석**: 수집된 데이터 분석\n• 💬 **질문 답변**: 다양한 질문에 대한 답변\n\n무엇을 도와드릴까요?",
+        ]),
+        # 상태 확인
+        (r'^(어때|기분\s*어때|잘\s*있어|괜찮아)[\s?]*$', [
+            "저는 항상 최상의 상태입니다! 😊 무엇을 도와드릴까요?",
+            "잘 지내고 있어요! 덕분에 오늘도 열심히 일하고 있습니다.",
+            "좋아요! 도움이 필요하시면 말씀해주세요."
+        ]),
+        # 도움말
+        (r'^(도움|도움말|help|헬프)[\s?!]*$', [
+            "**JARVIS 도움말** 📖\n\n**사용 가능한 기능:**\n• \"AI 트렌드 보고서 작성해줘\" - 보고서 생성\n• \"데이터 시각화 코드 만들어줘\" - 코드 생성\n• \"내 활동 분석해줘\" - 데이터 분석\n• 일반 질문도 자유롭게 하세요!\n\n**팁:** 추천이 나타나면 버튼을 눌러 빠르게 작업을 시작할 수 있어요!",
+        ]),
+    ]
+    
     def __init__(
         self,
         chat_widget: ChatWidget,
@@ -187,6 +228,13 @@ class ChatController(QObject):
         if not text.strip():
             return
         
+        # 룰베이스 응답 체크 (LLM 필요 없는 간단한 응답)
+        rule_response = self._check_rule_based_response(text.strip())
+        if rule_response:
+            print(f"[ChatController] Rule-based response matched")
+            self._handle_rule_based_response(text, rule_response)
+            return
+        
         self._is_sending = True
         self.sending_status_changed.emit(True)
         
@@ -205,6 +253,53 @@ class ChatController(QObject):
             on_completed=self._on_stream_completed,
             on_error=self._on_stream_error
         )
+    
+    def _check_rule_based_response(self, text: str) -> Optional[str]:
+        """
+        Check if the message matches any rule-based response pattern.
+        
+        Args:
+            text: User message text (stripped)
+        
+        Returns:
+            Response string if matched, None otherwise
+        """
+        import random
+        
+        text_lower = text.lower()
+        
+        for pattern, responses in self.RULE_BASED_RESPONSES:
+            if re.match(pattern, text_lower, re.IGNORECASE):
+                # 여러 응답 중 랜덤 선택
+                return random.choice(responses)
+        
+        return None
+    
+    def _handle_rule_based_response(self, user_text: str, response: str):
+        """
+        Handle a rule-based response with typing animation.
+        
+        Args:
+            user_text: Original user message
+            response: Pre-defined response text
+        """
+        # Add user message to UI
+        user_message = self._chat_widget.add_user_message(user_text)
+        self._message_history.append(user_message)
+        
+        # Add assistant response with typing animation
+        # 짧은 딜레이 후 응답 시작 (더 자연스럽게)
+        from PyQt6.QtCore import QTimer
+        
+        def show_response():
+            assistant_message = self._chat_widget.add_assistant_message(
+                response,
+                typing_animation=True,
+                on_complete=None
+            )
+            self._message_history.append(assistant_message)
+        
+        QTimer.singleShot(300, show_response)
     
     def cancel_sending(self):
         """Cancel the current message send operation."""

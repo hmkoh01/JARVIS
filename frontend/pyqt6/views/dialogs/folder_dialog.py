@@ -252,8 +252,11 @@ class FolderDialog(QDialog):
         """Create main content with splitter."""
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setStyleSheet("""
+            QSplitter {
+                background-color: #121212;
+            }
             QSplitter::handle {
-                background-color: #2a2a2a;
+                background-color: #121212;
                 width: 2px;
             }
         """)
@@ -309,17 +312,37 @@ class FolderDialog(QDialog):
                 border: none;
                 background-color: #1a1a1a;
                 color: #e8e8e8;
+                outline: none;
             }
             QListWidget::item {
                 padding: 10px 14px;
-                border-bottom: 1px solid #2a2a2a;
+                border-bottom: 1px solid #252525;
             }
             QListWidget::item:selected {
-                background-color: #383838;
+                background-color: #2d3d4d;
                 color: #ffffff;
             }
             QListWidget::item:hover:!selected {
-                background-color: #242424;
+                background-color: #222222;
+            }
+            QScrollBar:vertical {
+                background-color: #1a1a1a;
+                width: 10px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #3a3a3a;
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #4a4a4a;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background-color: #1a1a1a;
             }
         """)
         self._explorer_list.itemDoubleClicked.connect(self._on_explorer_double_click)
@@ -331,10 +354,11 @@ class FolderDialog(QDialog):
         """Create center action buttons."""
         widget = QWidget()
         widget.setFixedWidth(90)
-        widget.setStyleSheet("background-color: transparent;")
+        widget.setStyleSheet("background-color: #121212;")
         
         layout = QVBoxLayout(widget)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(8)
         
         btn_style = """
             QPushButton {{
@@ -342,8 +366,9 @@ class FolderDialog(QDialog):
                 color: {fg};
                 border: none;
                 border-radius: 8px;
-                padding: 10px;
+                padding: 12px 10px;
                 font-weight: 600;
+                font-size: 12px;
             }}
             QPushButton:hover {{
                 background-color: {hover};
@@ -352,14 +377,14 @@ class FolderDialog(QDialog):
         
         add_btn = QPushButton("▶ 추가")
         add_btn.setStyleSheet(btn_style.format(
-            bg="#3a3a3a", fg="#e8e8e8", hover="#4a4a4a"
+            bg="#2d4a2d", fg="#a8d5a8", hover="#3a5f3a"
         ))
         add_btn.clicked.connect(self._add_selected_to_basket)
         layout.addWidget(add_btn)
         
         remove_btn = QPushButton("◀ 제거")
         remove_btn.setStyleSheet(btn_style.format(
-            bg="#2a2a2a", fg="#9a9a9a", hover="#3a3a3a"
+            bg="#4a2d2d", fg="#d5a8a8", hover="#5f3a3a"
         ))
         remove_btn.clicked.connect(self._remove_from_basket)
         layout.addWidget(remove_btn)
@@ -404,14 +429,37 @@ class FolderDialog(QDialog):
                 border: none;
                 background-color: #1a1a1a;
                 color: #e8e8e8;
+                outline: none;
             }
             QListWidget::item {
                 padding: 10px 14px;
-                border-bottom: 1px solid #2a2a2a;
+                border-bottom: 1px solid #252525;
             }
             QListWidget::item:selected {
-                background-color: #3a3a3a;
+                background-color: #3d3d2d;
                 color: #ffffff;
+            }
+            QListWidget::item:hover:!selected {
+                background-color: #222222;
+            }
+            QScrollBar:vertical {
+                background-color: #1a1a1a;
+                width: 10px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #3a3a3a;
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #4a4a4a;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background-color: #1a1a1a;
             }
         """)
         self._basket_list.itemDoubleClicked.connect(self._on_basket_double_click)
