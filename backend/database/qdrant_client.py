@@ -178,38 +178,31 @@ class QdrantManager:
                     logger.warning(f"필터 생성 실패, 필터 없이 검색: {e}")
                     qdrant_filter = None
             
-            # 4. 두 검색을 한 번에 실행 (네트워크 효율성)
+            # 4. 두 검색을 별도로 실행 (qdrant-client 1.7+ 호환)
             try:
-                # SearchRequest 생성 시 올바른 파라미터 사용
-                request_kwargs = {}
-                if qdrant_filter:
-                    request_kwargs['filter'] = qdrant_filter
-
-                dense_request = models.SearchRequest(
-                    vector=models.NamedVector(
-                        name="dense",
-                        vector=query_dense
-                    ),
-                    limit=limit,
-                    with_payload=True,
-                    params=models.SearchParams(hnsw_ef=128),
-                    **request_kwargs
-                )
-                
-                sparse_request = models.SearchRequest(
-                    vector=models.NamedSparseVector(
-                        name="sparse",
-                        vector=sparse_vector
-                    ),
-                    limit=limit,
-                    with_payload=True,
-                    **request_kwargs
-                )
-                
-                dense_results, sparse_results = self.client.search_batch(
+                # Dense 검색
+                dense_response = self.client.query_points(
                     collection_name=self.collection_name,
-                    requests=[dense_request, sparse_request]
+                    query=query_dense,
+                    using="dense",
+                    limit=limit,
+                    with_payload=True,
+                    query_filter=qdrant_filter,
+                    search_params=models.SearchParams(hnsw_ef=128)
                 )
+                dense_results = dense_response.points if dense_response else []
+                
+                # Sparse 검색
+                sparse_response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=sparse_vector,
+                    using="sparse",
+                    limit=limit,
+                    with_payload=True,
+                    query_filter=qdrant_filter
+                )
+                sparse_results = sparse_response.points if sparse_response else []
+                
             except Exception as e:
                 logger.error(f"하이브리드 검색 오류: {e}")
                 # 하이브리드 검색 실패 시 dense 검색만 시도
@@ -250,10 +243,11 @@ class QdrantManager:
                     logger.warning(f"Dense 검색 필터 생성 실패: {e}")
                     qdrant_filter = None
             
-            # Dense 검색만 수행
-            results = self.client.search(
+            # Dense 검색만 수행 (qdrant-client 1.7+ 호환)
+            response = self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=models.NamedVector(name="dense", vector=query_dense),
+                query=query_dense,
+                using="dense",
                 limit=limit,
                 with_payload=True,
                 query_filter=qdrant_filter,
@@ -261,6 +255,7 @@ class QdrantManager:
             )
             
             # 결과를 표준 형식으로 변환
+            results = response.points if response else []
             return [
                 {'id': result.id, 'score': result.score, 'payload': result.payload}
                 for result in results

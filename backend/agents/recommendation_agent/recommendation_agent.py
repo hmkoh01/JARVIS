@@ -197,19 +197,23 @@ class RecommendationAgent(BaseAgent):
                         source='active_analysis'
                     )
             
-            # WebSocket으로 실시간 알림 전송
+            # WebSocket으로 실시간 알림 전송 (연결 없으면 큐에 저장됨)
             try:
                 from core.websocket_manager import get_websocket_manager
                 ws_manager = get_websocket_manager()
                 
                 # 생성된 추천 정보 조회
                 recommendation = self.sqlite.get_recommendation(user_id, rec_id)
-                if recommendation and ws_manager.is_user_connected(user_id):
+                if recommendation:
                     # user_id를 추천 객체에 추가 (WebSocket에서 사용)
                     recommendation['user_id'] = user_id
-                    await ws_manager.broadcast_recommendation(user_id, recommendation)
-            except Exception:
-                pass  # WebSocket 알림 전송 실패 무시
+                    sent = await ws_manager.broadcast_recommendation(user_id, recommendation)
+                    if sent:
+                        logger.info(f"[User {user_id}] WebSocket으로 추천 알림 전송됨")
+                    else:
+                        logger.info(f"[User {user_id}] WebSocket 연결 없음 - 추천이 큐에 저장됨")
+            except Exception as e:
+                logger.warning(f"[User {user_id}] WebSocket 알림 전송 오류: {e}")
             
             return True, f"새로운 추천이 생성되었습니다: {analysis_result.get('keyword')}"
             

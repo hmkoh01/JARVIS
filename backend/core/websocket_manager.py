@@ -57,7 +57,7 @@ class WebSocketManager:
         if user_id not in self.active_connections:
             # 연결이 없으면 큐에 저장 (중요한 메시지만)
             msg_type = message.get('type', '')
-            if msg_type in ['report_completed', 'report_failed', 'analysis_completed', 'analysis_failed']:
+            if msg_type in ['report_completed', 'report_failed', 'analysis_completed', 'analysis_failed', 'new_recommendation']:
                 if user_id not in self.message_queue:
                     self.message_queue[user_id] = []
                 self.message_queue[user_id].append(message)
