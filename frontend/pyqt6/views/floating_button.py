@@ -193,14 +193,14 @@ class FloatingButton(QWidget):
     
     def _update_rotation(self):
         """Smoothly update rotation angle for loading animation."""
-        old_angle = self._rotation_angle
         self._rotation_angle = (self._rotation_angle + 4) % 360
-        # 처음 3번만 로그 출력 (타이머 작동 확인용)
-        if not hasattr(self, '_rotation_log_count'):
-            self._rotation_log_count = 0
-        if self._rotation_log_count < 3:
-            print(f"🔄 _update_rotation: {old_angle:.1f} → {self._rotation_angle:.1f}")
-            self._rotation_log_count += 1
+        
+        # 디버그용: 일정 주기마다만 로그 출력 (약 0.5초에 1번)
+        if not hasattr(self, "_rot_tick"):
+            self._rot_tick = 0
+        self._rot_tick += 1
+        if self._rot_tick % 30 == 0:
+            print(f"🔄 tick={self._rot_tick}, angle={self._rotation_angle:.1f}")
         self.update()
     
     def set_loading(self, loading: bool):

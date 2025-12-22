@@ -189,13 +189,14 @@ class CodingAgent(BaseAgent):
         # 코드 유형 추측
         code_type = self._guess_code_type(question)
         
-        confirm_message = f"💻 **'{request_summary}'**에 대한 코드를 작성해드릴게요!\n\n"
+        # 아직 실제 코드 생성을 시작하지 않은 단계이므로 '작성 중' 뉘앙스는 피합니다.
+        confirm_message = f"💻 **'{request_summary}'**에 대한 예제 코드를 준비해드릴게요.\n\n"
         confirm_message += "코드에는 다음 내용이 포함됩니다:\n\n"
         confirm_message += "- 실행 가능한 Python 코드\n"
         confirm_message += "- 필요한 import 문\n"
         confirm_message += "- 에러 처리 및 주석\n"
         confirm_message += "- 사용 예시\n\n"
-        confirm_message += "코드를 작성해드릴까요?"
+        confirm_message += "지금 코드를 생성할까요?"
         
         return {
             **state,
@@ -527,6 +528,7 @@ class CodingAgent(BaseAgent):
 5. **메인 함수**: 가능하면 `if __name__ == "__main__":` 블록을 포함하세요.
 6. **타입 힌트**: 함수에 타입 힌트를 사용하세요.
 7. **PEP 8 준수**: Python 스타일 가이드를 준수하세요.
+8. **진행상황 문구 금지**: '코드를 작성하고 있어요...', '작성 중입니다' 같은 진행상황/스트리밍용 문구는 쓰지 말고, 완료된 결과만 작성하세요.
 
 {f"## 참고 컨텍스트{chr(10)}{context}" if context else ""}
 
@@ -636,9 +638,6 @@ class CodingAgent(BaseAgent):
         code_start = text.find('```')
         if code_start > 0:
             explanation = text[:code_start].strip()
-            # 너무 긴 설명은 자르기
-            if len(explanation) > 500:
-                explanation = explanation[:500] + "..."
             return explanation
         
         return ""
@@ -753,10 +752,15 @@ class CodingAgent(BaseAgent):
         response_parts.append(f"✅ **'{request_summary}'에 대한 코드 작성을 완료했습니다!**\n")
         
         if explanation:
+            # LLM이 간혹 진행상황 문구를 섞어 쓰는 경우가 있어 방어적으로 제거
+            cleaned = explanation.strip()
+            cleaned = re.sub(r"^\s*💻\s*코드를\s*작성하고\s*있어요\.\.\.\s*\n+", "", cleaned)
+            cleaned = re.sub(r"^\s*💻\s*코드를\s*작성하고\s*있어요\.\.\.\s*$", "", cleaned)
+            cleaned = cleaned.strip()
+            explanation = cleaned
             response_parts.append(f"📝 **코드 설명:**\n{explanation}\n")
         
         response_parts.append(f"💾 **저장된 파일:** `{file_name}`\n")
-        response_parts.append("아래 버튼을 눌러 코드 파일을 확인하세요.")
         
         return "\n".join(response_parts)
     

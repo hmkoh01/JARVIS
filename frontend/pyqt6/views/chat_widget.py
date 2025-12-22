@@ -723,7 +723,7 @@ class ChatWidget(QWidget):
     
     def start_streaming(self) -> Message:
         """
-        스트리밍 시작 - 빈 assistant 버블을 생성합니다.
+        스트리밍 시작 - 로딩 표시가 있는 assistant 버블을 생성합니다.
         
         Returns:
             생성된 Message 객체
@@ -732,14 +732,43 @@ class ChatWidget(QWidget):
         if hasattr(self, '_typing_timer') and self._typing_timer:
             self._typing_timer.stop()
             self._typing_timer = None
+        if hasattr(self, '_loading_dots_timer') and self._loading_dots_timer:
+            self._loading_dots_timer.stop()
+            self._loading_dots_timer = None
         
         # 버퍼 초기화
         self._chunk_buffer = ""
+        self._loading_dots_count = 0
+        self._content_started = False  # 실제 컨텐츠가 시작되었는지 추적
         
-        message = Message.assistant_message("")
+        # 로딩 표시로 시작
+        message = Message.assistant_message("⏳")
         bubble = self._add_message_bubble(message, animate=True)
         self._streaming_bubble = bubble
+        
+        # 로딩 점 애니메이션 시작
+        self._loading_dots_timer = QTimer(self)
+        self._loading_dots_timer.timeout.connect(self._update_loading_dots)
+        self._loading_dots_timer.start(400)  # 400ms 간격
+        
         return message
+    
+    def _update_loading_dots(self):
+        """로딩 중 점 애니메이션을 업데이트합니다."""
+        if not self._streaming_bubble or self._content_started:
+            # 컨텐츠가 시작되었으면 타이머 중지
+            if hasattr(self, '_loading_dots_timer') and self._loading_dots_timer:
+                self._loading_dots_timer.stop()
+                self._loading_dots_timer = None
+            return
+        
+        self._loading_dots_count = (self._loading_dots_count + 1) % 4
+        dots = "." * self._loading_dots_count
+        loading_text = f"⏳{dots}"
+        
+        # 버블 내용 업데이트
+        self._streaming_bubble.message.content = loading_text
+        self._streaming_bubble._update_content()
     
     @pyqtSlot(str)
     def append_streaming_chunk(self, chunk: str):
@@ -751,6 +780,16 @@ class ChatWidget(QWidget):
             chunk: 추가할 텍스트 청크
         """
         if self._streaming_bubble:
+            # 첫 컨텐츠가 도착하면 로딩 표시 제거
+            if not getattr(self, '_content_started', False):
+                self._content_started = True
+                # 로딩 타이머 중지
+                if hasattr(self, '_loading_dots_timer') and self._loading_dots_timer:
+                    self._loading_dots_timer.stop()
+                    self._loading_dots_timer = None
+                # 로딩 표시 제거 (메시지 내용 초기화)
+                self._streaming_bubble.message.content = ""
+            
             # 청크를 버퍼에 추가
             if not hasattr(self, '_chunk_buffer'):
                 self._chunk_buffer = ""
@@ -783,10 +822,17 @@ class ChatWidget(QWidget):
         """
         스트리밍을 완료하고 버블을 일반 메시지로 전환합니다.
         """
-        # 타이핑 타이머 정리
+        # 타이머들 정리
         if hasattr(self, '_typing_timer') and self._typing_timer:
             self._typing_timer.stop()
             self._typing_timer = None
+        if hasattr(self, '_loading_dots_timer') and self._loading_dots_timer:
+            self._loading_dots_timer.stop()
+            self._loading_dots_timer = None
+        
+        # 컨텐츠가 시작되지 않았으면 로딩 표시 제거
+        if not getattr(self, '_content_started', True) and self._streaming_bubble:
+            self._streaming_bubble.message.content = ""
         
         # 남은 버퍼 모두 표시
         if hasattr(self, '_chunk_buffer') and self._chunk_buffer and self._streaming_bubble:

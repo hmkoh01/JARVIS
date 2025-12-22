@@ -1137,6 +1137,15 @@ class JARVISApp:
         keyword = metadata.get('keyword', '')
         action = metadata.get('action', '')
         remaining_agents = metadata.get('remaining_agents', [])
+
+        # 어떤 작업을 건너뛰었는지 action 기반으로 문구를 정확히 표시
+        skipped_task_name_map = {
+            "confirm_report": "보고서 작업",
+            "confirm_analysis": "분석 작업",
+            "confirm_code": "코딩 작업",
+            "confirm_dashboard": "대시보드 작업",
+        }
+        skipped_task_name = skipped_task_name_map.get(action, f"'{keyword}' 작업" if keyword else "현재 작업")
         
         # 현재 에이전트를 건너뛰고 다음 에이전트로 진행
         if remaining_agents:
@@ -1153,7 +1162,7 @@ class JARVISApp:
             }
             self._execute_remaining_agents(
                 pending_data, 
-                intro_message=f"⏭️ '{keyword}' 작업을 건너뛰었어요. {agent_names} 작업을 진행할게요."
+                intro_message=f"⏭️ {skipped_task_name}을(를) 건너뛰었어요. {agent_names} 작업을 진행할게요."
             )
         else:
             # 남은 에이전트가 없으면 전체 종료
@@ -1163,7 +1172,7 @@ class JARVISApp:
             # 채팅에 취소 메시지 추가
             if hasattr(self._main_window, 'chat_widget'):
                 self._main_window.chat_widget.add_assistant_message(
-                    f"⏭️ '{keyword}' 작업을 건너뛰었어요. 모든 작업이 완료되었습니다.",
+                    f"⏭️ {skipped_task_name}을(를) 건너뛰었어요. 모든 작업이 완료되었습니다.",
                     typing_animation=True
                 )
     
@@ -1176,19 +1185,12 @@ class JARVISApp:
             keyword: 코드 생성 주제
             metadata: 메타데이터 (original_question 등 포함)
         """
-        # 토스트 표시
+        # 토스트 표시 (진행 중 표현은 '작성 중' 대신 '생성 진행'으로)
         self._toast_manager.info(
-            "💻 코드 작성 시작",
-            f"'{keyword}' 코드를 작성하고 있어요.\n완료되면 알려드릴게요.",
+            "💻 코드 생성",
+            f"'{keyword}' 코드 생성을 진행할게요.\n완료되면 알려드릴게요.",
             duration_ms=4000
         )
-        
-        # 채팅에 상태 메시지 추가
-        if hasattr(self._main_window, 'chat_widget'):
-            self._main_window.chat_widget.add_assistant_message(
-                "💻 코드를 작성하고 있어요...",
-                typing_animation=True
-            )
         
         # 플로팅 버튼 로딩 상태
         if self._floating_button:
