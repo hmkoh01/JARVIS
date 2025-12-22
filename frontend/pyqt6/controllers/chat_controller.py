@@ -54,7 +54,10 @@ class ChatController(QObject):
     sending_status_changed = pyqtSignal(bool)  # True = sending
     
     # 메타데이터 마커 패턴 (버튼 표시용 - 유일하게 필터링 필요)
-    METADATA_PATTERN = r'---METADATA---\n(.+?)(?:\n|$)'
+    # 새로운 형식: ---METADATA_START---{json}---METADATA_END---
+    METADATA_PATTERN = r'---METADATA_START---(.+?)---METADATA_END---'
+    # 레거시 형식도 지원 (호환성)
+    LEGACY_METADATA_PATTERN = r'---METADATA---\n(.+?)(?:\n|$)'
     
     # 확인 요청 감지 패턴 (채팅 텍스트에서 감지)
     CONFIRMATION_PATTERNS = [
@@ -255,14 +258,14 @@ class ChatController(QObject):
         스트리밍 버퍼를 파싱하여 메타데이터를 처리하고 표시할 텍스트만 반환.
         
         백엔드에서 친근한 상태 메시지를 보내므로 복잡한 필터링 불필요.
-        ---METADATA--- 마커만 처리하면 됨.
+        ---METADATA_START---{json}---METADATA_END--- 마커만 처리하면 됨.
         
         Returns:
             사용자에게 표시할 텍스트
         """
         result = ""
         
-        # ---METADATA--- 마커 처리
+        # 새로운 형식: ---METADATA_START---{json}---METADATA_END---
         while True:
             match = re.search(self.METADATA_PATTERN, self._stream_buffer)
             
@@ -279,21 +282,50 @@ class ChatController(QObject):
                     self._current_metadata = metadata
                     
                     action = metadata.get('action', '')
+                    # request_topic은 버튼 표시 없이 메시지만 표시 (주제를 물어보는 것)
                     if action in ('confirm_report', 'confirm_analysis', 'open_file', 'confirm_code', 'confirm_dashboard'):
                         self.confirm_action_requested.emit(metadata)
                         print(f"[ChatController] Metadata action: {action}")
+                    elif action == 'request_topic':
+                        print(f"[ChatController] Request topic - no confirmation needed")
                 except json.JSONDecodeError as e:
-                    print(f"[ChatController] Metadata parse error: {e}")
+                    print(f"[ChatController] Metadata parse error: {e}, json: {match.group(1)[:100]}")
                 
                 # 버퍼에서 메타데이터 제거
                 self._stream_buffer = self._stream_buffer[match.end():]
             else:
-                # 메타데이터가 없으면 불완전한 마커 대비 끝부분만 남김
-                # ---METADATA--- 길이가 14자이므로 20자 정도 남김
-                if len(self._stream_buffer) > 20:
-                    result += self._stream_buffer[:-20]
-                    self._stream_buffer = self._stream_buffer[-20:]
-                break
+                # 레거시 형식도 확인 (호환성)
+                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, self._stream_buffer)
+                if legacy_match:
+                    before_metadata = self._stream_buffer[:legacy_match.start()]
+                    if before_metadata:
+                        result += before_metadata
+                    
+                    try:
+                        metadata_json = legacy_match.group(1).strip()
+                        metadata = json.loads(metadata_json)
+                        self._current_metadata = metadata
+                        
+                        action = metadata.get('action', '')
+                        # request_topic은 버튼 표시 없이 메시지만 표시 (주제를 물어보는 것)
+                        if action in ('confirm_report', 'confirm_analysis', 'open_file', 'confirm_code', 'confirm_dashboard'):
+                            self.confirm_action_requested.emit(metadata)
+                            print(f"[ChatController] Legacy metadata action: {action}")
+                        elif action == 'request_topic':
+                            print(f"[ChatController] Legacy request topic - no confirmation needed")
+                    except json.JSONDecodeError as e:
+                        print(f"[ChatController] Legacy metadata parse error: {e}")
+                    
+                    self._stream_buffer = self._stream_buffer[legacy_match.end():]
+                else:
+                    # 메타데이터 마커가 없으면 불완전한 마커 대비 끝부분만 남김
+                    # ---METADATA_START--- 길이가 19자, ---METADATA_END--- 길이가 17자
+                    # 안전하게 40자 정도 남김
+                    marker_buffer_size = 40
+                    if len(self._stream_buffer) > marker_buffer_size:
+                        result += self._stream_buffer[:-marker_buffer_size]
+                        self._stream_buffer = self._stream_buffer[-marker_buffer_size:]
+                    break
         
         return result
     
@@ -334,11 +366,36 @@ class ChatController(QObject):
         """Called when streaming completes."""
         print("[ChatController] Streaming completed")
         
-        # 남은 버퍼 처리 (메타데이터 마커 제외하고 모두 표시)
+        # 남은 버퍼에서 메타데이터 추출 및 처리
         if self._stream_buffer.strip():
             remaining = self._stream_buffer
-            # ---METADATA--- 마커와 그 내용만 제거
-            remaining = re.sub(self.METADATA_PATTERN, '', remaining, flags=re.DOTALL)
+            
+            # 새로운 형식의 메타데이터 추출 및 처리
+            metadata_match = re.search(self.METADATA_PATTERN, remaining)
+            if metadata_match:
+                try:
+                    metadata_json = metadata_match.group(1).strip()
+                    metadata = json.loads(metadata_json)
+                    self._current_metadata = metadata
+                    print(f"[ChatController] Final metadata extracted: {metadata.get('action', 'unknown')}")
+                except json.JSONDecodeError as e:
+                    print(f"[ChatController] Final metadata parse error: {e}")
+            
+            # 레거시 형식도 확인
+            if not metadata_match:
+                legacy_match = re.search(self.LEGACY_METADATA_PATTERN, remaining)
+                if legacy_match:
+                    try:
+                        metadata_json = legacy_match.group(1).strip()
+                        metadata = json.loads(metadata_json)
+                        self._current_metadata = metadata
+                        print(f"[ChatController] Final legacy metadata extracted: {metadata.get('action', 'unknown')}")
+                    except json.JSONDecodeError as e:
+                        print(f"[ChatController] Final legacy metadata parse error: {e}")
+            
+            # 메타데이터 마커 제거하고 남은 텍스트만 표시
+            remaining = re.sub(self.METADATA_PATTERN, '', remaining)
+            remaining = re.sub(self.LEGACY_METADATA_PATTERN, '', remaining, flags=re.DOTALL)
             remaining = remaining.strip()
             if remaining:
                 self._chat_widget.append_streaming_chunk(remaining)
@@ -358,12 +415,16 @@ class ChatController(QObject):
         self._is_sending = False
         self.sending_status_changed.emit(False)
         
-        # 확인이 필요한 메타데이터가 있으면 처리
+        # 확인이 필요한 메타데이터가 있으면 처리 (버튼 표시)
         if self._current_metadata:
             action = self._current_metadata.get('action', '')
+            # request_topic은 버튼 없이 메시지만 표시
             if action in ('confirm_report', 'confirm_analysis', 'confirm_code', 'confirm_dashboard'):
+                print(f"[ChatController] Emitting confirm_action_requested for action: {action}")
                 self.confirm_action_requested.emit(self._current_metadata)
                 return
+            elif action == 'request_topic':
+                print(f"[ChatController] Request topic - no confirmation button needed")
         
         # 메타데이터가 없으면 텍스트에서 확인 요청 감지
         if full_response_text:

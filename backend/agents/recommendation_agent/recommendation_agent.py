@@ -320,17 +320,17 @@ class RecommendationAgent(BaseAgent):
             # 응답 파싱
             result_text = self._extract_llm_response_text(response)
             if not result_text:
+                logger.warning("LLM 응답 텍스트가 비어있습니다.")
                 return None
             
             # JSON 파싱 (로버스트 처리)
             result = self._parse_json_safely(result_text)
+            if result is None:
+                logger.warning("LLM 응답에서 유효한 JSON을 추출하지 못했습니다.")
             return result
             
-        except json.JSONDecodeError as e:
-            logger.error(f"LLM 응답 JSON 파싱 오류: {e}")
-            return None
         except Exception as e:
-            logger.error(f"LLM 분석 중 오류: {e}")
+            logger.error(f"LLM 분석 중 오류: {e}", exc_info=True)
             return None
     
     def _prepare_log_summary(
@@ -371,20 +371,32 @@ class RecommendationAgent(BaseAgent):
     def _extract_llm_response_text(self, response) -> Optional[str]:
         """Gemini 응답에서 텍스트를 안전하게 추출합니다."""
         try:
+            if response is None:
+                logger.warning("Gemini 응답이 None입니다.")
+                return None
+            
             # 먼저 response.text를 시도 (가장 간단하고 안정적인 방법)
             try:
                 text = getattr(response, "text", None)
                 if text and text.strip():
                     return text.strip()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"response.text 접근 실패: {e}")
             
             # Fallback: candidates에서 추출
             candidates = getattr(response, "candidates", None) or []
             if not candidates:
+                # 응답은 있지만 candidates가 없는 경우 - 안전 필터 차단 가능성
+                logger.warning("Gemini 응답에 candidates가 없습니다. 응답 객체: %s", type(response))
                 return None
             
             candidate = candidates[0]
+            
+            # finish_reason 확인
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason and str(finish_reason) not in ["STOP", "1", "FinishReason.STOP"]:
+                logger.warning(f"Gemini 응답 종료 이유: {finish_reason}")
+            
             content_parts = getattr(getattr(candidate, "content", None), "parts", None) or []
             
             extracted_chunks = []
@@ -396,6 +408,7 @@ class RecommendationAgent(BaseAgent):
             if extracted_chunks:
                 return "\n".join(extracted_chunks).strip()
             
+            logger.warning("Gemini 응답에서 텍스트를 추출할 수 없습니다.")
             return None
             
         except Exception as e:
@@ -410,8 +423,11 @@ class RecommendationAgent(BaseAgent):
         - JSON 객체만 추출
         - 불완전한 JSON 복구 시도
         """
-        if not text:
+        if not text or not text.strip():
+            logger.warning("LLM 응답이 비어있습니다.")
             return None
+        
+        text = text.strip()
         
         try:
             # 1단계: 마크다운 코드 블록 제거 (```json ... ``` 또는 ``` ... ```)
@@ -439,8 +455,9 @@ class RecommendationAgent(BaseAgent):
                     except json.JSONDecodeError:
                         pass
             
-            # 최종: 원본 텍스트 파싱 시도
-            return json.loads(text)
+            # JSON 객체를 찾지 못한 경우
+            logger.warning(f"LLM 응답에서 JSON 객체를 찾을 수 없습니다. 응답 시작부분: {text[:200]}...")
+            return None
             
         except json.JSONDecodeError as e:
             logger.error(f"LLM 응답 JSON 파싱 오류: {e}")

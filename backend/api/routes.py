@@ -213,8 +213,10 @@ async def unified_message(message_request: MessageRequest, request: Request):
                     # 메타데이터 전송 (버튼 표시용 - 필요한 경우만)
                     action = final_metadata.get("action", "")
                     if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
-                        metadata_json = json_module.dumps(final_metadata, ensure_ascii=False)
-                        yield f"---METADATA---\n{metadata_json}\n"
+                        # JSON을 한 줄로 직렬화 (줄바꿈 없이)
+                        metadata_json = json_module.dumps(final_metadata, ensure_ascii=False, separators=(',', ':'))
+                        # 명확한 시작/끝 마커 사용
+                        yield f"\n---METADATA_START---{metadata_json}---METADATA_END---\n"
                         logger.info(f"[MAS] 메타데이터 전송: action={action}")
                         
                 except Exception as e:
@@ -391,8 +393,10 @@ async def continue_agents(request_data: dict, request: Request):
                 # 메타데이터 전송 (버튼 표시용 - 필요한 경우만)
                 action = final_metadata.get("action", "")
                 if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
-                    metadata_json = json_module.dumps(final_metadata, ensure_ascii=False)
-                    yield f"---METADATA---\n{metadata_json}\n"
+                    # JSON을 한 줄로 직렬화 (줄바꿈 없이)
+                    metadata_json = json_module.dumps(final_metadata, ensure_ascii=False, separators=(',', ':'))
+                    # 명확한 시작/끝 마커 사용
+                    yield f"\n---METADATA_START---{metadata_json}---METADATA_END---\n"
                     logger.info(f"[MAS-CONTINUE] 메타데이터 전송: action={action}")
                     
             except Exception as e:
@@ -619,8 +623,10 @@ async def process_message(request_data: dict, request: Request):
                     action = response_metadata.get("action", "")
                     if action in ("open_file", "confirm_report", "request_topic", "confirm_analysis"):
                         import json as json_module
-                        metadata_json = json_module.dumps(response_metadata, ensure_ascii=False)
-                        yield f"\n\n---METADATA---\n{metadata_json}"
+                        # JSON을 한 줄로 직렬화 (줄바꿈 없이)
+                        metadata_json = json_module.dumps(response_metadata, ensure_ascii=False, separators=(',', ':'))
+                        # 명확한 시작/끝 마커 사용
+                        yield f"\n\n---METADATA_START---{metadata_json}---METADATA_END---"
                         logger.info(f"스트리밍 메타데이터 전송: action={action}")
                     
                     logger.info(
