@@ -149,7 +149,13 @@ async def unified_message(message_request: MessageRequest, request: Request):
                             total = event.get("total", 1)
                             
                             emoji, action = agent_friendly_names.get(agent, ("🤖", "작업을 처리"))
-                            
+
+                            # NOTE:
+                            # coding 에이전트의 경우, "💻 코드를 작성하고 있어요..." 같은 진행 문구가
+                            # 확인/완료 메시지 앞에 붙어 UX가 어색해지는 문제가 있어 상태 메시지를 생략합니다.
+                            if agent == "coding":
+                                continue
+
                             if total > 1:
                                 yield f"{emoji} [{order}/{total}] {agent} 에이전트가 {action}하고 있어요...\n\n"
                             else:
@@ -365,7 +371,11 @@ async def continue_agents(request_data: dict, request: Request):
                         total = event.get("total", 1)
                         
                         emoji, action = agent_friendly_names.get(agent, ("🤖", "작업을 처리"))
-                        
+
+                        # coding 에이전트의 진행상황 문구는 채팅 흐름을 어색하게 만들 수 있어 생략
+                        if agent == "coding":
+                            continue
+
                         if total > 1:
                             yield f"{emoji} [{order}/{total}] {agent} 에이전트가 {action}하고 있어요...\n\n"
                         else:

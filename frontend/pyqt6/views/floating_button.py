@@ -271,6 +271,20 @@ class FloatingButton(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(center, outer_radius, outer_radius)
+
+        # 1-1. Loading spinner arc (more visible motion cue)
+        if self._is_loading:
+            arc_pen = QPen(icon_color, max(2.0, ring_width * 0.45))
+            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(arc_pen)
+            arc_rect = button_rect.adjusted(
+                ring_width * 0.55, ring_width * 0.55, -ring_width * 0.55, -ring_width * 0.55
+            )
+            # Qt uses 1/16 degree units, and the angle direction differs from math radians.
+            # We negate to match the visual rotation direction.
+            start_angle = int(-self._rotation_angle * 16)
+            span_angle = int(70 * 16)
+            painter.drawArc(arc_rect, start_angle, span_angle)
         
         # 2. Calculate line endpoint based on rotation angle
         angle_rad = math.radians(self._rotation_angle)
@@ -280,6 +294,13 @@ class FloatingButton(QWidget):
         end_y = center.y() + line_length * math.sin(angle_rad)
         end_point = QPointF(end_x, end_y)
         
+        # Debug: confirm paint is actually happening (about once per ~0.5s)
+        if hasattr(self, "_rot_tick") and self._rot_tick % 30 == 0:
+            print(
+                f"🎨 paint tick={self._rot_tick}, loading={self._is_loading}, "
+                f"angle={self._rotation_angle:.1f}, end=({end_point.x():.1f},{end_point.y():.1f})"
+            )
+
         # 3. Line from center to inner circle (with round cap)
         line_pen = QPen(icon_color, line_width)
         line_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
