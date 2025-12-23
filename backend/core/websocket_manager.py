@@ -133,7 +133,6 @@ class WebSocketManager:
         
         message = {
             "type": "report_completed",
-            "success": True,  # 프론트엔드에서 필요
             "keyword": keyword,
             "file_path": file_path,
             "file_name": file_name,
@@ -160,9 +159,7 @@ class WebSocketManager:
         
         message = {
             "type": "report_failed",
-            "success": False,  # 프론트엔드에서 필요
             "keyword": keyword,
-            "message": reason,  # 프론트엔드 호환 (reason -> message)
             "reason": reason,
             "timestamp": datetime.now().isoformat()
         }
@@ -188,7 +185,6 @@ class WebSocketManager:
         
         message = {
             "type": "analysis_completed",
-            "success": True,  # 프론트엔드에서 필요
             "analysis_type": analysis_type,
             "title": title,
             "analysis_id": analysis_id,
@@ -216,10 +212,8 @@ class WebSocketManager:
         
         message = {
             "type": "analysis_failed",
-            "success": False,  # 프론트엔드에서 필요
             "analysis_type": analysis_type,
             "title": title,
-            "message": reason,  # 프론트엔드 호환
             "reason": reason,
             "timestamp": datetime.now().isoformat()
         }
